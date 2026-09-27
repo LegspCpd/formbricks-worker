@@ -128,13 +128,18 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 |--------|------|------|
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（第二步创建） | `xxxxxxxxxxxxxxxx` |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账号 ID（Dashboard 右侧栏可见） | `xxxxxxxxxxxxxxxx` |
-| `DATABASE_URL` | Supabase PostgreSQL 连接字符串 | `postgresql://postgres:password@db.xxx.supabase.co:5432/postgres` |
+| `DATABASE_URL` | PostgreSQL 连接字符串（Supabase 或 Neon） | 见下方说明 |
 | `WEBAPP_URL` | 你的应用 URL | `https://your-app.workers.dev` |
 | `BETTER_AUTH_URL` | 同 WEBAPP_URL | `https://your-app.workers.dev` |
 | `BETTER_AUTH_SECRET` | 随机密钥（32位以上） | `openssl rand -hex 32` |
 | `ENCRYPTION_KEY` | 加密密钥（32位十六进制） | `openssl rand -hex 32` |
 | `CRON_SECRET` | Cron 任务密钥 | `openssl rand -hex 32` |
 | `LOG_LEVEL` | 日志级别 | `info` |
+
+**数据库连接字符串格式**：
+
+- **Supabase**：`postgresql://postgres:password@db.xxx.supabase.co:5432/postgres`
+- **Neon**：`postgresql://user:password@ep-xxx.region.aws.neon.tech/dbname?sslmode=require`
 
 > **全自动初始化**：构建过程中会自动完成以下操作，无需手动执行：
 > - 数据库迁移（`prisma migrate deploy`）
