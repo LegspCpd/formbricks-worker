@@ -1,0 +1,524 @@
+import jwt, { JwtPayload, SignOptions } from "jsonwebtoken";
+import { createHmac } from "node:crypto";
+import { prisma } from "@formbricks/database";
+import { logger } from "@formbricks/logger";
+import { AUTH_SECRET, ENCRYPTION_KEY } from "@/lib/constants";
+import { constantTimeEqual, symmetricDecrypt, symmetricEncrypt } from "@/lib/crypto";
+import { TGatewayAuthService, getGatewayAuthServiceTokenPurpose } from "@/modules/gateway-auth/lib/service";
+
+const FEEDBACK_RECORDS_GATEWAY_TOKEN_TTL_SECONDS = 60 * 10;
+
+/** Names both accepted variables: the alias is undocumented, but an operator hitting this needs it. */
+const NO_AUTH_SECRET_ERROR = "No auth secret set (BETTER_AUTH_SECRET or NEXTAUTH_SECRET)";
+
+// Helper function to decrypt with fallback to plain text
+const decryptWithFallback = (encryptedText: string, key: string): string => {
+  try {
+    return symmetricDecrypt(encryptedText, key);
+  } catch {
+    return encryptedText; // Return as-is if decryption fails (legacy format)
+  }
+};
+
+/**
+ * Resolve the signing secret, or refuse to mint/verify.
+ *
+ * Resolved per call rather than captured at module scope, for the reason `pin-token.ts` spells out:
+ * reading `@/lib/constants` at import time makes every unrelated test that mocks it — and transitively
+ * imports this module — fail Vitest's missing-export check. It also keeps the guard observable to
+ * `jwt.test.ts`, which drives it by swapping the constant.
+ */
+const requireAuthSecret = (): string => {
+  if (!AUTH_SECRET) {
+    throw new Error(NO_AUTH_SECRET_ERROR);
+  }
+
+  return AUTH_SECRET;
+};
+
+/**
+ * Every token minted here is signed with the same auth secret, so the signature alone proves
+ * nothing about *which* flow a token was issued for. Tokens that grant something must therefore carry
+ * an explicit `purpose` claim and the verifier must require it, otherwise a token handed out by one
+ * flow is replayable against another (e.g. an email- or invite-token accepted as proof of email
+ * verification for a link survey).
+ */
+export const LINK_SURVEY_EMAIL_VERIFICATION_PURPOSE = "link_survey_email_verification";
+export const EMAIL_DISPLAY_TOKEN_PURPOSE = "email_display";
+export const EMAIL_CHANGE_TOKEN_PURPOSE = "email_change";
+
+const LINK_SURVEY_TOKEN_TTL = "7d";
+const EMAIL_DISPLAY_TOKEN_TTL = "1d";
+const EMAIL_CHANGE_TOKEN_TTL = "1d";
+
+export const VERIFICATION_TOKEN_PURPOSES = ["email_verification", "sso_recovery"] as const;
+
+export type TVerificationTokenPurpose = (typeof VERIFICATION_TOKEN_PURPOSES)[number];
+
+export type TVerifyTokenPayload = JwtPayload & {
+  id: string;
+  email: string;
+  purpose: TVerificationTokenPurpose;
+};
+
+type TVerificationTokenOptions = SignOptions & {
+  purpose?: TVerificationTokenPurpose;
+};
+
+const DEFAULT_VERIFICATION_TOKEN_PURPOSE: TVerificationTokenPurpose = "email_verification";
+
+const getVerificationTokenPurpose = (purpose: unknown): TVerificationTokenPurpose => {
+  if (purpose && VERIFICATION_TOKEN_PURPOSES.includes(purpose as TVerificationTokenPurpose)) {
+    return purpose as TVerificationTokenPurpose;
+  }
+
+  return DEFAULT_VERIFICATION_TOKEN_PURPOSE;
+};
+
+export const createToken = (userId: string, options: TVerificationTokenOptions = {}): string => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const encryptedUserId = symmetricEncrypt(userId, ENCRYPTION_KEY);
+  const { purpose = DEFAULT_VERIFICATION_TOKEN_PURPOSE, ...jwtOptions } = options;
+
+  return jwt.sign({ id: encryptedUserId, purpose }, authSecret, jwtOptions);
+};
+
+export const createGatewayServiceToken = (
+  userId: string,
+  service: TGatewayAuthService
+): {
+  token: string;
+  expiresAt: string;
+} => {
+  const authSecret = requireAuthSecret();
+
+  const token = jwt.sign({ purpose: getGatewayAuthServiceTokenPurpose(service) }, authSecret, {
+    algorithm: "HS256",
+    expiresIn: FEEDBACK_RECORDS_GATEWAY_TOKEN_TTL_SECONDS,
+    subject: userId,
+  });
+
+  const decodedToken = jwt.decode(token);
+  if (!decodedToken || typeof decodedToken !== "object" || typeof decodedToken.exp !== "number") {
+    throw new Error("Failed to create feedback records gateway token");
+  }
+
+  return {
+    token,
+    expiresAt: new Date(decodedToken.exp * 1000).toISOString(),
+  };
+};
+
+export const createFeedbackRecordsGatewayToken = (
+  userId: string
+): {
+  token: string;
+  expiresAt: string;
+} => {
+  return createGatewayServiceToken(userId, "feedbackRecords");
+};
+
+export const createTokenForLinkSurvey = (surveyId: string, userEmail: string): string => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const encryptedEmail = symmetricEncrypt(userEmail, ENCRYPTION_KEY);
+  return jwt.sign(
+    { email: encryptedEmail, surveyId, purpose: LINK_SURVEY_EMAIL_VERIFICATION_PURPOSE },
+    authSecret,
+    { expiresIn: LINK_SURVEY_TOKEN_TTL }
+  );
+};
+
+/**
+ * Fingerprint of the credential state an email-change token was minted against.
+ *
+ * The email-change link is deliberately consumable without a session — the user clicks it from the new
+ * mailbox, often in another browser — so for its whole lifetime the token *is* a credential that can
+ * move the account's login address, and with it where every future password-reset link is delivered. A
+ * bare `{ id, email }` JWT therefore outlived the events that are supposed to end an attacker's hold on
+ * the account: a password recovery revoked every session and rotated the password, yet a token minted
+ * before it stayed usable for the rest of its 24 hours, long enough to point the account at an
+ * attacker-controlled mailbox and reset the password back (ENG-2106, CWE-613).
+ *
+ * Binding the token to the login email plus the last write to the user's `credential` account ties it
+ * to that state, so a password reset or change — or any other email change — re-keys the fingerprint and
+ * kills every token issued before it. It also makes the link single-use for free: consuming it changes
+ * the email.
+ *
+ * The credential's `updatedAt` is the binding, deliberately not its password hash: no password-derived
+ * material then travels in the token at all, and it still invalidates a reset that happens to set the
+ * *same* password, which a hash would not. This relies on every write to that row going through Prisma,
+ * which applies `@updatedAt` — keep it that way; a raw-SQL password write would leave stale tokens live.
+ *
+ * HMAC rather than a bare hash so the claim, which travels in a readable JWT payload, cannot be
+ * recomputed or probed by whoever holds the token.
+ */
+const getEmailChangeCredentialFingerprint = async (userId: string): Promise<string> => {
+  const authSecret = requireAuthSecret();
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      email: true,
+      // Scoped to the full `(provider, providerAccountId)` unique tuple, not just the provider: this
+      // must resolve to the one row Better Auth bumps `updatedAt` on for a password write — the same
+      // row getCredentialPasswordHash reads. Matching on `provider` alone would take an arbitrary
+      // first row if a user ever ended up with a second `credential` row under a different
+      // providerAccountId, binding the token to a timestamp that never moves on a reset.
+      accounts: {
+        where: { provider: "credential", providerAccountId: userId },
+        select: { updatedAt: true },
+      },
+    },
+  });
+
+  const credentialUpdatedAt = user?.accounts?.[0]?.updatedAt;
+
+  // Fail closed: with no credential account there is nothing to bind to, and an email change is only
+  // ever offered to credential users in the first place.
+  if (!user || !credentialUpdatedAt) {
+    throw new Error("Email change token cannot be bound: user has no credential account");
+  }
+
+  return createHmac("sha256", authSecret)
+    .update(`${userId}:${user.email}:${credentialUpdatedAt.toISOString()}`)
+    .digest("hex");
+};
+
+export const verifyEmailChangeToken = async (token: string): Promise<{ id: string; email: string }> => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const payload = jwt.verify(token, authSecret, { algorithms: ["HS256"] }) as {
+    id: string;
+    email: string;
+    purpose?: string;
+    fingerprint?: string;
+  };
+
+  if (!payload?.id || !payload?.email) {
+    throw new Error("Token is invalid or missing required fields");
+  }
+
+  // Every token in this file is signed with the same auth secret, so require the claims that say
+  // this one was minted for an email change and against which credential state. Both are mandatory —
+  // treating a missing claim as legacy-and-therefore-acceptable would leave exactly the unbound token
+  // this check exists to reject. Links already in flight when this shipped stop working; re-requesting
+  // the change issues a bound one.
+  if (payload.purpose !== EMAIL_CHANGE_TOKEN_PURPOSE || !payload.fingerprint) {
+    throw new Error("Token is invalid or missing required fields");
+  }
+
+  // Decrypt both fields with fallback
+  const decryptedId = decryptWithFallback(payload.id, ENCRYPTION_KEY);
+  const decryptedEmail = decryptWithFallback(payload.email, ENCRYPTION_KEY);
+
+  const currentFingerprint = await getEmailChangeCredentialFingerprint(decryptedId);
+
+  if (!constantTimeEqual(payload.fingerprint, currentFingerprint, "hex")) {
+    throw new Error("Email change token is no longer valid");
+  }
+
+  return {
+    id: decryptedId,
+    email: decryptedEmail,
+  };
+};
+
+export const verifyGatewayServiceToken = (
+  token: string,
+  service: TGatewayAuthService
+): {
+  userId: string;
+} => {
+  const authSecret = requireAuthSecret();
+
+  const payload = jwt.verify(token, authSecret, { algorithms: ["HS256"] }) as JwtPayload & {
+    purpose?: string;
+    sub?: string;
+  };
+
+  if (payload.purpose !== getGatewayAuthServiceTokenPurpose(service) || !payload.sub) {
+    throw new Error("Invalid feedback records gateway token");
+  }
+
+  return {
+    userId: payload.sub,
+  };
+};
+
+export const verifyFeedbackRecordsGatewayToken = (
+  token: string
+): {
+  userId: string;
+} => {
+  return verifyGatewayServiceToken(token, "feedbackRecords");
+};
+
+export const createEmailChangeToken = async (userId: string, email: string): Promise<string> => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const encryptedUserId = symmetricEncrypt(userId, ENCRYPTION_KEY);
+  const encryptedEmail = symmetricEncrypt(email, ENCRYPTION_KEY);
+
+  const payload = {
+    id: encryptedUserId,
+    email: encryptedEmail,
+    purpose: EMAIL_CHANGE_TOKEN_PURPOSE,
+    // Ties the token to the credential state it was requested under; see
+    // getEmailChangeCredentialFingerprint.
+    fingerprint: await getEmailChangeCredentialFingerprint(userId),
+  };
+
+  return jwt.sign(payload, authSecret, {
+    expiresIn: EMAIL_CHANGE_TOKEN_TTL,
+  });
+};
+
+export const createEmailToken = (email: string): string => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const encryptedEmail = symmetricEncrypt(email, ENCRYPTION_KEY);
+  // Handed out by an unauthenticated action purely so the "check your inbox" screen can echo the
+  // address back. It must therefore be inert everywhere else: scope it with a purpose and a TTL.
+  return jwt.sign({ email: encryptedEmail, purpose: EMAIL_DISPLAY_TOKEN_PURPOSE }, authSecret, {
+    expiresIn: EMAIL_DISPLAY_TOKEN_TTL,
+  });
+};
+
+export const getEmailFromEmailToken = (token: string): string => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const payload = jwt.verify(token, authSecret, { algorithms: ["HS256"] }) as JwtPayload & {
+    email: string;
+    purpose?: string;
+  };
+
+  // Tokens minted before the purpose claim existed have none; anything else was issued for a
+  // different flow and must not resolve to an email here.
+  if (payload.purpose !== undefined && payload.purpose !== EMAIL_DISPLAY_TOKEN_PURPOSE) {
+    throw new Error("Invalid token");
+  }
+
+  return decryptWithFallback(payload.email, ENCRYPTION_KEY);
+};
+
+export const createInviteToken = (inviteId: string, email: string, options = {}): string => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  const encryptedInviteId = symmetricEncrypt(inviteId, ENCRYPTION_KEY);
+  const encryptedEmail = symmetricEncrypt(email, ENCRYPTION_KEY);
+  return jwt.sign({ inviteId: encryptedInviteId, email: encryptedEmail }, authSecret, options);
+};
+
+export const verifyTokenForLinkSurvey = (token: string, surveyId: string): string | null => {
+  const authSecret = AUTH_SECRET;
+  if (!authSecret) {
+    return null;
+  }
+
+  try {
+    let payload: JwtPayload & { email: string; surveyId?: string; purpose?: string };
+    // Legacy tokens carry no `surveyId` claim; they are bound to one survey by their signing key
+    // (auth secret + `surveyId`) instead, so that path needs no claim check.
+    let isBoundBySigningKey = false;
+
+    // Try primary method first (consistent secret)
+    try {
+      payload = jwt.verify(token, authSecret, { algorithms: ["HS256"] }) as JwtPayload & {
+        email: string;
+        surveyId: string;
+      };
+    } catch (primaryError) {
+      logger.error(primaryError, "Token verification failed with primary method");
+
+      // Fallback to legacy method (surveyId-based secret)
+      try {
+        payload = jwt.verify(token, authSecret + surveyId, { algorithms: ["HS256"] }) as JwtPayload & {
+          email: string;
+        };
+        isBoundBySigningKey = true;
+      } catch (legacyError) {
+        logger.error(legacyError, "Token verification failed with legacy method");
+        throw new Error("Invalid token");
+      }
+    }
+
+    // A token verified with the plain secret MUST name this survey. Accepting a missing `surveyId`
+    // here let any auth-secret-signed token that happens to carry an `email` claim — e.g. the one
+    // `createEmailToken` hands out for an arbitrary address — pass as a verified email for any survey.
+    if (!isBoundBySigningKey && payload.surveyId !== surveyId) {
+      return null;
+    }
+
+    // Reject tokens explicitly minted for a different flow. Tokens issued before the purpose claim
+    // existed have none; they are already survey-bound by the check above.
+    if (payload.purpose !== undefined && payload.purpose !== LINK_SURVEY_EMAIL_VERIFICATION_PURPOSE) {
+      return null;
+    }
+
+    const { email } = payload;
+    if (!email) {
+      return null;
+    }
+
+    // Decrypt email with fallback to plain text
+    if (!ENCRYPTION_KEY) {
+      return email; // Return as-is if encryption key not set
+    }
+
+    return decryptWithFallback(email, ENCRYPTION_KEY);
+  } catch (error) {
+    logger.error(error, "Survey link token verification failed");
+    return null;
+  }
+};
+
+// Helper function to get user email for legacy verification
+const getUserEmailForLegacyVerification = async (
+  token: string,
+  userId?: string
+): Promise<{ userId: string; userEmail: string }> => {
+  if (!userId) {
+    const decoded = jwt.decode(token);
+
+    // Validate decoded token structure before using it
+    if (
+      !decoded ||
+      typeof decoded !== "object" ||
+      !decoded.id ||
+      typeof decoded.id !== "string" ||
+      decoded.id.trim() === ""
+    ) {
+      logger.error("Invalid token: missing or invalid user ID");
+      throw new Error("Invalid token");
+    }
+
+    userId = decoded.id;
+  }
+
+  const decryptedId = decryptWithFallback(userId, ENCRYPTION_KEY);
+
+  // Validate decrypted ID before database query
+  if (!decryptedId || typeof decryptedId !== "string" || decryptedId.trim() === "") {
+    logger.error("Invalid token: missing or invalid user ID");
+    throw new Error("Invalid token");
+  }
+
+  const foundUser = await prisma.user.findUnique({
+    where: { id: decryptedId },
+  });
+
+  if (!foundUser) {
+    const errorMessage = "User not found";
+    logger.error(errorMessage);
+    throw new Error(errorMessage);
+  }
+
+  return { userId: decryptedId, userEmail: foundUser.email };
+};
+
+export const verifyToken = async (token: string): Promise<TVerifyTokenPayload> => {
+  const authSecret = requireAuthSecret();
+
+  let payload: JwtPayload & { id: string };
+  let userData: { userId: string; userEmail: string } | null = null;
+
+  // Try new method first, with smart fallback to legacy
+  try {
+    payload = jwt.verify(token, authSecret, { algorithms: ["HS256"] }) as JwtPayload & {
+      id: string;
+    };
+  } catch (newMethodError) {
+    logger.error(newMethodError, "Token verification failed with new method");
+
+    // Get user email for legacy verification
+    userData = await getUserEmailForLegacyVerification(token);
+
+    // Try legacy verification with email-based secret
+    try {
+      payload = jwt.verify(token, authSecret + userData.userEmail, {
+        algorithms: ["HS256"],
+      }) as JwtPayload & {
+        id: string;
+      };
+    } catch (legacyMethodError) {
+      logger.error(legacyMethodError, "Token verification failed with legacy method");
+      throw new Error("Invalid token");
+    }
+  }
+
+  if (!payload?.id) {
+    throw new Error("Invalid token");
+  }
+
+  // Get user email if we don't have it yet
+  userData ??= await getUserEmailForLegacyVerification(token, payload.id);
+
+  return {
+    id: userData.userId,
+    email: userData.userEmail,
+    purpose: getVerificationTokenPurpose(payload.purpose),
+  };
+};
+
+export const verifyInviteToken = (token: string): { inviteId: string; email: string } => {
+  const authSecret = requireAuthSecret();
+
+  if (!ENCRYPTION_KEY) {
+    throw new Error("ENCRYPTION_KEY is not set");
+  }
+
+  try {
+    const payload = jwt.verify(token, authSecret, { algorithms: ["HS256"] }) as JwtPayload & {
+      inviteId: string;
+      email: string;
+    };
+
+    const { inviteId: encryptedInviteId, email: encryptedEmail } = payload;
+
+    if (!encryptedInviteId || !encryptedEmail) {
+      throw new Error("Invalid token");
+    }
+
+    // Decrypt both fields with fallback to original values
+    const decryptedInviteId = decryptWithFallback(encryptedInviteId, ENCRYPTION_KEY);
+    const decryptedEmail = decryptWithFallback(encryptedEmail, ENCRYPTION_KEY);
+
+    return {
+      inviteId: decryptedInviteId,
+      email: decryptedEmail,
+    };
+  } catch (error) {
+    logger.error(error, "Error verifying invite token");
+    throw new Error("Invalid or expired invite token");
+  }
+};

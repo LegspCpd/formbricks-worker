@@ -1,0 +1,73 @@
+type: object
+description: >
+  Field-level validation error. `name` and `reason` are always intended for
+  humans.
+
+  Optional machine-readable fields are included when the API can identify the
+  semantic error,
+
+  especially for survey locale, identifier, and reference validation used by MCP
+  and agent clients.
+required:
+  - name
+  - reason
+properties:
+  name:
+    type: string
+    description: Dot-path to the invalid request field.
+  reason:
+    type: string
+    description: Human-readable repair guidance.
+  code:
+    type: string
+    enum:
+      - dangling_reference
+      - duplicate_identifier
+      - duplicate_locale
+      - forbidden_identifier
+      - immutable_identifier
+      - invalid_locale
+      - invalid_reference
+      - missing_required_field
+      - misordered_reference
+      - missing_translation
+      - read_only_field
+      - unsupported_field
+      - unsupported_locale
+    description: >
+      Machine-readable validation category, when available.
+
+
+      This is the shared error shape every v3 operation returns, so it lists what the API can emit
+      today and nothing more — `INVALID_PARAM_CODES` in `app/api/v3/lib/response.ts` is the
+      registry, and a code absent from it is dropped before the response is built. Categories for
+      operations that do not exist yet are added with the code that emits them, not ahead of it.
+  identifier:
+    type: string
+    description: >-
+      Identifier involved in the validation failure, when available. For
+      language errors, this can be the normalized language code.
+  referenceType:
+    type: string
+    enum:
+      - block
+      - element
+      - ending
+      - hiddenField
+      - language
+      - variable
+      - variableName
+      - recall
+    description: >-
+      Identifier namespace involved in the validation failure. Same rule as `code`: these are the
+      namespaces the API emits today, and more arrive with the operations that emit them.
+  missingId:
+    type: string
+    description: Referenced id that does not exist in the submitted survey document.
+  firstUsedAt:
+    type: string
+    description: Dot-path where a duplicate identifier was first used.
+  conflictsWith:
+    type: string
+    description: Dot-path to the existing identifier that conflicts with this field.
+additionalProperties: false

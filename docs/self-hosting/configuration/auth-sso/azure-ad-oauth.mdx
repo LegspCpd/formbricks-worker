@@ -1,0 +1,155 @@
+---
+title: Azure AD OAuth
+description: "Configure Microsoft Entra ID (Azure AD) OAuth for secure Single Sign-On with your Formbricks instance. Use enterprise-grade authentication for your survey platform."
+icon: "microsoft"
+---
+
+<Note>AzureAD OAuth is part of the Formbricks [Enterprise Edition](/self-hosting/advanced/license)</Note>
+
+### Microsoft Entra ID
+
+Do you have a Microsoft Entra ID Tenant? Integrate it with your Formbricks instance to allow users to log in using their existing Microsoft credentials. This guide will walk you through the process of setting up an Application Registration for your Formbricks instance.
+
+### Requirements
+
+- A Microsoft Entra ID Tenant populated with users. [Create a tenant as per Microsoft's documentation](https://learn.microsoft.com/en-us/entra/fundamentals/create-new-tenant).
+
+- A Formbricks instance running and accessible.
+
+- The callback URI for your Formbricks instance: `{WEBAPP_URL}/api/auth/oauth2/callback/azuread`
+
+<Warning>
+  **Upgrading from v5.1 or earlier?** This path changed once, at v5.2:
+
+  - v5.1 and earlier: `{WEBAPP_URL}/api/auth/callback/azure-ad`
+  - v5.2 and later (current): `{WEBAPP_URL}/api/auth/oauth2/callback/azuread`
+
+  The two are distinct URIs, because the provider id itself also changed (`azure-ad` → `azuread`). Add
+  the current one under **Redirect URIs** in your app registration, or Azure AD sign-in fails with a
+  redirect-URI mismatch. Upgrading from v5.2 or later needs no change — the callback URL is pinned and
+  does not move with Formbricks' authentication library. See the
+  [migration guide](/self-hosting/advanced/migration).
+</Warning>
+
+## How to connect your Formbricks instance to Microsoft Entra
+
+<Steps>
+  <Step title="Access the Microsoft Entra admin center">
+    - Login to the [Microsoft Entra admin center](https://entra.microsoft.com/).
+    - Go to **Applications** > **App registrations** in the left menu.
+
+    ![first](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250153/image_tobdth.jpg)
+  </Step>
+
+  <Step title="Create a new app registration">
+    - Click the **New registration** button at the top.
+
+    ![second](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250228/image_dmz75t.jpg)
+  </Step>
+
+  <Step title="Configure the application">
+    - Name your application something descriptive, such as `Formbricks SSO`.
+
+    ![third](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250292/image_rooa3w.jpg)
+
+    - If you have multiple tenants/organizations, choose the appropriate **Supported account types** option. Otherwise, leave the default option for _Single Tenant_.
+
+    ![fourth](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250542/image_nyndzo.jpg)
+
+    - Under **Redirect URI**, select **Web** for the platform and paste your Formbricks callback URI (see Requirements above).
+
+    ![fifth](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250776/image_s3pgb6.jpg)
+
+    - Click **Register** to create the App registration. You will be redirected to your new app's _Overview_ page after it is created.
+  </Step>
+
+  <Step title="Collect application credentials">
+    - On the _Overview_ page, under **Essentials**:
+      - Copy the entry for **Application (client) ID** to populate the `AZUREAD_CLIENT_ID` variable.
+      - Copy the entry for **Directory (tenant) ID** to populate the `AZUREAD_TENANT_ID` variable.
+
+    <Note>
+      Use the **Directory (tenant) ID** GUID (or a verified domain) — with it set, Formbricks fully
+      verifies Microsoft id_tokens against your tenant's issuer.
+
+      For a multi-tenant app registration, either leave `AZUREAD_TENANT_ID` unset, which is equivalent
+      to `common` and accepts both work/school and personal accounts, or set it to `organizations` to
+      accept work/school accounts only. Those two authorities advertise a placeholder issuer rather
+      than a real one, so Formbricks skips id_token verification for them and takes the signed-in
+      identity from Microsoft's userinfo endpoint — the authority you configure still applies at
+      sign-in, so `organizations` keeps restricting which accounts Microsoft will accept. `consumers`
+      is unaffected: personal Microsoft accounts share one well-known tenant, so its id_tokens are
+      verified normally.
+    </Note>
+
+    ![sixth](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250876/image_dj2vi5.jpg)
+  </Step>
+
+  <Step title="Create a client secret">
+    - From your App registration's _Overview_ page, go to **Manage** > **Certificates & secrets**.
+
+    ![seventh](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250913/image_p4zknw.jpg)
+
+    - Make sure you have the **Client secrets** tab active, and click **New client secret**.
+
+    ![eighth](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738250973/image_kyjray.jpg)
+
+    - Enter a **Description**, set an **Expires** period, then click **Add**.
+
+    <Note>
+      You will need to create a new client secret using these steps whenever your chosen expiry period ends.
+    </Note>
+
+    ![ninth](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738251467/image_bkirq4.jpg)
+
+    - Copy the entry under **Value** to populate the `AZUREAD_CLIENT_SECRET` variable.
+
+    <Note>
+      Microsoft will only show this value to you immediately after creation, and you will not be able to access it again. If you lose it, simply create a new secret.
+    </Note>
+
+    ![tenth](https://res.cloudinary.com/dwdb9tvii/image/upload/v1738251234/image_jen6tp.jpg)
+  </Step>
+
+  <Step title="Update environment variables">
+    - Update these environment variables in your `docker-compose.yml` or pass it like your other environment variables to the Formbricks container.
+
+    <Note>
+      You must wrap the `AZUREAD_CLIENT_SECRET` value in double quotes (e.g., "THis~iS4faKe.53CreTvALu3"`) to prevent issues with special characters.
+    </Note>
+
+    An example `.env` for Microsoft Entra ID in Formbricks would look like this:
+
+    ```yml Formbricks Env for Microsoft Entra ID SSO
+    AZUREAD_CLIENT_ID=a25cadbd-f049-4690-ada3-56a163a72f4c
+    AZUREAD_TENANT_ID=2746c29a-a3a6-4ea1-8762-37816d4b7885
+    AZUREAD_CLIENT_SECRET="THis~iS4faKe.53CreTvALu3"
+    ```
+  </Step>
+
+  <Step title="Restart and test">
+    - Restart your Formbricks instance.
+    - You're all set! Users can now sign up & log in using their Microsoft credentials associated with your Entra ID Tenant.
+  </Step>
+</Steps>
+
+## Keeping display names in step with your directory
+
+<Note>SSO name synchronization is part of the Formbricks [Enterprise Edition](/self-hosting/advanced/license)</Note>
+
+A user's name in Formbricks comes from the OIDC `name` claim, which is their Entra ID `displayName`. That
+attribute is free text, so its format is whatever your directory holds — accounts synced from on-premises
+Active Directory often read `Surname, Givenname`, while accounts created in the Entra admin center usually
+read `Givenname Surname`. Formbricks keeps whatever order your directory uses — it never reorders a
+name into `First Last`. It does normalize the value before storing it: characters outside the allowed
+set (letters, marks, spaces, and `' , . & ( ) -` plus digits) collapse to a single space, so
+`Doe, Jane` is stored unchanged while stray markup or line separators are replaced with a single space.
+
+Formbricks re-reads that name from Entra ID on every sign-in, so a rename in your directory — a
+marriage, a legal rename, a corrected import — reaches Formbricks the next time that person logs in.
+
+<Note>
+  Because Entra ID is authoritative for the name, the **Full name** field under **Account → Profile**
+  is read-only for users who signed in through SSO, exactly as the email field already is. Change the
+  name in your directory instead.
+</Note>

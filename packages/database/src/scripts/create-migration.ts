@@ -1,0 +1,128 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import readline from "node:readline";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { logger } from "@formbricks/logger";
+import { applyMigrations } from "./migration-runner";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const execFileAsync = promisify(execFile);
+const DATABASE_PACKAGE_DIR = path.resolve(__dirname, "../..");
+const REPO_ROOT_DIR = path.resolve(DATABASE_PACKAGE_DIR, "../..");
+const PRISMA_CONFIG_PATH = path.join(DATABASE_PACKAGE_DIR, "prisma.config.ts");
+const LOCAL_PRISMA_BIN = path.join(REPO_ROOT_DIR, "node_modules", ".bin", "prisma");
+
+const resolvePrismaBin = async (): Promise<string> => {
+  try {
+    await fs.access(LOCAL_PRISMA_BIN);
+    return LOCAL_PRISMA_BIN;
+  } catch {
+    return "prisma";
+  }
+};
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+function promptForMigrationName(): Promise<string> {
+  return new Promise((resolve) => {
+    rl.question("Enter the name of the migration (please use spaces): ", (name) => {
+      if (!name.trim()) {
+        logger.fatal("Migration name cannot be empty.");
+        process.exit(1);
+      }
+      if (/[^a-zA-Z0-9\s]/.test(name)) {
+        logger.fatal(
+          "Migration name contains invalid characters. Only letters, numbers, and spaces are allowed."
+        );
+        process.exit(1);
+      }
+      rl.close();
+      resolve(name);
+    });
+  });
+}
+
+async function main(): Promise<void> {
+  const migrationName = await promptForMigrationName();
+  const migrationNameUnderscored = migrationName.replace(/\s+/g, "_");
+
+  const migrationsDir = path.resolve(__dirname, "../../.prisma-migrations");
+  const customMigrationsDir = path.resolve(__dirname, "../../migration");
+
+  // Check if migration already exists in custom migrations
+  const existingMigrations = await fs.readdir(customMigrationsDir);
+  const duplicateMigration = existingMigrations.find((dir) => dir.includes(migrationNameUnderscored));
+
+  if (duplicateMigration) {
+    throw new Error(`Migration with name "${migrationName}" already exists in ${customMigrationsDir}`);
+  }
+
+  // Create migration
+  const prismaBin = await resolvePrismaBin();
+  await execFileAsync(
+    prismaBin,
+    ["migrate", "dev", "--config", PRISMA_CONFIG_PATH, "--name", migrationName, "--create-only"],
+    { cwd: REPO_ROOT_DIR }
+  );
+  logger.info(`Migration created: ${migrationName}`);
+
+  // Find the newly created migration
+  const migrationToCopy = await fs
+    .readdir(migrationsDir)
+    .then((files) => files.find((dir) => dir.includes(migrationNameUnderscored)));
+
+  if (!migrationToCopy) {
+    throw new Error(`migration not found: ${migrationName}`);
+  }
+
+  // Check if the migration is empty
+  const migrationToCopyPath = path.join(migrationsDir, migrationToCopy);
+  const files = await fs.readdir(migrationToCopyPath);
+
+  if (!files.includes("migration.sql")) {
+    await fs.rm(migrationToCopyPath, { recursive: true, force: true });
+    throw new Error(
+      `generated migration directory is empty: ${migrationName}. Please run the migration again.`
+    );
+  } else {
+    const migrationSQL = await fs.readFile(path.join(migrationToCopyPath, "migration.sql"), "utf-8");
+    if (migrationSQL === "-- This is an empty migration.") {
+      await fs.rm(migrationToCopyPath, { recursive: true, force: true });
+      throw new Error(
+        "Database schema has not changed. Please make changes to the schema and run the migration again."
+      );
+    }
+  }
+
+  const sourcePath = path.join(migrationsDir, migrationToCopy);
+  const destPath = path.join(customMigrationsDir, migrationToCopy);
+
+  // Copy migration folder
+  await fs.cp(sourcePath, destPath, { recursive: true });
+
+  // Delete the migration from the original migrations folder
+  await fs.rm(sourcePath, { recursive: true, force: true });
+
+  // Prisma 7 migrate commands no longer auto-generate the client.
+  await execFileAsync(prismaBin, ["generate", "--config", PRISMA_CONFIG_PATH], { cwd: REPO_ROOT_DIR });
+
+  try {
+    await applyMigrations();
+  } catch (err) {
+    logger.fatal(err, "Error applying migrations: ");
+    // delete the created migration directories:
+    await fs.rm(destPath, { recursive: true, force: true });
+    process.exit(1);
+  }
+}
+
+main().catch((error: unknown) => {
+  logger.fatal(error, "Migration creation failed");
+  process.exit(1);
+});

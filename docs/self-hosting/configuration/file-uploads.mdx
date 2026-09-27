@@ -1,0 +1,436 @@
+---
+title: "File Uploads Configuration"
+description: "Configure file storage for survey images, file uploads, and Workspace assets in your self-hosted Formbricks instance"
+icon: "upload"
+---
+
+Formbricks requires S3-compatible storage for file uploads. You can use external cloud storage services or the bundled RustFS option for a self-hosted solution.
+
+## Why Configure File Uploads?
+
+Setting up file storage enables important features in Formbricks, including:
+
+- Adding images to surveys (questions, backgrounds, logos)
+- 'File Upload' and 'Picture Selection' question types
+- Workspace logos and branding
+- Custom organization logos in emails
+- Survey background images from uploads
+
+<Warning>
+  If file uploads are not configured, the above features will be disabled and users won't be able to upload
+  files or images.
+</Warning>
+
+## Storage Options
+
+Formbricks supports S3-compatible storage with two main configurations:
+
+### 1. External S3-Compatible Storage
+
+Use cloud storage services for production deployments:
+
+- **AWS S3** (Amazon Web Services)
+- **DigitalOcean Spaces**
+- **Wasabi**
+- **StorJ**
+- Any S3-compatible storage service
+
+### 2. Bundled RustFS Storage (Self-Hosted)
+
+<Warning>
+  **Important**: Bundled RustFS requires a dedicated subdomain. You must configure a subdomain like
+  `files.yourdomain.com` that points to your server so browser uploads can reach the object storage endpoint.
+</Warning>
+
+<Warning>
+  Bundled RustFS is a convenience-oriented single-server option. It fits small-scale or lower-complexity
+  self-hosted deployments, but it is not the ideal RustFS architecture for high-availability or larger-scale
+  production storage. For stricter production requirements, prefer external object storage or a dedicated
+  RustFS deployment.
+</Warning>
+
+RustFS provides a self-hosted S3-compatible storage solution that runs alongside Formbricks. This option:
+
+- Runs in a Docker container alongside Formbricks
+- Provides full S3 API compatibility
+- Uses the same `S3_*` environment variables as any other S3-compatible provider
+
+## Configuration Methods
+
+### Option 1: One-Click Setup Script
+
+When using the Formbricks installation script, you'll be prompted to configure file uploads:
+
+```bash
+📁 Do you want to configure file uploads?
+   If you skip this, the following features will be disabled:
+   - Adding images to surveys (e.g., in questions or as background)
+   - 'File Upload' and 'Picture Selection' question types
+   - Workspace logos
+   - Custom organization logo in emails
+Configure file uploads now? [Y/n] y
+```
+
+#### External S3-Compatible Storage
+
+Choose this option for AWS S3, DigitalOcean Spaces, or other cloud providers:
+
+```bash
+🗄️  Do you want to use an external S3-compatible storage (AWS S3/DO Spaces/etc.)? [y/N] y
+🔧 Enter S3 configuration (leave Endpoint empty for AWS S3):
+   S3 Access Key: your_access_key
+   S3 Secret Key: your_secret_key
+   S3 Region (e.g., us-east-1): us-east-1
+   S3 Bucket Name: your-bucket-name
+   S3 Endpoint URL (leave empty if you are using AWS S3): https://your-endpoint.com
+```
+
+#### Bundled RustFS Storage
+
+Choose this option for a self-hosted S3-compatible storage that runs alongside Formbricks:
+
+<Note>
+  **Critical Requirement**: Before proceeding, ensure you have configured a subdomain (e.g.,
+  `files.yourdomain.com`) that points to your server's IP address. This is required so browser-direct uploads
+  can reach RustFS.
+</Note>
+
+```bash
+🗄️  Do you want to use an external S3-compatible storage (AWS S3/DO Spaces/etc.)? [y/N] n
+🔗 Enter the files subdomain for object storage (e.g., files.yourdomain.com): files.yourdomain.com
+```
+
+The script will automatically:
+
+- Generate separate RustFS admin and Formbricks service credentials
+- Create the storage bucket
+- Configure SSL certificates for the files subdomain
+- Configure Traefik routing for the subdomain
+- Store the generated RustFS credentials in `./formbricks/.env` with restricted permissions
+
+### Option 2: Manual Environment Variables
+
+Add the following environment variables to your `docker-compose.yml` or `.env` file:
+
+#### For S3-Compatible Storage
+
+```bash
+# S3 Storage Configuration
+S3_ACCESS_KEY=your_access_key
+S3_SECRET_KEY=your_secret_key
+S3_REGION=us-east-1
+S3_BUCKET_NAME=your-bucket-name
+
+# Optional: For third-party S3-compatible services (leave empty for AWS S3)
+S3_ENDPOINT_URL=https://your-endpoint.com
+
+# Enable path-style URLs for third-party services (1 for enabled, 0 for disabled)
+S3_FORCE_PATH_STYLE=1
+```
+
+<Note>
+  <strong>AWS S3 vs. third‑party S3:</strong> When using AWS S3 directly, leave `S3_ENDPOINT_URL` unset and
+  set `S3_FORCE_PATH_STYLE=0` (or omit). For most third‑party S3‑compatible providers (e.g., RustFS,
+  DigitalOcean Spaces, Wasabi, Storj), you typically must set `S3_ENDPOINT_URL` to the provider's endpoint and
+  set `S3_FORCE_PATH_STYLE=1`.
+</Note>
+
+## Provider-Specific Examples
+
+### AWS S3
+
+```bash
+S3_ACCESS_KEY=AKIA1234567890EXAMPLE
+S3_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+S3_REGION=us-east-1
+S3_BUCKET_NAME=my-formbricks-uploads
+# S3_ENDPOINT_URL is not needed for AWS S3
+# S3_FORCE_PATH_STYLE=0
+```
+
+### DigitalOcean Spaces
+
+```bash
+S3_ACCESS_KEY=your_spaces_key
+S3_SECRET_KEY=your_spaces_secret
+S3_REGION=nyc3
+S3_BUCKET_NAME=my-formbricks-space
+S3_ENDPOINT_URL=https://nyc3.digitaloceanspaces.com
+S3_FORCE_PATH_STYLE=1
+```
+
+### RustFS (Self-Hosted)
+
+```bash
+S3_ACCESS_KEY=rustfs_service_access_key
+S3_SECRET_KEY=rustfs_service_secret_key
+S3_REGION=us-east-1
+S3_BUCKET_NAME=formbricks-uploads
+S3_ENDPOINT_URL=https://files.yourdomain.com
+S3_FORCE_PATH_STYLE=1
+```
+
+### Compatibility requirement: S3 POST Object support
+
+Formbricks uses the S3 [POST Object](https://docs.aws.amazon.com/AmazonS3/latest/API/RESTObjectPOST.html)
+operation (presigned POST) for uploads. Your object storage provider must support this operation. Providers
+that do not implement POST Object are not compatible with Formbricks uploads. For example, Backblaze B2's
+S3‑compatible API currently does not support POST Object and therefore will not work with Formbricks file
+uploads.
+
+## Bundled RustFS Setup
+
+When using the bundled RustFS option through the setup script, you get:
+
+### Automatic Configuration
+
+- **Storage Service**: RustFS running in a Docker container
+- **Credentials**: Auto-generated admin and least-privilege service credentials
+- **Bucket**: Automatically created `formbricks-uploads` bucket
+- **SSL**: Automatic certificate generation for the files subdomain
+
+### Access Information
+
+After setup, you'll see:
+
+```bash
+🗄️  RustFS Storage Setup Complete:
+   • Access Key: formbricks-service-a1b2c3d4
+   • Bucket: formbricks-uploads (✅ automatically created)
+```
+
+### DNS Requirements
+
+<Warning>
+  **Critical for bundled RustFS**: The files subdomain is mandatory. Without proper DNS and reverse-proxy
+  routing, browser uploads will fail.
+</Warning>
+
+For the bundled RustFS setup, ensure:
+
+1. **Main domain**: `yourdomain.com` points to your server IP
+2. **Files subdomain**: `files.yourdomain.com` points to your server IP
+3. **Firewall**: Ports 80 and 443 are open in your server's firewall
+4. **DNS propagation**: Allow time for DNS changes to propagate globally
+
+## Docker Compose Configuration
+
+For manual setup, update your `docker-compose.yml`:
+
+```yaml
+services:
+  formbricks:
+    image: ghcr.io/formbricks/formbricks:latest
+    environment:
+      # ... other environment variables ...
+
+      # S3 Storage Configuration
+      S3_ACCESS_KEY: your_access_key
+      S3_SECRET_KEY: your_secret_key
+      S3_REGION: us-east-1
+      S3_BUCKET_NAME: your-bucket-name
+      S3_ENDPOINT_URL: https://your-endpoint.com # Optional
+      S3_FORCE_PATH_STYLE: 1 # For third-party services
+    volumes:
+      - uploads:/home/nextjs/apps/web/uploads/ # Still needed for temporary files
+```
+
+## Security Considerations
+
+### IAM User Permissions
+
+When using AWS S3 or S3-compatible storage providers, ensure that the IAM user associated with your `S3_ACCESS_KEY` and `S3_SECRET_KEY` credentials has the necessary permissions to interact with your bucket. Without proper permissions, file uploads and retrievals will fail.
+
+The following IAM policy grants the minimum required permissions for Formbricks to function correctly. This policy is also used in the bundled RustFS integration:
+
+```json
+{
+  "Statement": [
+    {
+      "Action": ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"],
+      "Effect": "Allow",
+      "Resource": ["arn:aws:s3:::your-bucket-name/*"]
+    },
+    {
+      "Action": ["s3:ListBucket"],
+      "Effect": "Allow",
+      "Resource": ["arn:aws:s3:::your-bucket-name"]
+    }
+  ],
+  "Version": "2012-10-17"
+}
+```
+
+<Note>
+  Replace `your-bucket-name` with your actual S3 bucket name. The first statement grants object-level
+  operations (upload, retrieve, and delete files), while the second statement allows listing bucket contents.
+</Note>
+
+### S3 Bucket Policy
+
+In addition to IAM user permissions, configure your S3 bucket with a least-privileged bucket policy to ensure security:
+
+1. **Scoped Public Read Access**: Only allow public read access to specific prefixes where needed
+2. **Restricted Write Access**: Only your Formbricks instance should be able to upload files
+3. **CORS Configuration**: Allow requests from your Formbricks domain
+
+Example least-privileged S3 bucket policy:
+
+```json
+{
+  "Statement": [
+    {
+      "Action": "s3:GetObject",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Resource": "arn:aws:s3:::your-bucket-name/uploads/public/*",
+      "Sid": "PublicReadForPublicUploads"
+    },
+    {
+      "Action": ["s3:PutObject", "s3:PutObjectAcl"],
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::123456789012:user/formbricks-service"
+      },
+      "Resource": "arn:aws:s3:::your-bucket-name/*",
+      "Sid": "AllowFormbricksWrite"
+    }
+  ],
+  "Version": "2012-10-17"
+}
+```
+
+<Note>
+  Replace `your-bucket-name` with your actual bucket name and
+  `arn:aws:iam::123456789012:user/formbricks-service` with the ARN of your IAM user. This policy allows public
+  read access only to specific paths while restricting write access to your Formbricks service user.
+</Note>
+
+### S3 CORS Configuration
+
+CORS (Cross-Origin Resource Sharing) must be configured on your S3 bucket to allow Formbricks to upload files using presigned POST URLs. Without proper CORS configuration, file uploads from the browser will fail.
+
+Configure CORS on your S3 bucket with the following settings:
+
+```json
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["POST", "GET", "HEAD", "DELETE", "PUT"],
+    "AllowedOrigins": ["*"],
+    "ExposeHeaders": ["ETag", "x-amz-meta-custom-header"],
+    "MaxAgeSeconds": 3000
+  }
+]
+```
+
+<Note>
+  For production environments, consider restricting `AllowedOrigins` to your specific Formbricks domain(s)
+  instead of using `"*"` for better security. For example: `["https://app.yourdomain.com",
+  "https://yourdomain.com"]`.
+</Note>
+
+**How to configure CORS:**
+
+- **AWS S3**: Navigate to your bucket → Permissions → Cross-origin resource sharing (CORS) → Edit → Paste the JSON configuration
+- **DigitalOcean Spaces**: Navigate to your Space → Settings → CORS Configurations → Add CORS configuration → Paste the JSON
+- **RustFS (self-hosted)**: configured automatically by the bundled setup, or via a server-level env var for standalone deployments — see [RustFS CORS Configuration](#rustfs-cors-configuration) below.
+- **Other S3-compatible providers**: Refer to your provider's documentation for CORS configuration
+
+### RustFS CORS Configuration
+
+RustFS supports CORS two ways: a **server-level** allow-list set via the `RUSTFS_CORS_ALLOWED_ORIGINS` environment variable on the RustFS server, and **per-bucket** CORS via the S3 `PutBucketCors` API (e.g. `rc bucket cors set`).
+
+**Bundled Formbricks setup** (the [one-click script](/self-hosting/setup/one-click), driven by `docker/rustfs-init.sh`): CORS is configured for you. The bootstrap applies a per-bucket policy via `rc bucket cors set`, scoped to your Formbricks domain — nothing else to do.
+
+**Standalone RustFS** (managed separately from Formbricks): set `RUSTFS_CORS_ALLOWED_ORIGINS` on the RustFS server to the origin(s) you serve Formbricks from — your `WEBAPP_URL` — comma-separated for multiple values:
+
+```env
+# Set on the RustFS server, then restart RustFS
+RUSTFS_CORS_ALLOWED_ORIGINS=https://app.yourdomain.com
+```
+
+<Note>
+  When `RUSTFS_CORS_ALLOWED_ORIGINS` is unset, the RustFS server emits **no** CORS headers at all, so browsers
+  block cross-origin uploads; a non-empty value is treated as an allow-list. So if browser uploads fail with a
+  CORS error while the file still appears in RustFS, this variable is most likely either unset or set to a value
+  that excludes your Formbricks origin — set it to (or add) your origin. Use an explicit origin list in
+  production; `*` allows all origins and should be avoided outside local testing.
+
+  This changed in `1.0.0-beta.2`. Older images baked `RUSTFS_CORS_ALLOWED_ORIGINS=*` in, so leaving it unset
+  was permissive by default — and on versions up to `1.0.0-beta.1` the server reflected the caller's origin back
+  with `Access-Control-Allow-Credentials: true`
+  ([GHSA-x5xv-223c-8vm7](https://github.com/rustfs/rustfs/security/advisories/GHSA-x5xv-223c-8vm7)). The image no
+  longer bakes that value. If you relied on the old default, set this variable explicitly when you upgrade.
+</Note>
+
+<Warning>
+  For standalone deployments, prefer the server-level `RUSTFS_CORS_ALLOWED_ORIGINS` variable over manually applying
+  a per-bucket CORS policy: RustFS's support for the S3 `PutBucketCors` API has varied across releases and can
+  return "not implemented" on some builds. (The bundled bootstrap pins `rustfs/rustfs:1.0.0-rc.2`, on which
+  per-bucket `rc bucket cors set` is verified to work.)
+</Warning>
+
+### RustFS Security
+
+When using bundled RustFS:
+
+- Credentials are auto-generated and secure
+- Generated RustFS credentials are written to a local `.env` file; keep it private and restrict it to `0600`
+- Access is restricted through Traefik proxy
+- CORS is automatically configured
+- Rate limiting is applied to prevent abuse
+- A bucket policy with the least privileges is applied to the bucket
+- Prefer local SSD or NVMe-backed storage for `rustfs-data`, use XFS on dedicated host-managed disks when
+  possible, and avoid NFS or other network filesystems for RustFS data
+- Back up the `rustfs-data` volume regularly, especially for single-server deployments
+- Ship RustFS and Formbricks container logs into your normal logging and alerting stack; the bundled setup
+  does not provision centralized audit-log export or alerting for you
+
+## Troubleshooting
+
+### Common Issues
+
+**Files not uploading:**
+
+1. Check that S3 credentials are correct
+2. Verify bucket exists and is accessible
+3. Ensure bucket permissions allow uploads from your server
+4. Check network connectivity to S3 endpoint
+5. We use S3 presigned URLs for uploads. Make sure your CORS policy allows presigned URL uploads; otherwise, uploads will fail.
+   Some providers (e.g., Hetzner’s object storage) [require a specific CORS configuration](https://github.com/formbricks/formbricks/discussions/6641#discussioncomment-14574048).
+   If you’re using the bundled RustFS setup, this is already configured for you.
+6. **The file appears in your storage but Formbricks still reports “upload failed.”** This is the classic CORS symptom — the browser uploaded the file successfully but could not read the response. For RustFS, set `RUSTFS_CORS_ALLOWED_ORIGINS` to include your Formbricks origin (see [RustFS CORS Configuration](#rustfs-cors-configuration)).
+
+**Images not displaying in surveys:**
+
+1. Verify bucket has public read access
+2. Check CORS configuration allows requests from your domain
+3. Ensure S3_ENDPOINT_URL is correctly set for third-party services
+
+**RustFS not starting:**
+
+1. **Verify subdomain DNS**: Ensure `files.yourdomain.com` points to your server IP (this is the most common issue)
+2. **Check DNS propagation**: Use tools like `nslookup` or `dig` to verify DNS resolution
+3. **Verify ports**: Ensure ports 80 and 443 are open in your firewall
+4. **SSL certificate**: Check that SSL certificate generation completed successfully
+5. **Container logs**: Check Docker container logs: `docker compose logs rustfs`
+
+### Testing Your Configuration
+
+To test if file uploads are working:
+
+1. **Admin Panel**: Try uploading a Workspace logo in **Settings → Workspace → Appearance**
+2. **Survey Editor**: Attempt to add a background image to a survey
+3. **Question Types**: Create a 'File Upload' or 'Picture Selection' question
+4. **Check Logs**: Monitor container logs for any storage-related errors
+
+```bash
+# Check Formbricks logs
+docker compose logs formbricks
+
+# Check RustFS logs (if using bundled RustFS)
+docker compose logs rustfs
+```
+
+For additional help, join the conversation on [GitHub Discussions](https://github.com/formbricks/formbricks/discussions).

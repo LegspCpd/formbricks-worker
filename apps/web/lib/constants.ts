@@ -1,0 +1,339 @@
+import "server-only";
+import { TUserLocale } from "@formbricks/types/user";
+import { env } from "./env";
+
+export { DEFAULT_BRAND_COLOR } from "./brand-color";
+
+export const IS_FORMBRICKS_CLOUD = env.IS_FORMBRICKS_CLOUD === "1";
+
+export const IS_PRODUCTION = env.NODE_ENV === "production";
+
+export const IS_DEVELOPMENT = env.NODE_ENV === "development";
+export const E2E_TESTING = env.E2E_TESTING === "1";
+
+// URLs
+export const WEBAPP_URL = env.WEBAPP_URL?.trim() || "http://localhost:3000";
+
+// encryption keys
+export const ENCRYPTION_KEY = env.ENCRYPTION_KEY;
+
+// Other
+export const CRON_SECRET = env.CRON_SECRET;
+export const FB_LOGO_URL = `${WEBAPP_URL}/logo-transparent.png`;
+
+export const PRIVACY_URL = env.PRIVACY_URL;
+export const TERMS_URL = env.TERMS_URL;
+export const IMPRINT_URL = env.IMPRINT_URL;
+export const IMPRINT_ADDRESS = env.IMPRINT_ADDRESS;
+
+export const DANGEROUSLY_ALLOW_WEBHOOK_INTERNAL_URLS = env.DANGEROUSLY_ALLOW_WEBHOOK_INTERNAL_URLS === "1";
+export const WEBHOOK_DELIVERY_TIMEOUT_MS = env.WEBHOOK_DELIVERY_TIMEOUT_MS ?? 5_000;
+export const DEBUG_SHOW_RESET_LINK = !IS_PRODUCTION && env.DEBUG_SHOW_RESET_LINK === "1";
+export const PASSWORD_RESET_DISABLED = env.PASSWORD_RESET_DISABLED === "1";
+export const PASSWORD_RESET_TOKEN_LIFETIME_MINUTES = env.PASSWORD_RESET_TOKEN_LIFETIME_MINUTES;
+export const EMAIL_VERIFICATION_DISABLED = env.EMAIL_VERIFICATION_DISABLED === "1";
+
+export const GOOGLE_OAUTH_ENABLED = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+export const GITHUB_OAUTH_ENABLED = !!(env.GITHUB_ID && env.GITHUB_SECRET);
+export const AZURE_OAUTH_ENABLED = !!(env.AZUREAD_CLIENT_ID && env.AZUREAD_CLIENT_SECRET);
+export const OIDC_OAUTH_ENABLED = !!(env.OIDC_CLIENT_ID && env.OIDC_CLIENT_SECRET && env.OIDC_ISSUER);
+export const SAML_OAUTH_ENABLED = !!env.SAML_DATABASE_URL;
+export const SAML_XML_DIR = "./saml-connection";
+
+export const GITHUB_ID = env.GITHUB_ID;
+export const GITHUB_SECRET = env.GITHUB_SECRET;
+export const GOOGLE_CLIENT_ID = env.GOOGLE_CLIENT_ID;
+export const GOOGLE_CLIENT_SECRET = env.GOOGLE_CLIENT_SECRET;
+
+export const HUB_API_URL = env.HUB_API_URL;
+export const HUB_API_KEY = env.HUB_API_KEY;
+
+export const AZUREAD_CLIENT_ID = env.AZUREAD_CLIENT_ID;
+export const AZUREAD_CLIENT_SECRET = env.AZUREAD_CLIENT_SECRET;
+export const AZUREAD_TENANT_ID = env.AZUREAD_TENANT_ID;
+
+export const OIDC_CLIENT_ID = env.OIDC_CLIENT_ID;
+export const OIDC_CLIENT_SECRET = env.OIDC_CLIENT_SECRET;
+export const OIDC_ISSUER = env.OIDC_ISSUER;
+export const OIDC_DISPLAY_NAME = env.OIDC_DISPLAY_NAME;
+export const OIDC_SIGNING_ALGORITHM = env.OIDC_SIGNING_ALGORITHM;
+
+export const SAML_DATABASE_URL = env.SAML_DATABASE_URL;
+export const SAML_TENANT = "formbricks.com";
+export const SAML_PRODUCT = "formbricks";
+export const SAML_AUDIENCE = "https://saml.formbricks.com";
+export const SAML_PATH = "/api/auth/saml/callback";
+
+export const SIGNUP_ENABLED = IS_FORMBRICKS_CLOUD || IS_DEVELOPMENT || E2E_TESTING;
+export const EMAIL_AUTH_ENABLED = env.EMAIL_AUTH_DISABLED !== "1";
+export const INVITE_DISABLED = env.INVITE_DISABLED === "1";
+export const INVITE_RATE_LIMIT_PER_24_HOURS = env.INVITE_RATE_LIMIT_PER_24_HOURS;
+
+export const SLACK_CLIENT_SECRET = env.SLACK_CLIENT_SECRET;
+export const SLACK_CLIENT_ID = env.SLACK_CLIENT_ID;
+export const SLACK_REDIRECT_URI = `${WEBAPP_URL}/api/v1/integrations/slack/callback`;
+export const SLACK_AUTH_URL = `https://slack.com/oauth/v2/authorize?client_id=${env.SLACK_CLIENT_ID}&scope=channels:read,chat:write,chat:write.public,chat:write.customize,groups:read&redirect_uri=${SLACK_REDIRECT_URI}`;
+
+export const GOOGLE_SHEETS_CLIENT_ID = env.GOOGLE_SHEETS_CLIENT_ID;
+export const GOOGLE_SHEETS_CLIENT_SECRET = env.GOOGLE_SHEETS_CLIENT_SECRET;
+export const GOOGLE_SHEETS_REDIRECT_URL = env.GOOGLE_SHEETS_REDIRECT_URL;
+
+export const NOTION_OAUTH_CLIENT_ID = env.NOTION_OAUTH_CLIENT_ID;
+export const NOTION_OAUTH_CLIENT_SECRET = env.NOTION_OAUTH_CLIENT_SECRET;
+export const NOTION_REDIRECT_URI = `${WEBAPP_URL}/api/v1/integrations/notion/callback`;
+export const NOTION_AUTH_URL = `https://api.notion.com/v1/oauth/authorize?client_id=${env.NOTION_OAUTH_CLIENT_ID}&response_type=code&owner=user&redirect_uri=${NOTION_REDIRECT_URI}`;
+
+export const AIRTABLE_CLIENT_ID = env.AIRTABLE_CLIENT_ID;
+
+export const SMTP_HOST = env.SMTP_HOST;
+export const SMTP_PORT = env.SMTP_PORT;
+
+/**
+ * Whether the mailer can actually send. `sendEmail` returns `false` without throwing when this is
+ * false, which callers must treat as a failure (ENG-2091) — so it lives here next to the values it
+ * derives from rather than being recomputed per call site.
+ */
+export const IS_SMTP_CONFIGURED = Boolean(env.SMTP_HOST && env.SMTP_PORT);
+export const SMTP_SECURE_ENABLED = env.SMTP_SECURE_ENABLED === "1" || env.SMTP_PORT === "465";
+export const SMTP_USER = env.SMTP_USER;
+export const SMTP_PASSWORD = env.SMTP_PASSWORD;
+export const SMTP_AUTHENTICATED = env.SMTP_AUTHENTICATED !== "0";
+export const SMTP_REJECT_UNAUTHORIZED_TLS = env.SMTP_REJECT_UNAUTHORIZED_TLS !== "0";
+export const MAIL_FROM = env.MAIL_FROM;
+export const MAIL_FROM_NAME = env.MAIL_FROM_NAME;
+
+/**
+ * Auth secret and base URL, resolved once for the whole app.
+ *
+ * `BETTER_AUTH_*` are the documented names. `NEXTAUTH_*` are a deliberately UNDOCUMENTED
+ * backward-compatible alias: ENG-1054 shipped them as the canonical names, and ENG-2599 flipped the docs
+ * without dropping them. The alias is permanent, not a deprecation window — nothing ever rewrites an
+ * existing install's env. A Compose install keeps a literal `NEXTAUTH_SECRET:` in its customized
+ * `docker-compose.yml` and `update_formbricks()` never touches it, so removing the fallback would break
+ * every instance that upgraded from v5.1 or earlier.
+ *
+ * Resolve here, never at the call site. The secret signs Better Auth's session cookies (auth.ts), the
+ * forward-auth proxy's verification of them (session-cookie.ts), and every app JWT — invites, email
+ * verification, email change, survey PIN tokens, gateway service tokens (lib/jwt.ts). A divergence
+ * between any two of those is an outage, and it surfaces only as an opaque `state_security_mismatch`
+ * (better-auth-observability.ts).
+ *
+ * `firstConfigured` treats a blank value as unset, which `??` does not: `"" ?? env.NEXTAUTH_SECRET` is
+ * `""`, which is falsy and would fail every guard below while shadowing a perfectly good legacy secret.
+ * `env.ts` already normalizes blank to undefined for both names, so this is the second line of defence
+ * rather than the first — kept because the invariant belongs next to the resolution, not in a distant
+ * schema. It selects a value, never rewrites one: trimming a secret would re-key the instance.
+ *
+ * Note these constant names collide with env vars Better Auth reads on its own
+ * (`options.secret || env.BETTER_AUTH_SECRET || env.AUTH_SECRET`). There is no live conflict because
+ * auth.ts passes `secret` and `baseURL` explicitly; `assertAuthRuntimeConfiguration` in lib/env.ts
+ * refuses to boot on the one configuration where it would matter.
+ */
+const firstConfigured = (...values: (string | undefined)[]): string | undefined =>
+  values.find((value) => value !== undefined && value.trim().length > 0);
+
+export const AUTH_SECRET = firstConfigured(env.BETTER_AUTH_SECRET, env.NEXTAUTH_SECRET);
+export const AUTH_URL = firstConfigured(env.BETTER_AUTH_URL, env.NEXTAUTH_URL);
+
+/**
+ * Every configured auth origin, not just the winning one: an instance mid-rename has both set, and both
+ * have to stay trusted or Better Auth's CSRF/origin check rejects requests arriving on the other.
+ *
+ * De-duplicated because the managed paths set both names to the same value — the chart writes both keys
+ * from one `$webappUrl`, and the one-click installer seds both to the same domain — so the common case is
+ * one origin listed twice.
+ *
+ * The explicit type predicate is load-bearing — `.filter(Boolean)` does not narrow
+ * `(string | undefined)[]` to the `string[]` that `trustedOrigins` requires.
+ */
+export const AUTH_TRUSTED_ORIGINS = [
+  ...new Set([env.BETTER_AUTH_URL, env.NEXTAUTH_URL].filter((url): url is string => Boolean(url?.trim()))),
+];
+
+export const ITEMS_PER_PAGE = 30;
+export const SURVEYS_PER_PAGE = 12;
+export const RESPONSES_PER_PAGE = 25;
+export const TEXT_RESPONSES_PER_PAGE = 5;
+export const MAX_RESPONSES_FOR_INSIGHT_GENERATION = 500;
+export const MAX_OTHER_OPTION_LENGTH = 250;
+
+/**
+ * Workspaces an organization gets on a self-hosted instance with no active enterprise license
+ * (Community Edition). Mirrors docs/self-hosting/advanced/license.mdx.
+ */
+export const COMMUNITY_WORKSPACE_LIMIT = 1;
+
+/**
+ * Workspaces a cloud organization falls back to when the license server cannot confirm the instance
+ * license (expired, invalid_license, instance_mismatch, unreachable). Deliberately the Hobby (free
+ * tier) allowance: an entitlement we cannot verify is treated as no entitlement. The create gate is
+ * `count >= limit`, so an org already above it keeps every workspace it has and only pauses creating
+ * new ones until the license resolves.
+ */
+export const CLOUD_HOBBY_WORKSPACE_LIMIT = 1;
+
+export const SKIP_INVITE_FOR_SSO = env.AUTH_SKIP_INVITE_FOR_SSO === "1";
+export const DEFAULT_TEAM_ID = env.AUTH_DEFAULT_TEAM_ID;
+// Self-hosted SSO auto-provisioning (`AUTH_SSO_DEFAULT_ORGANIZATION_ID`): when set, every new SSO user
+// joins this organization without needing an invite, created on first sign-up if it does not exist
+// yet. ENG-2089.
+export const DEFAULT_ORGANIZATION_ID = env.AUTH_DEFAULT_ORGANIZATION_ID;
+export const DEFAULT_ORGANIZATION_ROLE = env.AUTH_DEFAULT_ORGANIZATION_ROLE;
+
+// Cloud-only kill-switch: when enabled, the personal-email sign-up block also applies to invited
+// users (default exempts invites). See @/modules/auth/lib/signup-email-domain.
+export const SIGNUP_DOMAIN_CHECK_ON_INVITES = env.SIGNUP_DOMAIN_CHECK_ON_INVITES === "1";
+
+export const SLACK_MESSAGE_LIMIT = 2995;
+export const GOOGLE_SHEET_MESSAGE_LIMIT = 49995;
+export const AIRTABLE_MESSAGE_LIMIT = 99995;
+export const NOTION_RICH_TEXT_LIMIT = 1995;
+
+// Storage constants
+export const S3_ACCESS_KEY = env.S3_ACCESS_KEY;
+export const S3_SECRET_KEY = env.S3_SECRET_KEY;
+export const S3_REGION = env.S3_REGION;
+export const S3_ENDPOINT_URL = env.S3_ENDPOINT_URL;
+export const S3_BUCKET_NAME = env.S3_BUCKET_NAME;
+export const S3_FORCE_PATH_STYLE = env.S3_FORCE_PATH_STYLE === "1";
+export const MAX_FILE_UPLOAD_SIZES = {
+  standard: 1024 * 1024 * 10, // 10MB
+  big: 1024 * 1024 * 1024, // 1GB
+} as const;
+export const IS_STORAGE_CONFIGURED = Boolean(S3_BUCKET_NAME);
+
+// Colors for Survey Bg
+export const SURVEY_BG_COLORS = [
+  "#FFFFFF",
+  "#FFF2D8",
+  "#EAD7BB",
+  "#BCA37F",
+  "#113946",
+  "#04364A",
+  "#176B87",
+  "#64CCC5",
+  "#DAFFFB",
+  "#132043",
+  "#1F4172",
+  "#F1B4BB",
+  "#FDF0F0",
+  "#001524",
+  "#445D48",
+  "#D6CC99",
+  "#FDE5D4",
+  "#BEADFA",
+  "#D0BFFF",
+  "#DFCCFB",
+  "#FFF8C9",
+  "#FF8080",
+  "#FFCF96",
+  "#F6FDC3",
+  "#CDFAD5",
+];
+
+export const DEBUG = env.DEBUG === "1";
+
+// Enterprise License constant
+export const ENTERPRISE_LICENSE_KEY = env.ENTERPRISE_LICENSE_KEY;
+
+export { ENTERPRISE_LICENSE_REQUEST_FORM_URL } from "@/modules/ee/license-check/lib/lite-license";
+
+export const REDIS_URL = env.REDIS_URL;
+export const RATE_LIMITING_DISABLED = env.RATE_LIMITING_DISABLED === "1";
+/**
+ * Number of reverse proxies in front of the app whose `X-Forwarded-For` entries may be believed.
+ *
+ * Defaults to 1 because that matches every supported topology — the Helm chart's Traefik/Envoy ingress,
+ * docker-compose behind a proxy, and Formbricks Cloud — and because Next 16 gives route handlers no
+ * socket peer address to fall back on, so a default of 0 would leave IP-based rate limiting unable to
+ * tell clients apart until an operator set this. Deployments with a longer proxy chain must raise it;
+ * setting it higher than the real chain lets a caller spoof the address by prepending entries.
+ */
+export const TRUSTED_PROXY_HOP_COUNT = env.TRUSTED_PROXY_HOP_COUNT ?? 1;
+export const TELEMETRY_DISABLED = env.TELEMETRY_DISABLED === "1";
+
+// Opt-out for the Have-I-Been-Pwned breach check (ENG-1587). Set to "1" on air-gapped /
+// closed-network deployments that can't reach api.pwnedpasswords.com and want no outbound
+// attempt at all. When unset the check is active but fails open on network errors.
+export const PASSWORD_HIBP_CHECK_DISABLED = env.PASSWORD_HIBP_CHECK_DISABLED === "1";
+
+export const BREVO_API_KEY = env.BREVO_API_KEY;
+export const BREVO_LIST_ID = env.BREVO_LIST_ID;
+
+export const UNSPLASH_ACCESS_KEY = env.UNSPLASH_ACCESS_KEY;
+export const UNSPLASH_ALLOWED_DOMAINS = ["api.unsplash.com"];
+
+export const STRIPE_API_VERSION = "2026-02-25.clover";
+
+// Maximum number of attribute classes allowed:
+export const MAX_ATTRIBUTE_CLASSES_PER_ENVIRONMENT = 150;
+
+export const DEFAULT_LOCALE = "en-US";
+export const AVAILABLE_LOCALES: TUserLocale[] = [
+  "de-DE",
+  "en-US",
+  "es-ES",
+  "fr-FR",
+  "hu-HU",
+  "ja-JP",
+  "nl-NL",
+  "pt-BR",
+  "pt-PT",
+  "ro-RO",
+  "ru-RU",
+  "sv-SE",
+  "tr-TR",
+  "zh-Hans-CN",
+  "zh-Hant-TW",
+];
+
+export const PLAIN_APP_ID = env.PLAIN_APP_ID;
+export const PLAIN_ACTIVE_CUSTOMER_LABEL_TYPE_ID = env.PLAIN_ACTIVE_CUSTOMER_LABEL_TYPE_ID;
+export const IS_PLAIN_CHAT_CONFIGURED = Boolean(env.PLAIN_APP_ID);
+
+// Formbricks-in-Formbricks: in-app surveys served by a Formbricks instance
+// (defaults to Formbricks Cloud). The widget only mounts when a workspace id is set.
+export const FORMBRICKS_WORKSPACE_ID = env.FORMBRICKS_WORKSPACE_ID;
+export const FORMBRICKS_APP_URL = env.FORMBRICKS_APP_URL || "https://app.formbricks.com";
+export const IS_FORMBRICKS_SURVEYS_CONFIGURED = Boolean(env.FORMBRICKS_WORKSPACE_ID);
+
+export const POSTHOG_KEY = env.POSTHOG_KEY;
+
+export const TURNSTILE_SECRET_KEY = env.TURNSTILE_SECRET_KEY;
+export const TURNSTILE_SITE_KEY = env.TURNSTILE_SITE_KEY;
+export const IS_TURNSTILE_CONFIGURED = Boolean(env.TURNSTILE_SITE_KEY && TURNSTILE_SECRET_KEY);
+
+export const RECAPTCHA_SITE_KEY = env.RECAPTCHA_SITE_KEY;
+export const RECAPTCHA_SECRET_KEY = env.RECAPTCHA_SECRET_KEY;
+export const IS_RECAPTCHA_CONFIGURED = Boolean(RECAPTCHA_SITE_KEY && RECAPTCHA_SECRET_KEY);
+
+// Use the app version for Sentry release (updated during build in production)
+// Fallback to environment variable if package.json is not accessible
+export const SENTRY_RELEASE = (() => {
+  if (!IS_PRODUCTION) {
+    return undefined;
+  }
+
+  // Try to read from package.json with proper error handling
+  try {
+    const pkg = require("../package.json");
+    return pkg.version === "0.0.0" ? undefined : `${pkg.version}`;
+  } catch {
+    // If package.json can't be read (e.g., in some deployment scenarios),
+    // return undefined and let Sentry work without release tracking
+    return undefined;
+  }
+})();
+export const SENTRY_ENVIRONMENT = env.SENTRY_ENVIRONMENT;
+export const SENTRY_DSN = env.SENTRY_DSN;
+
+export const PROMETHEUS_ENABLED = env.PROMETHEUS_ENABLED === "1";
+
+export const USER_MANAGEMENT_MINIMUM_ROLE = env.USER_MANAGEMENT_MINIMUM_ROLE ?? "manager";
+
+export const AUDIT_LOG_ENABLED = env.AUDIT_LOG_ENABLED === "1";
+export const AUDIT_LOG_GET_USER_IP = env.AUDIT_LOG_GET_USER_IP === "1";
+export const SESSION_MAX_AGE = Number(env.SESSION_MAX_AGE) || 86400;
+
+// Control hash for constant-time password verification to prevent timing attacks. Used when user doesn't exist to maintain consistent verification timing
+export const CONTROL_HASH = "$2b$12$fzHf9le13Ss9UJ04xzmsjODXpFJxz6vsnupoepF5FiqDECkX2BH5q"; //NOSONAR not a real password hash, used only for timing-safe comparison

@@ -1,0 +1,104 @@
+---
+title: "Tenant Separation"
+description: "How Formbricks handles tenant separation on Formbricks Cloud"
+icon: "people-arrows"
+---
+
+Formbricks Cloud is designed to support multiple tenants, each with their own set of surveys and data. This page describes the different ways to configure and use Formbricks for multi-tenancy.
+
+<Note>
+This documentation only applies to Formbricks Cloud instances. On-premise deployments handle tenant separation differently based on your specific setup and requirements.
+</Note>
+
+## Multi-Tenancy in Formbricks Cloud
+
+Formbricks Cloud is architected as a true multi-tenant system where each organization contains one or more isolated Workspaces while sharing the underlying infrastructure. This approach allows multiple organizations to use the platform independently without visibility into each other's data.
+
+### Organizational Structure
+
+```mermaid
+graph TD
+    Organization[Organization] --> Workspace1[Workspace 1]
+    Organization --> Workspace2[Workspace 2]
+    Organization --> WorkspaceN[Workspace n]
+
+    Workspace1 --> Survey1[Surveys]
+    Workspace1 --> Contact1[Contacts]
+    Workspace1 --> Action1[Action Classes]
+    Workspace1 --> ApiKeyScope1[API Key Scopes]
+    Workspace1 --> Webhook1[Webhooks]
+    Workspace1 --> Integration1[Integrations]
+    Workspace1 --> Segment1[Segments]
+
+    Workspace2 --> Survey2[Surveys]
+    Workspace2 --> Contact2[Contacts]
+    Workspace2 --> Action2[Action Classes]
+    Workspace2 --> ApiKeyScope2[API Key Scopes]
+    Workspace2 --> Webhook2[Webhooks]
+    Workspace2 --> Integration2[Integrations]
+    Workspace2 --> Segment2[Segments]
+```
+
+The multi-tenant architecture in Formbricks Cloud is built around three key levels of isolation:
+
+### 1. Organization-Level Isolation
+
+- Each tenant is represented by an Organization entity
+- Organizations are completely separated from each other
+- Users can be members of multiple organizations simultaneously
+- All resources and data belong exclusively to a single organization
+- Role-based access control (RBAC) with specific roles:
+  - Owner: Full access to all organization resources
+  - Manager: Can manage members and billing
+  - Member: Basic access to organization resources
+  - Billing: Access to billing information only
+- Billing and subscription management occurs at the organization level
+
+### 2. Workspace-Level Isolation
+
+Within each organization, further isolation is maintained through Workspaces:
+
+- Organizations can have multiple Workspaces to separate different applications or product lines
+- Complete separation of resources between Workspaces:
+  - Surveys and responses
+  - Contacts and attributes
+  - Action classes and triggers
+  - API key scopes and integrations
+  - Webhooks and notifications
+  - Segments and targeting rules
+- Workspace-specific configuration, branding, and style settings
+- Language settings and customizations are Workspace-specific
+
+### 3. Team-Based Access Isolation
+
+Team access is scoped per Workspace:
+
+- Teams can be granted access to specific Workspaces via Workspace-team mapping
+- Permissions are applied at the Workspace level for finer-grained access control
+- Users can collaborate in one Workspace without being granted access to all organization resources
+
+## Data Security in the Multi-Tenant Model
+
+Formbricks ensures data security in its multi-tenant Workspace model through:
+
+- **Database Layer Isolation**: 
+  - Foreign key constraints enforce data isolation
+  - Each resource is scoped to its organization
+  - Cascading deletes maintain referential integrity
+
+- **Authentication Boundaries**: 
+  - Role-based access control (RBAC)
+  - Session management per organization
+  - Multi-factor authentication support
+
+- **API Access Control**: 
+  - API keys are scoped to specific Workspaces
+  - Rate limiting per organization
+  - Request validation and sanitization
+
+- **Resource Quotas**: 
+  - Organization-level limits based on billing plan
+
+
+This multi-layered approach to tenant separation ensures that organizations can safely use Formbricks Cloud with complete data privacy and isolation from other tenants.
+

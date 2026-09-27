@@ -1,0 +1,2449 @@
+---
+title: "Migration"
+description: "Formbricks Self-hosted version migration"
+icon: "arrow-right"
+---
+
+## v6
+
+Formbricks v6 replaces the legacy authorization evaluator with SpiceDB, maintained by AuthZed. PostgreSQL
+remains the source of roles and grants, but SpiceDB is the sole decision engine. There is no runtime fallback,
+so an existing installation must prepare its complete authorization graph before serving v6 traffic.
+
+Use the supported source/target pair in the release notes and the
+[maintenance upgrade procedure](/self-hosting/advanced/v6-maintenance-upgrade). A self-hosted v5 bridge is not required:
+
+1. Enter maintenance, stop all writers, suspend their controllers, and drain in-flight work. Take recoverable
+   backups of the databases, secrets, configuration, and source image versions.
+2. Merge the release-matched AuthZed deployment services or Helm values without overwriting proxy, storage,
+   SMTP, or external-datastore customization.
+3. Run the target-image database migrations while writers remain stopped, never against the still-running v5 app.
+4. Run `formbricks-authzed-prepare --backup-confirmed --writers-stopped`; it runs migrations, reconciliation,
+   one clean full audit, and a second independent `upgrade check` audit.
+5. For one-click or Compose, set `FORMBRICKS_AUTHZED_V6_MIGRATION_ACKNOWLEDGED=true`. For Helm, set
+   `authzed.migrationAcknowledged=true` in the v6 upgrade values.
+6. Deploy v6 and verify critical allow, deny, revocation, and cross-tenant cases.
+
+The update script and Helm upgrade hook verify the prepared graph without repairing it. Do not bypass a failed
+gate. Keep maintenance active on failure: after database changes, recovery may require restoring coordinated
+backups rather than running `helm rollback`. Pin explicit releases and digests, not floating tags.
+
+The Helm chart and Formbricks image are versioned independently. A chart-only patch can retain the same
+`appVersion`; review both pins and the rendered image rather than assuming their version numbers match.
+
+### Bundled TEI log level
+
+The Helm chart now defaults `hub.embeddings.env.RUST_LOG` to `warn` because TEI 1.9 includes its API key in
+INFO-level startup arguments. If you need a different log level, set `hub.embeddings.env.RUST_LOG` explicitly
+and use it only with a runtime that redacts credentials from its logs.
+
+### Changes in Environment Variables
+
+<Note>
+  `DEFAULT_ORGANIZATION_ID` and `DEFAULT_ORGANIZATION_ROLE` drive SSO just-in-time provisioning, which is
+  part of the Formbricks [Enterprise Edition](/self-hosting/advanced/license). On a community instance
+  they have no effect, so there is nothing to rename.
+</Note>
+
+- **DEFAULT_ORGANIZATION_ID** has been renamed to **AUTH_SSO_DEFAULT_ORGANIZATION_ID**, matching the
+  `AUTH_SSO_DEFAULT_TEAM_ID` naming pattern. Rename the variable in your configuration; the value is
+  unchanged. Support for this variable was missing between v3.0 and v5.x, so it takes effect again on v6.
+
+- **DEFAULT_ORGANIZATION_ROLE** has been renamed to **AUTH_SSO_DEFAULT_ORGANIZATION_ROLE**.
+
+- **BETTER_AUTH_URL** and **BETTER_AUTH_SECRET** are now the documented names for the auth base URL and
+  the session-signing secret. This is a documentation change, not a rename: `NEXTAUTH_URL` and
+  `NEXTAUTH_SECRET` keep working exactly as before, so **an existing instance needs no action**. New
+  installs configure the `BETTER_AUTH_*` names, which is what the setup guides now show.
+
+  <Warning>
+    If you do choose to move to the new names, **copy the existing value across** rather than generating a
+    new one. `BETTER_AUTH_SECRET` takes precedence, so setting it to a *different* value signs everyone
+    out and invalidates outstanding invite, email-verification and email-change links. Formbricks logs a
+    warning at startup when both are set to different values. The secret is no longer rejected for being
+    shorter than 32 characters, so a shorter legacy value can be renamed as-is — you will see a startup
+    warning recommending a longer one, which you can act on whenever a forced sign-out is acceptable.
+  </Warning>
+
+  Formbricks now refuses to start when neither variable has a value, in every environment. Before this
+  release that refusal applied only when `NODE_ENV=production`; a development or test instance with
+  neither variable set still started, using a fallback value for the signing secret, and only invites
+  and verification links failed. So a production instance is already required
+  to have one of these set and is unaffected. If a non-production instance of yours set neither,
+  generate a secret before upgrading — doing so **signs every current user out**, because their cookies
+  were signed with that fallback value rather than with a secret of yours.
+
+### Encrypted single-use survey links must be regenerated (action required if you use them)
+
+Encrypted single-use survey links issued before v6 stop working and have to be regenerated.
+
+#### What to do when upgrading
+
+**Regenerate after upgrading, not before.** Links minted by the old version are unsigned whichever
+day you mint them, so regenerating first produces a second batch that the new version rejects exactly
+like the first.
+
+1. Plan a maintenance window covering the deploy and the redistribution. Outstanding links stop
+   working the moment the new version serves traffic, and a respondent who opened one before the
+   deploy and submits after it sees the invitation error and loses their answers.
+2. Deploy v6.
+3. Regenerate the links for any survey with single-use enabled and **URL encryption of single-use
+   ID** on, from the survey's share modal or via
+   `GET /api/v1/management/surveys/{surveyId}/singleUseIds`. The new version signs them.
+4. Re-send. Formbricks never stores generated links, so there is nothing to migrate and nothing to
+   back up — the new links simply replace the old ones.
+
+**Links with URL encryption off are unaffected**, including custom single-use IDs. Those have carried
+a `suToken` signature since 5.0 and validate exactly as before, so integrations that mint their own
+IDs need no changes.
+
+#### What you will see if you skip it
+
+Opening an old encrypted link shows *"This survey can only be taken by invitation"*, and submissions
+against it are rejected. Server logs record one `warn` per rejection carrying the survey id and a
+`reason` of `missing_signature`.
+
+#### Why
+
+An encrypted single-use link carried only an encrypted id and no signature, so nothing tied it to the
+survey it was issued for and any survey on the same deployment accepted it. Both modes now carry the
+same signature, which is what the old links are missing.
+
+#### If you cannot re-issue in time
+
+`SINGLE_USE_LEGACY_UNSIGNED_UNTIL` keeps the old links working for a fixed period, so an in-flight
+campaign does not die on upgrade day. It takes an ISO 8601 date and is unset by default:
+
+```sh
+SINGLE_USE_LEGACY_UNSIGNED_UNTIL=2026-11-15
+```
+
+Unsigned **encrypted** links are accepted until 00:00 UTC on that date, and rejected from then on.
+Nothing else changes: links with URL encryption off are untouched, a `suToken` that is present but
+wrong is still rejected, and the id must still decrypt under your `ENCRYPTION_KEY`.
+
+<Warning>
+  This re-opens the vulnerability the release closed, for as long as it is set. An unsigned encrypted
+  link is bound to no survey, so a link issued for one survey opens **any** survey on the same
+  instance — on a deployment serving more than one organisation, that is across organisations. Set it
+  only on a single-tenant instance, only for as long as re-issuing takes, and only as a deliberate
+  decision. It is not a substitute for step 3 above.
+</Warning>
+
+Each accepted legacy link is logged at `warn` with the survey id and the configured expiry, and
+counted on `formbricks_survey_single_use_link_validations_total` with `reason="legacy_unsigned"`.
+Watch that series fall to zero, then remove the variable — it tells you when the window has stopped
+carrying traffic and re-issuing is complete.
+
+#### Rollback
+
+Downgrading restores the old links, since nothing about them changed on disk — but it also restores
+the behaviour above, so treat it as a stopgap while you regenerate rather than a fix.
+||||||| 1cb21762d6
+
+### Hub worker required for Docker
+
+Fresh Docker and one-click installations start `hub-worker` with the Hub API. The worker consumes every
+PostgreSQL-backed asynchronous Hub job, including webhook deliveries and any configured enrichment. An existing
+installation keeps its local `docker-compose.yml` during `formbricks.sh update`, so merge the worker before
+updating; the updater now exits before pulling images, running migrations, or stopping services when the
+resolved Compose project does not contain `hub-worker`.
+
+1. Start in the directory containing your customized `docker-compose.yml`, then back it up and download the file
+   from the release you are upgrading to. For a one-click installation, run `cd formbricks` first. Use that
+   release's tag instead of `stable` when your deployment is pinned.
+
+   ```bash
+   cp -p docker-compose.yml docker-compose.yml.before-hub-worker
+   curl -fsSL -o docker-compose.release.yml \
+     https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/docker-compose.yml
+   ```
+
+2. Compare the two files. Merge `x-hub-runtime-environment` and the release's `hub` and `hub-worker` sections as
+   one unit so the API and worker retain the same database and taxonomy configuration. Preserve local proxy,
+   storage, database, and image-pin customizations. `hub`, `hub-worker`, and `hub-migrate` must resolve to the
+   same Hub image reference.
+3. Validate the result before changing the running stack:
+
+   ```bash
+   docker compose config >/dev/null
+   docker compose config --services | grep -Fx hub-worker
+   ```
+
+4. For a one-click installation, rerun `./formbricks.sh update`. For a manually managed Compose installation,
+   apply Hub migrations before starting the API and worker from the new image:
+
+   ```bash
+   docker compose pull hub hub-migrate hub-worker
+   docker compose up --force-recreate hub-migrate
+   docker compose up -d hub hub-worker
+   ```
+
+5. Verify that the worker stays running and that the existing River backlog decreases:
+
+   ```bash
+   docker compose ps hub-worker
+   docker compose logs --tail=200 hub-worker
+   ```
+
+The worker has no HTTP health endpoint. A stable process and decreasing queue are the readiness signals. If it
+restarts, verify PostgreSQL connectivity and every configured enrichment provider credential. Jobs already in
+River remain stored in PostgreSQL and begin draining when the worker starts; no repair or re-enqueue is required.
+
+To roll back only this change, remove the worker container before restoring the backed-up Compose file so its
+`restart: always` policy cannot start it again:
+
+```bash
+docker compose rm -fs hub-worker
+cp -p docker-compose.yml.before-hub-worker docker-compose.yml
+```
+
+Completed jobs remain committed and pending jobs remain queued, but all Hub asynchronous processing pauses
+again. A fully custom deployment that runs Hub workers outside this Compose project must use its own manual
+upgrade workflow rather than the one-click updater.
+
+## v5.4
+
+v5.4 carries one application-level breaking change, and it is narrow: it affects **API keys** used against
+the Feedback Records API or the MCP server. If you do not use Unify Feedback, or you only reach it through
+the UI, there is nothing to do for it. The release adds no new environment variables. It does ship
+**seven database migrations**, applied automatically during the upgrade. Six are quick — new columns and
+tables, two of them data migrations that run on their own. The seventh builds an index on the `Response`
+table, and it is the one that needs scheduling: it blocks response writes while it builds. Other
+migrations add indexes too, but only on new or small tables. See
+[Database migrations](#database-migrations) before scheduling the upgrade.
+
+v5.4 also upgrades the **Better Auth** authentication core to 1.7. That upgrade needs no manual database
+step — every migration is additive and applies automatically, including the backfills over existing rows —
+and **your SSO callback URLs do not change**. It carries one narrow exception, and only for custom code: an
+MCP access token is now bound to the session that authorized it, so an integration that caches one across
+sessions has to fetch a fresh token — see
+[MCP access tokens now end with their session](#mcp-access-tokens-now-end-with-their-session).
+
+The bundled Valkey image moves from an amd64-only 8.1.1 image to the native amd64/arm64 Valkey 8.1.9 Alpine
+image. Fresh Docker and Helm installations receive it automatically. Existing installations that retain an
+older Compose file or explicitly reuse the previous Helm digest need the one-time update below.
+
+### Envoy Gateway 1.8.4 CRD Upgrade
+
+The updated Helm chart replaces Envoy Gateway 1.7.1 and Gateway API 1.4.1 with Envoy Gateway 1.8.4 and Gateway
+API 1.5.1. Fresh installations receive the new CRDs automatically. Helm does not update CRDs during an ordinary
+upgrade, so existing installations using the bundled controller must apply the matching CRDs before upgrading:
+
+```bash
+crd_dir="$(mktemp -d)"
+helm pull oci://docker.io/envoyproxy/gateway-crds-helm \
+  --version v1.8.4 --untar --untardir "${crd_dir}"
+helm template envoy-gateway-crds "${crd_dir}/gateway-crds-helm" \
+  --set crds.gatewayAPI.enabled=true \
+  --set crds.gatewayAPI.channel=experimental \
+  --set crds.envoyGateway.enabled=true \
+  | kubectl apply --server-side --force-conflicts -f -
+```
+
+`--force-conflicts` transfers the existing CRD fields from Helm's field manager to this explicit CRD upgrade.
+Pulling the OCI chart first keeps Helm 4's pull messages out of the manifest pipe. Remove the temporary directory
+after the apply succeeds.
+
+The chart does not install Envoy Gateway's cluster-wide safe-upgrade admission policy by default. Enabling
+`envoy.crds.gatewayAPI.safeUpgradePolicy.enabled` denies Gateway API CRD versions older than v1.5.0 across the
+whole cluster, including CRDs reconciled by unrelated releases. Enable it only after platform review; a chart
+rollback does not remove that policy automatically.
+
+If the platform already manages compatible Gateway API CRDs, do not install another Gateway API bundle. Install
+only the Envoy Gateway CRDs as described in the [Kubernetes guide](/self-hosting/setup/kubernetes), set
+`envoy.crds.enabled=false`, and configure Flux to skip CRD installation and upgrades. Upgrade the CRDs before the
+controller and never downgrade them during rollback.
+
+The controller scheduling values also move from the ineffective `envoy.deployment.envoyGateway.pod` path to
+`envoy.deployment.pod`. Move any node selectors, tolerations, topology spread constraints, extra volumes, or
+pod annotations that you placed under the old path before upgrading.
+
+The parent chart no longer repeats the bundled controller's default port list. The
+`envoy.deployment.ports` override remains supported, so existing port overrides need no migration.
+
+### Database migrations
+
+All seven migrations apply automatically during the upgrade. Two want something from you first: one needs
+`WEBAPP_URL` set if you use MCP OAuth, and one deserves a scheduling decision on large instances. So here
+is the full list rather than a summary:
+
+| Migration | What it does | Impact |
+| --- | --- | --- |
+| `add_feedback_source_import_mode` | Adds `FeedbackSource.import_mode`, which controls whether a source's historical import includes partial responses. Existing sources take the `completedOnly` default, which aligns the historical import with the live ingestion path — that path only ever ran on finished responses, while the import used to pull partials too. Records already in Hub are left alone, so this shows up the next time you run an import: set a source to `all` if it should keep importing partial responses. | Instant |
+| `add_organization_display_time_zone` | Adds the nullable `Organization.displayTimeZone`, which formats response timestamps in file exports and in the payloads pushed to Google Sheets, Slack and Airtable (Notion is passed a raw date and is unaffected). | Instant |
+| `eng_2343_better_auth_17_resource_model` | The Better Auth 1.7 schema: the `oauthResource` tables, resource columns on OAuth tokens and consents, `alg`/`crv` on `jwks`, and `Account.issuer` with its backfill. Details in the Better Auth 1.7 section below. | Additive and fast. The issuer backfill is what keeps password sign-in working on 1.7, so it must not be skipped — it runs on its own, listed here so it is not mistaken for optional |
+| `eng_2343_backfill_oauth_resource_links` | Data migration linking existing MCP OAuth clients, refresh tokens and consents to this instance's `${WEBAPP_URL}/api/mcp` resource, so already-registered MCP clients survive the upgrade. It is a no-op only when the instance has no OAuth client at all, which in practice means a fresh install. | **Set `WEBAPP_URL` before upgrading if you use MCP OAuth.** The resource identifier is derived from it, so on an instance that has OAuth clients an unset or unparseable `WEBAPP_URL` fails this migration and stops the upgrade — set it and re-run |
+| `add_feedback_source_element_scope` | Adds `FeedbackSource.elementScope`, which controls whether a source picks up survey questions added later. Existing sources keep the current behaviour (`specific`). | Instant |
+| `add_response_survey_finished_index` | Adds an index on `Response(surveyId, finished)` so the survey list's response counts are served from the index instead of scanning the table. | **Blocks response writes while it builds — see the warning below** |
+| `repair_account_issuer` | Data migration rewriting `Account.issuer` rows that were written with a non-canonical value, which locked the affected Google SSO users into a sign-in loop. Idempotent; a no-op when nothing is wrong. | Fast |
+
+<Warning>
+  `add_response_survey_finished_index` builds its index with a plain `CREATE INDEX`, not `CREATE INDEX
+  CONCURRENTLY` — migrations run inside a transaction, and Postgres does not allow concurrent builds
+  there. The build holds a `SHARE` lock on `Response`: reads keep working, but **survey responses cannot
+  be written until the index is built**. `Response` is usually the largest table on an instance. On small
+  instances the build takes seconds; if yours holds millions of responses, run the upgrade in a window
+  where a short pause in response collection is acceptable.
+
+  Neither documented deployment avoids this, so plan the window either way. On Kubernetes the chart runs
+  migrations in their own job while the pods already running keep serving traffic, so the responses
+  arriving during the build are the ones that block. On Docker Compose the app container does **not** wait
+  for `formbricks-migrate` — it has no `depends_on` on that service and skips startup migrations itself —
+  so after the documented `docker compose down && docker compose up -d` the two come up in parallel: you
+  get downtime while the app boots, and then blocked writes for however much of the index build is left
+  once it starts serving.
+</Warning>
+
+None of the seven constrains a rollback. v5.3 reads none of the new columns and tables, and the two
+`NOT NULL` columns added to existing tables both carry a database default, so a v5.3 instance keeps
+writing to those tables exactly as before. Rolling the application images / Helm values back to v5.3 is
+safe without touching the database.
+
+Coming back **forward** has one catch, and only if accounts were created while you were rolled back.
+`Account.issuer` does not exist in v5.3, so any account signed up or linked on that version is written
+without one — and both issuer backfills are already recorded as applied, so rolling forward does not
+re-run them. Better Auth 1.7 keys accounts on `(issuer, accountId)`, which makes those rows invisible to
+password sign-in and password reset. SSO accounts repair themselves on the next successful sign-in;
+password accounts have no such path. If anyone signed up during the rollback window, re-run the repair
+after rolling forward. This is the statement the `repair_account_issuer` migration runs, and it is
+idempotent — it matches the providers v5.4 ships, so if you have since enabled one that is not listed
+here, take the current mapping from that migration rather than this copy:
+
+```sql
+UPDATE "Account"
+SET "issuer" = CASE
+  WHEN "provider" = 'credential' THEN 'local:credential'
+  WHEN "provider" = 'google' THEN 'https://accounts.google.com'
+  ELSE 'local:oauth:' || "provider"
+END
+WHERE "issuer" IS DISTINCT FROM (
+  CASE
+    WHEN "provider" = 'credential' THEN 'local:credential'
+    WHEN "provider" = 'google' THEN 'https://accounts.google.com'
+    ELSE 'local:oauth:' || "provider"
+  END
+);
+```
+
+### Bundled Valkey 8.1.9 Upgrade (action required for some self-hosted deployments)
+
+The old bundled digest selects only `linux/amd64`. The new digest selects the matching native image on
+`linux/amd64` and `linux/arm64`, without requiring QEMU or `binfmt`. Valkey 8.1.9 also contains upstream
+security fixes that are not present in 8.1.1.
+
+<Warning>
+  Valkey stores sessions, queues, cache entries and rate-limit state in the named `redis` volume with AOF
+  enabled. Do not run `docker compose down -v`, delete the volume, or use `FLUSHDB` during this upgrade.
+  Recreating only the container preserves the volume. Expect a brief interruption while Valkey restarts.
+</Warning>
+
+<Tabs>
+  <Tab title="One-Click">
+    Download the current stable updater so it can migrate the exact old Valkey pin in your existing Compose
+    file. It creates `formbricks/docker-compose.yml.before-valkey-8.1.9`, validates the updated Compose file,
+    and restores the backup if validation fails. Custom Valkey images are left unchanged.
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/formbricks.sh \
+      -o formbricks.sh
+    chmod +x formbricks.sh
+    ./formbricks.sh update
+    ```
+  </Tab>
+  <Tab title="Docker Compose">
+    Back up your Compose file before changing it:
+
+    ```bash
+    cp docker-compose.yml docker-compose.yml.before-valkey-8.1.9
+    ```
+
+    Then replace the `redis` service's old image with the new multi-architecture index:
+
+    ```yaml
+    image: valkey/valkey@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+    ```
+
+    Validate the file, then pull and recreate only Valkey:
+
+    ```bash
+    docker compose config >/dev/null
+    docker compose pull redis
+    docker compose up -d --no-deps --force-recreate redis
+    docker compose exec redis valkey-cli ping
+    docker compose exec redis valkey-server --version
+    redis_image_id=$(docker inspect --format '{{.Image}}' "$(docker compose ps -q redis)")
+    docker image inspect --format '{{.Architecture}}' "$redis_image_id"
+    ```
+  </Tab>
+  <Tab title="Helm">
+    A normal upgrade with the current chart uses the new default digest. If you explicitly set
+    `redis.image.digest`, pass a complete older values file, or use `--reuse-values`, override it during the
+    upgrade:
+
+    ```bash
+    helm upgrade formbricks formbricks/formbricks \
+      --reuse-values \
+      --set-string redis.image.repository=valkey/valkey \
+      --set-string redis.image.digest=sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+    ```
+
+    The Valkey StatefulSet rolls while its existing PVC remains attached. Check the rendered image and
+    `valkey-cli ping` after the rollout.
+  </Tab>
+</Tabs>
+
+### Feedback Record Mutations by API Key (action required for some integrations)
+
+A feedback dataset can be assigned to more than one workspace, and the records inside it carry no workspace
+of their own. When a dataset is shared that way, a workspace-scoped permission cannot establish which
+workspace a given record belongs to. Two rules now follow from that:
+
+- **Deleting a feedback record requires `manage`.** A key with `write` is no longer enough. This brings
+  feedback records in line with every other `DELETE` in the API, which has always required `manage`.
+- **A key cannot update or delete records in a shared dataset.** If a dataset is assigned to two or more
+  workspaces, an API key is refused regardless of its permission level, with a `403` explaining why.
+
+| Operation | Before | After |
+| --- | --- | --- |
+| `GET`, search, similar, count | `read` | unchanged |
+| `POST /api/v3/feedbackRecords` (create) | `write` | unchanged |
+| `PATCH /api/v3/feedbackRecords/{id}` | `write` | `write`, **and** the dataset assigned to one workspace |
+| `DELETE /api/v3/feedbackRecords/{id}` | `write` | `manage`, **and** the dataset assigned to one workspace |
+| `DELETE /api/v3/feedbackRecords?tenant_id=…` | `write` | `manage`, **and** the dataset assigned to one workspace |
+
+The same applies to the MCP tools `update_feedback_record` and `delete_feedback_record` when the client
+authenticates with an API key. The required MCP **scope** is unchanged — both remain `feedbackRecords:write`.
+
+<Note>
+  **Only API keys are affected.** Users signing in through the UI, OAuth/MCP connections, and SAML/OIDC
+  sessions authorize through their organization role instead, which is unchanged: organization owners and
+  managers can still update and delete feedback records, including in a shared dataset. Reading, searching
+  and creating records are unaffected for every principal.
+</Note>
+
+To find out whether any dataset on your instance is shared, and would therefore start refusing API-key
+mutations:
+
+```sql
+SELECT d.id, d.name, d."organizationId", COUNT(w."workspaceId") AS workspaces
+FROM "FeedbackDirectory" d
+JOIN "FeedbackDirectoryWorkspace" w ON w."feedbackDirectoryId" = d.id
+WHERE d."isArchived" = false
+GROUP BY d.id, d.name, d."organizationId"
+HAVING COUNT(w."workspaceId") > 1;
+```
+
+Most instances return no rows: a workspace is normally assigned a single dataset, so sharing only exists
+where an administrator deliberately assigned a second workspace. For any row that does come back, an
+integration that mutates records in that dataset has two ways forward — assign the dataset to a single
+workspace under **Settings → Organization → Datasets**, or have the integration authenticate as
+an organization owner or manager instead of with a workspace-scoped key.
+
+#### What to do before upgrading
+
+1. Run the query above. If it returns rows, decide how each affected integration should proceed.
+2. Raise any API key that deletes feedback records from `write` to `manage`.
+3. After deploying, smoke test your feedback-record integrations. Two log lines identify an integration
+   caught by the new rules — grep for `Feedback record mutation denied` (the MCP path, which names the
+   reason) and for `Feedback records gateway authorization denied` (the REST path, which logs
+   `verdict: "deny"` alongside the `operation` and `feedbackDirectoryId`).
+
+#### Rollback
+
+This access-rule change itself ships no migration and touches no schema (the release's migrations are
+listed [above](#database-migrations)), so rolling the application images / Helm values back to v5.3 undoes
+it with nothing to restore. An API key raised to `manage` in step 2 keeps working on v5.3 —
+`manage` was always accepted wherever `write` was — so that step does not need reverting either.
+
+### Better Auth 1.7 upgrade (no action required for most instances)
+
+v5.4 upgrades the Better Auth authentication core from the 1.6 line to 1.7, which fixes
+[GHSA-p2fr-6hmx-4528](https://github.com/advisories/GHSA-p2fr-6hmx-4528): MCP OAuth access-token audiences
+are now bound to the resource a user actually approved during authorization, instead of trusting whatever
+the client requested. This is a coupled core upgrade — it touches login, sessions, 2FA, SSO and MCP OAuth —
+but for self-hosted instances it needs no manual database step. Every schema change is additive and nullable,
+and the required backfills (account identity, existing OAuth clients, refresh tokens, consents) run
+automatically during the upgrade — they are the two `eng_2343` entries in the
+[Database migrations](#database-migrations) table above.
+
+The migration also adds two nullable columns, `alg` and `crv`, to the `jwks` table that holds your
+instance's JWT signing keys. Keys created before the upgrade keep working untouched — Better Auth reads a
+null `alg` as the default algorithm — so there is nothing to backfill, but the columns must exist before
+the new version mints its next key.
+
+#### AZUREAD_TENANT_ID: set a concrete tenant for full id_token verification
+
+Better Auth 1.7 verifies Microsoft id_tokens against the issuer advertised by the tenant's OpenID
+discovery document whenever `AZUREAD_TENANT_ID` names a concrete tenant — a Directory (tenant) ID GUID or
+a verified domain. That is strictly stronger than v5.3 and needs no action.
+
+Two of Microsoft's multi-tenant authorities are different. `common` and `organizations` advertise the
+literal placeholder `https://login.microsoftonline.com/{tenantid}/v2.0` as their issuer, so verifying
+real tokens against it fails every Microsoft sign-in with `?error=unable_to_get_user_info`. Formbricks
+therefore handles those two the way it already handles an unset `AZUREAD_TENANT_ID`: sign-in identity
+comes from Microsoft's userinfo endpoint over a client-authenticated call (the v5.3 behavior) and
+id_tokens are not verified. The authority you configure still applies at sign-in, so `organizations`
+keeps restricting sign-in to work/school accounts, and an unset value behaves as `common`. Formbricks
+logs a warning at startup when either is set and Microsoft SSO is enabled. To get full id_token
+verification, set your Directory (tenant) ID instead.
+
+`consumers` needs no action and is not affected: every personal Microsoft account lives in one
+well-known tenant, so that authority advertises a real issuer and keeps full id_token verification.
+
+#### SSO callback URLs are unchanged
+
+Your SSO callback URLs stay exactly as they are:
+
+| Provider | Callback URL | Action required? |
+| --- | --- | --- |
+| Azure AD / Entra ID | `https://your-domain.com/api/auth/oauth2/callback/azuread` | No |
+| Generic OIDC / Keycloak | `https://your-domain.com/api/auth/oauth2/callback/openid` | No |
+| SAML (BoxyHQ / Jackson) | `https://your-domain.com/api/auth/oauth2/callback/saml` | No |
+| Google / GitHub | `https://your-domain.com/api/auth/callback/{provider}` | No |
+
+Better Auth 1.7 rebuilds its generic-OAuth support on top of the built-in social-provider route, which
+would otherwise have moved these three callbacks to `/api/auth/callback/{providerId}` and required you to
+register a new redirect URI at your identity provider. OAuth requires redirect URIs to match exactly, so a
+path change means editing every provider configuration by hand.
+
+Formbricks pins the callback URL instead, so it no longer follows the authentication library's internal
+routing. The URLs above are the ones introduced in v5.2 and they are now a stable part of the Formbricks
+API — a future authentication-core upgrade will not move them either.
+
+<Note>
+  The table writes `your-domain.com` as your `WEBAPP_URL`, which is correct for a default install. The
+  callback is derived from the same auth base URL Better Auth itself uses, not from `WEBAPP_URL`: that is
+  `BETTER_AUTH_URL`, or `NEXTAUTH_URL` when only the legacy name is set, falling back to `WEBAPP_URL` when
+  neither is. So if either auth URL names a different origin, the callback lives on **that** origin — register
+  that URI at your identity provider. Either way it is unchanged by this upgrade.
+</Note>
+
+<Note>
+  Nothing to do, and nothing to undo. If you added a `/api/auth/callback/{providerId}` redirect URI in
+  advance based on an earlier draft of these notes, leaving it registered is harmless — most identity
+  providers accept several redirect URIs, and Formbricks simply will not use it.
+</Note>
+
+#### MCP access tokens now end with their session
+
+An MCP access token used to stay valid until its own expiry, independently of the session that authorized
+it. In 1.7 it is bound to that session: once the session ends — the user signs out, or the session is
+revoked — the token is inactive. `/introspect` reports `active: false` for it and
+`/api/auth/oauth2/userinfo` rejects it, rather than honouring it until its TTL runs out.
+
+This is upstream hardening, and it is the stricter of the two behaviours: a token that outlives the sign-out
+which created it is exactly what a revocation is supposed to stop.
+
+It applies to **access** tokens. A refresh token granted `offline_access` deliberately survives the session
+ending, per OIDC Back-Channel Logout 1.0 §2.7, so that long-lived API access can outlive a browser session —
+which is what MCP clients rely on. Signing out is therefore not a way to cut a client off permanently.
+
+**No action is required.** MCP clients re-authorize on their own — Claude Code and MCP Inspector both do —
+so a user who signs out and back in sees nothing. It is listed here for one case only: a custom integration
+that caches a Formbricks MCP access token and reuses it across sessions will start receiving rejections
+where it previously succeeded, and should obtain a fresh token instead of treating the cached one as valid
+until its expiry.
+
+#### Rollback (Better Auth 1.7)
+
+The `Account.issuer` column and the new `oauthResource`, `oauthClientResource` and `oauthClientAssertion`
+tables are additive and nullable, and are not read by v5.3, so rolling the application images / Helm values
+back to v5.3 is safe without touching the database. SSO needs no attention in either direction: v5.3 and
+v5.4 use the same callback URLs. If accounts are created while you are rolled back, see the
+[rollback note above](#database-migrations) before rolling forward — `Account.issuer` is the one value a
+v5.3 instance cannot write.
+
+## v5.3
+
+Formbricks v5.3 is a **drop-in upgrade for most self-hosted instances**. There are no breaking API,
+webhook, or authentication changes, and every database migration is additive and runs automatically on
+startup. The only self-hosting-relevant changes are a few new optional variables. The main thing worth
+setting before you deploy is `TRUSTED_PROXY_HOP_COUNT` for your proxy setup; everything else is optional.
+
+<Info>
+  All new environment variables are optional and defaulted — none of them block startup. You can upgrade
+  to v5.3 without changing any environment variables and everything will run.
+</Info>
+
+### Client IP Resolution Behind a Proxy (recommended)
+
+v5.3 resolves the client IP from the `X-Forwarded-For` chain using a configurable number of trusted proxy
+hops:
+
+- `TRUSTED_PROXY_HOP_COUNT` — optional, **defaults to `1`**. Set it to the number of trusted proxies /
+  load balancers in front of Formbricks (e.g. an ingress plus a CDN = `2`). An explicit `0` trusts no
+  proxy at all: the runtime exposes no socket peer address, so the client IP then resolves to a fixed
+  "untrusted" placeholder that rate limiting and response audit logging record in place of a real address.
+  A forwarding chain shorter than the configured count, or a malformed selected hop, also fails closed.
+  Ports appended by gateways such as
+  [Azure Application Gateway](https://learn.microsoft.com/en-us/azure/application-gateway/how-application-gateway-works#modifications-to-the-request)
+  are removed, and IPv6 addresses are normalized to their `/64` network. Leave the setting at `1` (or
+  your real hop count) unless you deliberately want to stop capturing client IPs.
+
+<Warning>
+  Setting `TRUSTED_PROXY_HOP_COUNT` **higher** than your real hop count lets a client spoof its IP by
+  sending a forged `X-Forwarded-For` header. Set it to the exact number of proxies in front of the app —
+  no higher. The default of `1` is correct for a single reverse proxy / ingress.
+</Warning>
+
+### Renamed Configuration
+
+- **Scheduling variables renamed.** `NEXT_PUBLIC_SURVEY_SCHEDULING_*` → `SURVEY_SCHEDULING_*` (the
+  `NEXT_PUBLIC_` prefix was dropped). This only affects you if you ran a v5.3 release candidate that used
+  the old names; a clean v5.2 → v5.3 upgrade never set them.
+
+### Optional New Configuration
+
+None of the following is required to run v5.3. Add them only if you want the associated feature.
+
+#### Survey Scheduling
+
+The new survey-scheduling feature runs on a fixed daily local time. All three are optional and defaulted:
+
+- `SURVEY_SCHEDULING_TIME_ZONE` — a valid IANA time zone. Default `Europe/Berlin`.
+- `SURVEY_SCHEDULING_LOCAL_HOUR` — default `0`.
+- `SURVEY_SCHEDULING_LOCAL_MINUTE` — default `0`.
+
+#### Password Breach Check
+
+- `PASSWORD_HIBP_CHECK_DISABLED` — set to `"1"` to disable the "Have I Been Pwned" breached-password
+  check on sign-up and password reset (`"0"` or unset keeps it on).
+
+### Analytics (Cube)
+
+Two Cube-related deltas in v5.3. Neither changes the Cube schema, so there is **no schema refresh to run**:
+
+- **`CUBEJS_EXTERNAL_DEFAULT` now defaults to `false`** (in both `docker/docker-compose.yml` and the Helm
+  chart). Cube Store is used only when you explicitly opt into external pre-aggregations — a safe default
+  for most self-hosters. Set it back to `true` only if you run external pre-aggregations.
+- **The Hub image moves to `0.8.1`.** The Helm chart pins `0.8.1`. Docker Compose instead resolves the Hub
+  image through `${HUB_IMAGE_REF:-:latest}`, so a plain `docker compose pull` fetches whatever `:latest`
+  currently is — set `HUB_IMAGE_REF=:0.8.1` in `docker/.env` before pulling for a deterministic upgrade.
+
+### Upgrade Steps
+
+1. Back up your database.
+2. Set `TRUSTED_PROXY_HOP_COUNT` to the number of proxies in front of your instance (default `1`).
+3. Update your deployment assets to v5.3 **before** pulling images — `docker compose pull` reads your local
+   Compose file, so fetch the v5.3 `docker-compose.yml` first (Helm users use the v5.3 chart). For a
+   deterministic Hub image on Compose, set `HUB_IMAGE_REF=:0.8.1` in `docker/.env`.
+4. Pull and restart (`docker compose pull && docker compose down && docker compose up -d`, or
+   `helm upgrade` with the new chart / tag). Migrations apply automatically on startup.
+5. Smoke test: sign in (including 2FA), create and schedule a survey, and open the Feedback Records
+   dashboards / charts to confirm analytics render correctly.
+
+### Rollback
+
+The v5.3 migrations are additive and are not read by v5.2, so rolling back the application images / Helm
+values to v5.2 is safe without touching the database. Restore a database backup only if you specifically
+need to undo the schema additions — and note that doing so discards any data written after the backup was
+taken, so perform it within a maintenance window.
+
+## v5.2
+
+Formbricks v5.2 migrates authentication from NextAuth to **Better Auth**. For most self-hosted
+instances this is a drop-in upgrade, but **if you use SSO (Azure AD / Entra ID, generic OIDC, or SAML)
+you must re-register the OAuth callback URL at your identity provider before the first v5.2 restart**,
+or SSO sign-in will fail with a redirect-URI mismatch.
+
+<Warning>
+  All users are signed out once when you upgrade to v5.2. Better Auth takes over session handling and
+  there is no dual-read from the old NextAuth sessions, so the cutover is a one-time forced re-login.
+  Passwords are preserved — existing credential hashes are migrated automatically, so no password reset
+  is needed.
+</Warning>
+
+### SSO Callback URL Change (action required for SSO users)
+
+Better Auth serves the OAuth2/OIDC callback at a new path:
+
+- old (NextAuth): `/api/auth/callback/{provider}`
+- new (Better Auth): `/api/auth/oauth2/callback/{providerId}`
+
+Update the redirect / callback URIs at your identity provider to the new path. Replace `https://your-domain.com`
+with your instance URL:
+
+| Provider | Where to update | New callback URL |
+| --- | --- | --- |
+| Azure AD / Entra ID | Azure portal -> App registration -> Authentication -> Redirect URIs | `https://your-domain.com/api/auth/oauth2/callback/azuread` |
+| Generic OIDC | At your OIDC provider | `https://your-domain.com/api/auth/oauth2/callback/openid` |
+| SAML (BoxyHQ / Jackson) | The Jackson connection's `redirect_uri` | `https://your-domain.com/api/auth/oauth2/callback/saml` |
+
+<Note>
+  **Google and GitHub sign-in do not change.** They use Better Auth's built-in social providers, whose
+  callback path (`/api/auth/callback/{provider}`) is unchanged — nothing to do there.
+
+  For SAML, only the Jackson connection's `redirect_uri` changes. The IdP-side ACS endpoint
+  (`/api/auth/saml/callback`) is unchanged, so you do **not** need to reconfigure your IdP's SAML app.
+
+  Leave the old `/api/auth/callback/*` redirect URIs registered through the transition. Keeping them in
+  place is harmless and makes a rollback to v5.1 clean.
+</Note>
+
+### Authentication Environment Variables
+
+Better Auth introduces two optional variables. **Neither is required** for a standard upgrade — both fall
+back to your existing NextAuth configuration:
+
+- `BETTER_AUTH_SECRET` — cookie/session signing secret. Falls back to `NEXTAUTH_SECRET` when unset. On
+  these releases it must be at least 32 characters when set explicitly. Use the value `NEXTAUTH_SECRET`
+  already holds: a *different* one invalidates every session and every outstanding invite and
+  verification link.
+- `BETTER_AUTH_URL` — the auth base URL. Falls back to `NEXTAUTH_URL` (and then `WEBAPP_URL`) when unset.
+
+<Info>
+  If your instance already sets `NEXTAUTH_SECRET` and `NEXTAUTH_URL` (all v5.1 instances do), you can
+  upgrade without adding any new auth variables.
+</Info>
+
+**Removed:** `DISABLE_ACCOUNT_DELETION_SSO_CONFIRMATION` no longer exists. Remove it from your environment
+if you set it; it now has no effect.
+
+### Optional New Configuration
+
+None of the following is required to run v5.2. Add them only if you want the associated feature.
+
+#### Hub Enrichment (sentiment, emotion, translation)
+
+Hub `>= 0.8.0` can classify sentiment and emotion and translate feedback. These are **off** unless you set
+a provider and model, and they run in both the Hub API and the hub-worker, so set the variables on **both**
+services. Bump your Hub image to `>= 0.8.0` (via `HUB_IMAGE_REF`) to pick up these features.
+
+- `SENTIMENT_PROVIDER`, `SENTIMENT_MODEL`, `SENTIMENT_PROVIDER_API_KEY`
+- `EMOTIONS_PROVIDER`, `EMOTIONS_MODEL`, `EMOTIONS_PROVIDER_API_KEY`
+- `TRANSLATION_PROVIDER`, `TRANSLATION_MODEL`, `TRANSLATION_PROVIDER_API_KEY`, `TRANSLATION_DEFAULT_LANGUAGE`
+
+Supported providers: `openai`, `google` (AI Studio, needs `*_PROVIDER_API_KEY`), and `google-gemini`
+(Vertex, needs `*_GOOGLE_CLOUD_PROJECT` / `*_LOCATION` plus Application Default Credentials).
+
+<Warning>
+  A provider set **without** its required credentials crash-loops both Hub containers on startup — it does
+  not degrade gracefully. Set the credentials, or leave the provider unset.
+</Warning>
+
+#### AI Taxonomy (beta)
+
+An optional standalone taxonomy service, enabled in Docker Compose with `COMPOSE_PROFILES=taxonomy`. It
+shares an internal token with Hub:
+
+- `TAXONOMY_SERVICE_URL` (the internal URL to the taxonomy service)
+- `HUB_INTERNAL_API_TOKEN`, `TAXONOMY_SERVICE_TOKEN` (strong random secrets)
+- `TAXONOMY_LLM_PROVIDER` / `TAXONOMY_LLM_MODEL` / `TAXONOMY_LLM_BASE_URL` / `TAXONOMY_LLM_API_KEY`
+  (`openai-compatible` by default; `bedrock` and `vertex-gemini` also supported)
+- `TAXONOMY_IMAGE_REF` to pin a released image (e.g. `:v0.1.0`)
+
+Use `COMPOSE_PROFILES=qwen,taxonomy` to back it with the bundled Qwen/vLLM service.
+
+#### Bundled Qwen / vLLM Runtime
+
+Docker Compose can now run a bundled OpenAI-compatible LLM for self-hosted AI features with
+`COMPOSE_PROFILES=qwen`. Tunable via `QWEN_VLLM_IMAGE`, `QWEN_MODEL_ID`, `QWEN_SERVED_MODEL_NAME`,
+`QWEN_MAX_MODEL_LEN`, `QWEN_MAX_NUM_SEQS`, `QWEN_GPU_MEMORY_UTILIZATION`, `QWEN_VLLM_HOST`, and
+`QWEN_VLLM_PORT`.
+
+#### OpenTelemetry Log Export
+
+- `OTEL_LOGS_ENABLED=1` — export Pino application logs via OTLP (off by default; also needs
+  `OTEL_EXPORTER_OTLP_ENDPOINT`).
+
+### Upgrade Steps
+
+v5.2 requires no manual database migration step beyond the standard automatic Prisma migrations on startup
+(the credential-account backfill runs automatically). The Helm chart is unchanged from v5.1.
+
+1. **If you use SSO**, add the new `/api/auth/oauth2/callback/{providerId}` redirect URIs at your IdP (see
+   the table above), keeping the old ones in place.
+2. Back up your database.
+3. Pull the v5.2 images and restart (`docker compose pull && docker compose down && docker compose up -d`,
+   or `helm upgrade` with the new tag).
+4. After startup, sign in again (the one-time forced re-login) and verify each configured SSO provider
+   completes sign-in.
+
+### Rollback
+
+Because the old `/api/auth/callback/*` redirect URIs are left in place, rolling back to v5.1 is clean:
+revert your image tags / Helm values, and the previous NextAuth callback path works again. Restore the
+database backup only if you need to undo schema changes.
+
+## v5
+
+Formbricks v5 changes the self-hosted runtime contract. If you are upgrading an existing Formbricks 4.x
+deployment, review this section before starting the new version.
+
+### What Changes In v5
+
+- **Formbricks Hub is now mandatory** for self-hosted Formbricks v5 deployments.
+- **Cube is now part of the baseline stack** alongside Hub. Docker, one-click, and Helm all bundle Cube by
+  default; `CUBEJS_API_SECRET` is required. Operators can disable the bundled Cube deployment in Helm to use
+  an external cluster instead.
+- **Edge rate limiting is now required** for specific public and API-key routes. Those routes are no longer
+  throttled inside the application server.
+- **AI features are configured at the instance level** via `AI_*` environment variables.
+
+<Warning>
+  Formbricks v5 removes application-level rate limiting for several routes that are now expected to be
+  protected by Envoy Gateway or an equivalent edge rate limiter. If your self-hosted instance does not
+  already have equivalent edge protection, add it before exposing the v5 stack.
+</Warning>
+
+### Before You Upgrade
+
+Before you restart your instance on Formbricks v5:
+
+- back up your database
+- identify your current deployment type: one-click, manual Docker Compose, or Kubernetes/Helm
+- confirm Redis/Valkey and your file storage setup are already healthy from your v4 baseline
+- identify whether file uploads use external S3-compatible storage or a legacy bundled MinIO service
+- budget approximately ~500 MB additional RAM headroom for the bundled Cube container (dashboards and analysis are part of the baseline now)
+- decide whether this instance needs optional AI features
+- verify whether you already run Envoy Gateway or another equivalent edge rate limiter for the covered routes
+
+### Required Config And Infrastructure Changes
+
+#### Formbricks Hub
+
+Formbricks v5 expects Hub to be part of the self-hosted stack.
+
+- `HUB_API_KEY` is required
+- `HUB_API_URL` must point to the Hub service the Formbricks app can reach
+- `HUB_DATABASE_URL` is optional; when unset, Hub can share the same PostgreSQL database as Formbricks
+- bundled Docker and Helm assets run Hub database migrations automatically during startup or upgrade, and the
+  migration steps are idempotent
+
+<Note>
+  Hub-specific source code and standalone deployment assets live in the
+  [Formbricks Hub repository](https://github.com/formbricks/hub). For a normal Formbricks v5 upgrade, use that
+  repository as reference material only; the canonical migration steps stay in these Formbricks docs.
+</Note>
+
+#### Edge Rate Limiting
+
+Formbricks v5 splits rate limiting across two layers:
+
+- Envoy Gateway, or an equivalent edge rate limiter, for covered public and API-key routes
+- the application server for the remaining session-authenticated routes, server actions, and uncovered APIs
+
+Keep Redis/Valkey enabled for the remaining application-enforced limits. For the covered route groups and exact
+thresholds, use the [rate-limiting guide](/self-hosting/configuration/rate-limiting) as the source of truth.
+
+#### AI Features
+
+AI features are optional and only need instance-level configuration if you want to enable the related
+enterprise functionality.
+
+- `AI_PROVIDER` and `AI_MODEL` are the base settings
+- `AI_PROVIDER=aws` requires `AI_AWS_REGION`, `AI_AWS_ACCESS_KEY_ID`, and `AI_AWS_SECRET_ACCESS_KEY`
+- `AI_PROVIDER=google` requires `AI_GOOGLE_CLOUD_PROJECT` and `AI_GOOGLE_CLOUD_LOCATION`; credentials are
+  optional overrides when Application Default Credentials are unavailable
+- `AI_PROVIDER=azure` requires `AI_AZURE_API_KEY` and either `AI_AZURE_BASE_URL` or
+  `AI_AZURE_RESOURCE_NAME`
+- `AI_PROVIDER=openai-compatible` requires `AI_OPENAI_COMPATIBLE_BASE_URL`; the LLM GA v1 self-hosted
+  path is Qwen served by vLLM
+- Helm operators can set `llm.enabled: true` to deploy the bundled Qwen/vLLM runtime
+- Docker Compose operators can set `COMPOSE_PROFILES=qwen` to deploy the bundled Qwen/vLLM runtime
+- Keep the bundled runtime disabled when you configure Google Vertex, Azure, AWS Bedrock, or an external
+  OpenAI-compatible endpoint manually
+
+#### Cube
+
+Cube is part of the baseline Formbricks v5 stack.
+
+- the Docker, one-click, and Helm deployments all bundle the `cube` service by default
+- the Formbricks app requires `CUBEJS_API_URL` and `CUBEJS_API_SECRET`; the install/dev-setup scripts
+  generate the secret automatically for new installs
+- Helm operators who want to run an external Cube cluster can set `cube.enabled: false` and provide their
+  own endpoint via `deployment.env.CUBEJS_API_URL`
+- if you run Cube yourself, you may also need to override `CUBEJS_DB_*` values for the Cube service
+
+### Upgrade Steps By Deployment Type
+
+**1. Back up your database**
+
+<Tabs>
+  <Tab title="One-Click">
+    From the `formbricks` directory created by the installer:
+
+    ```bash
+    cd formbricks
+    docker compose exec postgres pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v5_$(date +%Y%m%d_%H%M%S).dump
+    ```
+
+    <Info>
+      If your PostgreSQL service name differs, run <code>docker compose ps</code> first and adjust the command.
+    </Info>
+  </Tab>
+  <Tab title="Docker Compose">
+    From the directory that contains your `docker-compose.yml`:
+
+    ```bash
+    docker compose exec postgres pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v5_$(date +%Y%m%d_%H%M%S).dump
+    ```
+
+    <Info>
+      If your service is not named <code>postgres</code>, use <code>docker compose ps</code> to find the correct
+      name.
+    </Info>
+  </Tab>
+  <Tab title="Kubernetes">
+    If you are using the in-cluster PostgreSQL released by the Helm chart:
+
+    ```bash
+    kubectl exec -n formbricks formbricks-postgresql-0 -- pg_dump -Fc -U formbricks -d formbricks > formbricks_pre_v5_$(date +%Y%m%d_%H%M%S).dump
+    ```
+
+    If you use a managed PostgreSQL service, create a provider snapshot or run `pg_dump` directly against the
+    external host before continuing.
+  </Tab>
+</Tabs>
+
+**2. Update your deployment config and restart on v5**
+
+<Tabs>
+  <Tab title="One-Click">
+    The one-click `./formbricks.sh update` command only pulls new images. It does **not** rewrite your existing
+    `formbricks/docker-compose.yml`, so you must merge the v5 stack changes before the first v5 restart.
+
+    ```bash
+    curl -fsSL -o formbricks/docker-compose.v5.yml https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/docker-compose.yml
+    ```
+
+    Then compare `formbricks/docker-compose.v5.yml` with your existing `formbricks/docker-compose.yml` and merge
+    the v5 additions:
+
+    - set `POSTGRES_PASSWORD` in `formbricks/.env` to the exact password used by the existing PostgreSQL
+      volume; do not generate a new value during the upgrade. If it contains URI-reserved characters, also set
+      `POSTGRES_PASSWORD_URL_ENCODED` to its percent-encoded form
+    - add a non-empty `HUB_API_KEY` and reuse the same value wherever your deployment resolves Hub auth
+    - keep `HUB_API_URL` at `http://hub:8080` unless Hub runs elsewhere
+    - include the bundled `formbricks-migrate`, `hub-migrate`, `hub`, and `hub-worker` services
+    - sync `formbricks/cube/cube.js` and `formbricks/cube/schema/FeedbackRecords.js` from the current
+      release and ensure `formbricks/.env` contains `CUBEJS_API_SECRET` (Cube is part of the baseline stack
+      in v5)
+    - if your older setup still uses bundled MinIO for uploads, review that storage path separately before the
+      first v5 restart; newer self-hosting updates move the bundled object-storage path to RustFS, while
+      external S3-compatible storage keeps the same `S3_*` app contract
+    - add any `AI_*` variables you need
+    - if you prefer to run an external Cube instance, point `CUBEJS_API_URL` at it and provide the matching
+      `CUBEJS_API_SECRET`; otherwise the bundled `cube` service runs against the local Postgres
+
+    After the compose file is updated and your edge rate limiter is in place:
+
+    ```bash
+    ./formbricks.sh update
+    ```
+  </Tab>
+  <Tab title="Docker Compose">
+    Pull the current production compose file and merge the v5 changes into your existing deployment config before
+    only updating images:
+
+    ```bash
+    curl -fsSL -o docker-compose.v5.yml https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/docker-compose.yml
+    ```
+
+    At minimum, confirm:
+
+    - `POSTGRES_PASSWORD` contains the exact password used by the existing PostgreSQL volume; replacing the
+      Compose file does not rotate the database password. If it contains URI-reserved characters, also set
+      `POSTGRES_PASSWORD_URL_ENCODED` to its percent-encoded form
+    - `HUB_API_KEY` is configured and the same value is available wherever your deployment resolves Hub auth
+    - `HUB_API_URL` points to the Hub service the app can reach
+    - the compose stack includes `formbricks-migrate`, `hub-migrate`, `hub`, and `hub-worker`
+    - the v5 stack also includes `cube`, `cube/cube.js`, and `cube/schema/FeedbackRecords.js`, with
+      `CUBEJS_API_SECRET` available through your `.env` or shell environment
+    - if your legacy Compose file still includes bundled MinIO for uploads, treat that as a separate storage
+      review when comparing files; newer bundled storage guidance uses RustFS, while external S3-compatible
+      storage keeps the same `S3_*` app contract
+    - any `AI_*` variables you need are set
+    - if you prefer to run an external Cube instance, point `CUBEJS_API_URL` at it and supply the matching
+      `CUBEJS_API_SECRET`; otherwise the bundled `cube` service runs against the local Postgres
+
+    Then restart the stack:
+
+    ```bash
+    docker compose pull
+    docker compose down
+    docker compose up -d
+    ```
+
+    <Info>
+      The v5 Docker Compose stack bundles Hub and Cube. Keep the bundled `cube/` config files in sync with
+      `docker-compose.yml` when you update this path.
+    </Info>
+  </Tab>
+  <Tab title="Kubernetes">
+    Upgrade using the current Formbricks chart:
+
+    ```bash
+    helm upgrade formbricks oci://ghcr.io/formbricks/helm-charts/formbricks \
+      -n formbricks \
+      -f values.yaml
+    ```
+
+    Before running the upgrade, confirm these v5 expectations in your values:
+
+    - keep `hub.enabled=true`; Hub is mandatory in v5
+    - if you want the bundled Envoy path, configure `envoy.enabled=true` and then choose:
+      - `envoy.controller.enabled=true` for the bundled controller mode
+      - `envoy.controller.enabled=false` when the cluster already has a compatible Envoy Gateway controller
+    - if you use bundled Envoy rate limiting, enable a dedicated backend with `envoyRedis.enabled=true`
+    - if you already have an equivalent edge rate limiter outside the chart, keep that protection in place
+    - `CUBEJS_API_SECRET` is provided (Cube is bundled by default at `cube.enabled: true`; set to `false`
+      and point `CUBEJS_API_URL` at your own endpoint if you prefer an external Cube cluster)
+  </Tab>
+</Tabs>
+
+### Post-Upgrade Verification
+
+After the upgrade:
+
+- confirm the Formbricks app starts and `GET /health` returns successfully
+- confirm the Hub service is healthy and reachable from the Formbricks app
+- verify any Hub-backed connector or feedback flows you use
+- verify covered routes are rate-limited at the edge layer
+- verify AI features only if you configured the required `AI_*` variables
+- verify dashboards and analysis flows against the bundled (or external) Cube endpoint
+
+### Troubleshooting And Rollback
+
+Common upgrade issues:
+
+- **Missing `HUB_API_KEY`**: Formbricks cannot authenticate to Hub, and Hub itself may fail to start
+- **Bad `HUB_API_URL`**: the app starts, but Hub-backed features fail because the service cannot be reached
+- **No edge rate limiter in front of covered routes**: the v5 deployment runs, but those routes are no longer
+  protected by the legacy in-app limiter
+- **Missing AI provider configuration**: AI features remain unavailable until `AI_PROVIDER`, `AI_MODEL`, and the
+  matching provider settings are set correctly
+- **Missing `CUBEJS_API_SECRET`** (or unreachable Cube endpoint): the Formbricks app fails env validation
+  at boot, or — if env vars are present but Cube is unreachable — dashboards and analysis queries fail
+  while the rest of the app stays healthy
+- **Cube healthcheck fails with `wget: not found`**: older v5 Docker Compose files used `wget` for the
+  bundled Cube healthcheck, but `cubejs/cube:v1.6.6` does not include it. Sync the Cube healthcheck from the
+  current Docker Compose file so it checks `/readyz` with Node instead.
+
+If you need to roll back:
+
+- restore the pre-upgrade database backup if schema or data changes require it
+- revert your image tags or Helm release values to the last known-good Formbricks 4.x version
+- revert compose or Helm configuration changes introduced for the v5 rollout
+
+**Workspaces and Environment IDs**
+
+Environment IDs were deprecated to simplify SDK setup around a single Workspace ID while keeping existing
+integrations backward compatible during migration.
+
+**Website & App Surveys SDK: Migrate to Workspace ID**
+
+<Info>
+  Formbricks v5 also includes the Environment ID to Workspace ID transition for SDK setup. If you still rely on a
+  legacy Environment ID, read the [Migrate to Workspace ID guide](/surveys/website-app-surveys/workspace-id-migration).
+</Info>
+
+## v4.7
+
+Formbricks v4.7 introduces **typed contact attributes** with native `number` and `date` data types. This enables comparison-based segment filters (e.g. "signup date before 2025-01-01") that were previously not possible with string-only attribute values.
+
+### What Happens Automatically
+
+When Formbricks v4.7 starts for the first time, the data migration will:
+
+1. Analyze all existing contact attribute keys and infer their data types (`text`, `number`, or `date`) based on the stored values
+2. Update the `ContactAttributeKey` table with the detected `dataType` for each key
+3. **If your instance has fewer than 1,000,000 contact attribute rows**: backfill the new `valueNumber` and `valueDate` columns inline. No manual action is needed.
+4. **If your instance has 1,000,000 or more contact attribute rows**: the value backfill is skipped to avoid hitting the migration timeout. You will need to run a standalone backfill script after the upgrade.
+
+<Info>
+  Most self-hosted instances have far fewer than 1,000,000 contact attribute rows (a typical setup with 100K
+  contacts and 5-10 attributes each lands around 500K-1M rows). If you are below the threshold, the migration
+  handles everything automatically and you can skip the manual backfill step below.
+</Info>
+
+### Steps to Migrate
+
+**1. Backup your Database**
+
+<Tabs>
+  <Tab title="Docker">
+    Before running these steps, navigate to the `formbricks` directory where your `docker-compose.yml` file is located.
+
+    ```bash
+    docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v4.7_$(date +%Y%m%d_%H%M%S).dump
+    ```
+
+    <Info>
+      If you run into "**No such container**", use `docker ps` to find your container name, e.g.
+      `formbricks_postgres_1`.
+    </Info>
+
+  </Tab>
+  <Tab title="Kubernetes">
+    If you are using the **in-cluster PostgreSQL** deployed by the Helm chart:
+
+    ```bash
+    kubectl exec -n formbricks formbricks-postgresql-0 -- pg_dump -Fc -U formbricks -d formbricks > formbricks_pre_v4.7_$(date +%Y%m%d_%H%M%S).dump
+    ```
+
+    <Info>
+      If your PostgreSQL pod has a different name, run `kubectl get pods -n formbricks` to find it.
+    </Info>
+
+    If you are using a **managed PostgreSQL** service (e.g. AWS RDS, Cloud SQL), use your provider's backup/snapshot feature or run `pg_dump` directly against the external host.
+
+  </Tab>
+</Tabs>
+
+**2. Upgrade to Formbricks v4.7**
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    # Pull the latest version
+    docker compose pull
+
+    # Stop the current instance
+    docker compose down
+
+    # Start with Formbricks v4.7
+    docker compose up -d
+    ```
+
+  </Tab>
+  <Tab title="Kubernetes">
+    ```bash
+    helm upgrade formbricks oci://ghcr.io/formbricks/helm-charts/formbricks \
+      -n formbricks \
+      --set deployment.image.tag=v4.7.0
+    ```
+
+    <Info>
+      The Helm chart includes a migration Job that automatically runs Prisma schema migrations as a
+      PreSync hook before the new pods start. No manual migration step is needed.
+    </Info>
+
+  </Tab>
+</Tabs>
+
+**3. Check the Migration Logs**
+
+After Formbricks starts, check the logs to see whether the value backfill was completed or skipped:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker compose logs formbricks | grep -i "backfill"
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    ```bash
+    # Check the application pod logs
+    kubectl logs -n formbricks -l app.kubernetes.io/name=formbricks --tail=200 | grep -i "backfill"
+    ```
+
+    If the Helm migration Job ran, you can also inspect its logs:
+
+    ```bash
+    kubectl logs -n formbricks job/formbricks-migration
+    ```
+
+  </Tab>
+</Tabs>
+
+If you see a message like `Skipping value backfill (X rows >= 1000000 threshold)`, proceed to step 4. Otherwise, the migration is complete and no further action is needed.
+
+**4. Run the Backfill Script (large datasets only)**
+
+If the migration skipped the value backfill, run the standalone backfill script inside the running Formbricks container:
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker exec formbricks node packages/database/dist/scripts/backfill-attribute-values.js
+    ```
+
+    <Info>Replace `formbricks` with your actual container name if it differs. Use `docker ps` to find it.</Info>
+
+  </Tab>
+  <Tab title="Kubernetes">
+    ```bash
+    kubectl exec -n formbricks deploy/formbricks -- node packages/database/dist/scripts/backfill-attribute-values.js
+    ```
+
+    <Info>
+      If your Formbricks deployment has a different name, run `kubectl get deploy -n formbricks` to find it.
+    </Info>
+
+  </Tab>
+</Tabs>
+
+The script will output progress as it runs:
+
+```
+========================================
+Attribute Value Backfill Script
+========================================
+
+Fetching number-type attribute keys...
+Found 12 number-type keys. Backfilling valueNumber...
+  Number backfill progress: 10/12 keys (48230 rows updated)
+  Number backfill progress: 12/12 keys (52104 rows updated)
+
+Fetching date-type attribute keys...
+Found 5 date-type keys. Backfilling valueDate...
+  Date backfill progress: 5/5 keys (31200 rows updated)
+
+========================================
+Backfill Complete!
+========================================
+  valueNumber rows updated: 52104
+  valueDate rows updated:   31200
+  Duration: 42.3s
+========================================
+```
+
+Key characteristics of the backfill script:
+
+- **Safe to run while Formbricks is live** -- it does not lock the entire table or wrap work in a long transaction
+- **Idempotent** -- it only updates rows where the typed columns are still `NULL`, so you can safely run it multiple times
+- **Resumable** -- each batch commits independently, so if the process is interrupted you can re-run it and it picks up where it left off
+- **No timeout risk** -- unlike the migration, this script runs outside the migration transaction and has no time limit
+
+**5. Verify the Upgrade**
+
+- Access your Formbricks instance at the same URL as before
+- If you use contact segments with number or date filters, verify they return the expected results
+- Check that existing surveys and response data are intact
+
+---
+
+## v4.0
+
+<Warning>
+  **Important: Migration Required**
+
+Formbricks 4 introduces additional requirements for self-hosting setups and makes a dedicated Redis cache as well as S3-compatible file storage mandatory.
+
+</Warning>
+
+Formbricks 4.0 is a **major milestone** that sets up the technical foundation for future iterations and feature improvements. This release focuses on modernizing core infrastructure components to improve reliability, scalability, and enable advanced features going forward.
+
+### What's New in Formbricks 4.0
+
+**🚀 New Enterprise Features:**
+
+- **Quotas Management**: Advanced quota controls for enterprise users
+
+**🏗️ Technical Foundation Improvements:**
+
+- **Enhanced File Storage**: Improved file handling with better performance and reliability
+- **Improved Caching**: New caching functionality improving speed, extensibility and reliability
+- **Database Optimization**: Removal of unused database tables and fields for better performance
+- **Future-Ready Architecture**: Standardized infrastructure components for upcoming features
+
+### What This Means for Your Self-Hosting Setup
+
+These improvements in Formbricks 4.0 also make some infrastructure requirements mandatory going forward:
+
+- **Redis** for caching
+- **RustFS or S3-compatible storage** for file uploads
+
+These services are already included in the updated one-click setup for self-hosters, but existing users need to upgrade their setup. More information on this below.
+
+### Why We Made These Changes
+
+We know this represents more moving parts in your infrastructure and might even introduce more complexity in hosting Formbricks, and we don't take this decision lightly. As Formbricks grows into a comprehensive Survey and Experience Management platform, we've reached a point where the simple, single-service approach was holding back our ability to deliver the reliable, feature-rich product our users demand and deserve.
+
+By moving to dedicated, professional-grade services for these critical functions, we're building the foundation needed to deliver:
+
+- **Enterprise-grade reliability** with proper redundancy and backup capabilities
+- **Advanced features** that require sophisticated caching and file processing
+- **Better performance** through optimized, dedicated services
+- **Future scalability** to support larger deployments and more complex use cases without the need to maintain two different approaches
+
+We believe this is the only path forward to build the comprehensive Survey and Experience Management software we're aiming for.
+
+### Migration Steps for v4.0
+
+Additional migration steps are needed if you are using a self-hosted Formbricks setup that uses either local file storage (not S3-compatible file storage) or doesn't already use a Redis cache.
+
+### Legacy one-click v4.0 upgrade
+
+For historical v4.0 upgrades, our original one-click migration script is still available:
+
+```bash
+# Download the latest script
+curl -fsSL -o migrate-to-v4.sh \
+  https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/migrate-to-v4.sh
+
+# Make it executable
+chmod +x migrate-to-v4.sh
+
+# Launch the guided migration
+./migrate-to-v4.sh
+```
+
+This script guides you through the steps for the infrastructure migration and does the following:
+
+- Adds a Redis service to your setup and configures it
+- Adds a bundled MinIO service to your setup, configures it, and migrates local files to it
+- Pulls the latest Formbricks image and updates your instance
+
+### Manual Setup
+
+If you use a different setup to host your Formbricks instance, you need to make sure to make the necessary adjustments to run Formbricks 4.0.
+
+#### Redis
+
+Formbricks 4.0 requires a Redis instance to work properly. Please add a Redis instance to your Docker setup, your K8s infrastructure, or however you are hosting Formbricks at the moment. Formbricks works with the latest versions of Redis as well as Valkey.
+
+You need to configure the `REDIS_URL` environment variable and point it to your Redis instance.
+
+#### S3-compatible storage
+
+To use file storage (e.g., file upload questions, image choice questions, custom survey backgrounds, etc.), you need to have S3-compatible file storage set up and connected to Formbricks.
+
+Formbricks supports multiple storage providers (among many other S3-compatible storages):
+
+- AWS S3
+- Digital Ocean Spaces
+- Hetzner Object Storage
+- Custom RustFS server
+
+Please make sure to set up a storage bucket with one of these solutions and then link it to Formbricks using the following environment variables:
+
+```
+  S3_ACCESS_KEY: your-access-key
+  S3_SECRET_KEY: your-secret-key
+  S3_REGION: us-east-1
+  S3_BUCKET_NAME: formbricks-uploads
+  S3_ENDPOINT_URL: https://files.yourdomain.com # not needed for AWS S3
+  S3_FORCE_PATH_STYLE: 1 # set this only for custom endpoints like RustFS, MinIO, or LocalStack; omit for AWS S3
+```
+
+#### Upgrade Process
+
+**1. Backup your Database**
+
+**Critical Step**: Create a complete database backup before proceeding. Formbricks 4.0 will automatically remove unused database tables and fields during startup.
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v4.0_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into "**No such container**", use `docker ps` to find your container name, e.g.
+  `formbricks_postgres_1`.
+</Info>
+
+**2. Upgrade to Formbricks 4.0**
+
+Pull the latest Docker images and restart the setup (example for docker-compose):
+
+```bash
+# Pull the latest version
+docker compose pull
+
+# Stop the current instance
+docker compose down
+
+# Start with Formbricks 4.0
+docker compose up -d
+```
+
+**3. Automatic Database Migration**
+
+When you start Formbricks 4.0 for the first time, it will **automatically**:
+
+- Detect and apply required database schema updates
+- Remove unused database tables and fields
+- Optimize the database structure for better performance
+
+No manual intervention is required for the database migration.
+
+**4. Verify Your Upgrade**
+
+- Access your Formbricks instance at the same URL as before
+- Test file uploads to ensure S3 storage integration works correctly. Check the [File Upload Troubleshooting](/self-hosting/configuration/file-uploads#troubleshooting) section if you face any issues.
+- Verify that existing surveys and data are intact
+- Check that previously uploaded files are accessible
+
+### v3.3
+
+<Info>
+  With Formbricks 3.0, we introduced an automatic data migration system. If you're using a version older than
+  **v2.7**, you must upgrade step-by-step through earlier versions (e.g. **2.4 → 2.5 → 2.6 → 2.7**). Once you
+  reach **v2.7**, you can upgrade directly to **any v3.x or future release** without needing intermediate
+  migrations.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users who are **self-hosting Formbricks** using the **one-click setup**. If you have a different setup, you may need to adjust the commands accordingly.
+
+Before running these steps, **navigate to the `formbricks` directory** where your `docker-compose.yml` file is located.
+
+1. **Backup your Database**: Backing up your database is crucial before upgrading. Use the following command to create a backup:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v3.3_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “**No such container**”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Info>
+
+If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a restore scenario you will need to use `psql` then with an empty `formbricks` database.
+
+1. Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+1. Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+1. Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+When you start the latest version of **Formbricks**, it will **automatically detect and apply any required data migrations** during startup. You don’t need to run any manual migration steps or download separate migration images.
+
+- Access your updated instance
+
+Once the containers are running, simply go to the **same URL** as before to access your updated **Formbricks** instance.
+
+That’s it! This new process ensures your **Formbricks** setup stays up to date with the latest schema changes as soon as you run the updated container.
+
+### v3.2
+
+<Info>
+  With Formbricks 3.0, we introduced an automatic data migration system. If you're using a version older than
+  **v2.7**, you must upgrade step-by-step through earlier versions (e.g. **2.4 → 2.5 → 2.6 → 2.7**). Once you
+  reach **v2.7**, you can upgrade directly to **any v3.x or future release** without needing intermediate
+  migrations.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users who are **self-hosting Formbricks** using the **one-click setup**. If you have a different setup, you may need to adjust the commands accordingly.
+
+Before running these steps, **navigate to the `formbricks` directory** where your `docker-compose.yml` file is located.
+
+1. **Backup your Database**: Backing up your database is crucial before upgrading. Use the following command to create a backup:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v3.2_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “**No such container**”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Info>
+
+If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a restore scenario you will need to use `psql` then with an empty `formbricks` database.
+
+1. Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+1. Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+1. Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+When you start the latest version of **Formbricks**, it will **automatically detect and apply any required data migrations** during startup. You don’t need to run any manual migration steps or download separate migration images.
+
+- Access your updated instance
+
+Once the containers are running, simply go to the **same URL** as before to access your updated **Formbricks** instance.
+
+That’s it! This new process ensures your **Formbricks** setup stays up to date with the latest schema changes as soon as you run the updated container.
+
+### v3.1
+
+<Info>
+  With Formbricks 3.0, we introduced an automatic data migration system. If you're using a version older than
+  **v2.7**, you must upgrade step-by-step through earlier versions (e.g. **2.4 → 2.5 → 2.6 → 2.7**). Once you
+  reach **v2.7**, you can upgrade directly to **any v3.x or future release** without needing intermediate
+  migrations.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users who are **self-hosting Formbricks** using the **one-click setup**. If you have a different setup, you may need to adjust the commands accordingly.
+
+Before running these steps, **navigate to the `formbricks` directory** where your `docker-compose.yml` file is located.
+
+1. **Backup your Database**: Backing up your database is crucial before upgrading. Use the following command to create a backup:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v3.1_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “**No such container**”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Info>
+
+If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a restore scenario you will need to use `psql` then with an empty `formbricks` database.
+
+1. Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+1. Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+1. Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+When you start the latest version of **Formbricks**, it will **automatically detect and apply any required data migrations** during startup. You don’t need to run any manual migration steps or download separate migration images.
+
+- Access your updated instance
+
+Once the containers are running, simply go to the **same URL** as before to access your updated **Formbricks** instance.
+
+That’s it! This new process ensures your **Formbricks** setup stays up to date with the latest schema changes as soon as you run the updated container.
+
+## v3.0
+
+<Warning>
+  **Important: Do Not Upgrade to 3.0 If You Need SSO, User Identification, or Cluster Support**
+
+With **Formbricks 3.0**, we're making changes to ensure long-term sustainability while still supporting open source. While the **Community Edition** has gained [new features](https://formbricks.com/blog/formbricks-3-0), some [advanced capabilities](https://formbricks.com/docs/self-hosting/license) are now part of the **Enterprise Edition**.
+
+⚠️ **No Downgrade Option:** If you upgrade to **3.0** and run the data migration, **you cannot revert to 2.7.2**. If you rely on **SSO, user identification, or cluster support**, either **stay on version 2.7.x** or reach out to us on [**GitHub Discussions**](https://github.com/formbricks/formbricks/discussions) **for a custom quote**.
+
+</Warning>
+
+This major release brings a better approach to **data migrations**.
+
+- If you're using **Formbricks v2.7 or later**, you can upgrade **directly** to **v3.x** and future versions.
+
+- If you're on a version **older than v2.7**, you **must upgrade step-by-step** (e.g. **2.4 → 2.5 → 2.6 → 2.7**) before moving to v3.x.
+
+### Steps to Migrate
+
+This guide is for users **self-hosting** Formbricks with the **one-click setup**. If you're using a different setup, you might adjust the commands.
+
+- &#x20;Navigate to the Formbricks Directory
+
+Before running any steps, go to the directory where your `docker-compose.yml` file is located.
+
+- Backup Your Database
+
+Backing up your database is **crucial** before upgrading. Use the following command to create a backup:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v3.0_$(date +%Y%m%d_%H%M%S).dump
+
+```
+
+<Info>
+  **Note:** If you see a “No such container” error, run `docker ps` to find your actual container name (e.g.
+  `formbricks_postgres_1`).
+</Info>
+
+<Info>
+  Tip: If you want to store the backup as a `.sql` file, remove the `-Fc` (custom format) option. If you need
+  to restore it later, use `psql` with an empty Formbricks database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+When you start the latest version of Formbricks, it will automatically detect and run any necessary data migrations during startup. There is no need to run any manual migration steps or pull any separate migration images.
+
+- Access your updated instance
+
+That’s it! Once the containers are up and running, simply navigate to the same URL as before to access your fully migrated Formbricks instance.
+
+## v2.7
+
+<Info>
+  AI Features & Database Update: This release lays the groundwork for upcoming AI features, now in private beta. Formbricks requires the `pgvector` extension in PostgreSQL.
+
+One-Click Setup Users: Use the `pgvector/pgvector:pg15` image instead of `postgres:15-alpine` to ensure compatibility.
+
+</Info>
+
+Formbricks v2.7 includes all the features and improvements developed by the community during Hacktoberfest 2024. Additionally, this release introduces an advanced team-based access control system, which is available in the Formbricks Enterprise Edition.
+
+### Additional Updates
+
+If you previously used organisation-based access control (an enterprise feature) and the `DEFAULT_ORGANIZATION_ROLE` environment variable, update its value to one of these roles: `owner`, `manager`, or `member`. Read more about the new roles in the [documentation](/platform/features/user-management).
+
+### Steps to Migrate
+
+This guide is for users who are self-hosting Formbricks using our one-click setup. If you are using a different setup, you might adjust the commands accordingly.
+
+To run all these steps, please navigate to the Formbricks folder where your `docker-compose.yml` file is located.
+
+- **Backup your Database:** This is a crucial step. Please make sure to backup your database before proceeding with the upgrade. You can use the following command to backup your database.&#x20;
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.7_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Note>
+  If you run into “No such container”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Note>
+
+<Note>
+  If you want to store the backup as an \*.sql file, remove the `-Fc` option. To restore, use `psql` with an
+  empty Formbricks database.
+</Note>
+
+- If you use an older `docker-compose.yml` file from the one-click setup, modify it to use the `pgvector/pgvector:pg15` image instead of `postgres:15-alpine`:
+
+```yaml
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - 5432:5432
+```
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance and remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Tip>To find the Docker network name for your Postgres database, run `docker network ls`.</Tip>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:latest && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.7" \
+  ghcr.io/formbricks/data-migrations:v2.7.0
+
+```
+
+The command above will migrate your data to the latest schema. This step is important to update your existing data to the new structure. The changes will only be made if the script runs successfully. You can run the script multiple times safely.
+
+- That's it! Once the migration is finished, you can **access your Formbricks instance** at the same URL as before.
+
+## v2.6
+
+Formbricks v2.6 introduces advanced logic jumps for surveys, allowing more complex branching logic, including variables, conditions, and more. This release also includes numerous bug fixes, significant performance improvements for website and app surveys, and enhanced stability.
+
+<Info>
+  This release includes the final step of deprecating server-side action tracking (previously used for segment
+  filtering by performed actions). The migrations will delete all tracked actions from the database. If you
+  still need these action records, ensure you export them before upgrading.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users who are self-hosting Formbricks using our one-click setup. If you're using a different setup, you might need to adjust the commands accordingly.
+
+To run these steps, navigate to the folder where your `docker-compose.yml` file is located.
+
+- **Backup your Database:** This is an important step. Make sure to back up your database before proceeding with the upgrade. You can use this command to back up your database:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.6_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you get a "No such container" error, run `docker ps` to find your container name, for example,
+  `formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a
+  restore scenario, you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find the Docker network name for your Postgres database, run the command:</Info>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:latest && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.6" \
+  ghcr.io/formbricks/data-migrations:v2.6.0
+```
+
+The command above will migrate your data to the latest schema. This is an important step to update your existing data to the new structure. Changes will only be made if the script runs successfully. You can run the script multiple times without issues.
+
+- Once the migration is complete, **you can access your Formbricks instance** at the same URL as before.
+
+## v2.5
+
+Formbricks v2.5 lets you visualise responses in a data table format. This release also brings a few bug fixes and performance improvements.
+
+<Info>
+  This release fixes the inconsistency of CTA and consent question values when a question is skipped. The
+  value will now be set to an empty string instead of "dismissed" to maintain consistency with other
+  questions.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users self-hosting Formbricks with our one-click setup. If you're using a different setup, you may need to adjust the commands.
+
+To begin, navigate to the folder where your `docker-compose.yml` file is located.
+
+- **Backup your Database**: This step is important. Please make sure to back up your database before upgrading. You can use the following command to back up your database:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.5_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “No such container”, use `docker ps` to find your container name,
+  e.g.`formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a
+  restore scenario you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find your Docker Network name for your Postgres Database, find it using `docker network ls`</Info>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:latest && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.5" \
+  ghcr.io/formbricks/data-migrations:v2.5.3
+```
+
+The command will migrate your data to the latest schema, ensuring your existing data is updated to the new structure. Changes will only be made if the script runs successfully, and you can safely run the script multiple times.
+
+- Once the migration is complete, **you can access your Formbricks instance** at the same URL as before.
+
+## v2.4
+
+Formbricks v2.4 lets you create multiple endings for your surveys and choose which one users see based on logic jumps. This version also includes bug fixes and performance improvements.
+
+<Info>
+  This release will remove support for advanced targeting (enterprise targeting for app surveys) using actions
+  (e.g. targeting users who triggered action x 3 times in the last month). Actions can still be used as
+  triggers, but they will no longer be stored on the server to improve Formbricks' overall performance.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users who are self-hosting Formbricks with our one-click setup. If you're using a different setup, you may need to adjust the commands accordingly.
+
+To follow these steps, go to the folder where your `docker-compose.yml` file is located.
+
+1. **Backup your Database**: This step is important. Please make sure to back up your database before upgrading. You can use the following command to back up your database:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.4_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “No such container”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as a `*.sql` file, remove the `-Fc` (custom format) option. In case of a
+  restore scenario, you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+Now let's migrate the data to the latest schema:
+
+To find your Docker Network name for your Postgres Database, find it using `docker network ls`
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:v2.4.3 && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.4" \
+  ghcr.io/formbricks/data-migrations:v2.4.3
+```
+
+The command above will migrate your data to the latest schema. This is an important step to update your data structure. Changes are only applied if the script runs successfully. You can run the script multiple times without issues.
+
+- That's it! Once the migration is done, you can access your Formbricks instance at the same URL as before.
+
+### Additional Updates
+
+- The `CRON_SECRET` environment variable is now required to enhance the security of the internal cron APIs. Please ensure that this variable is set in your environment or `docker-compose.yml`. You can generate a secure secret using `openssl rand -hex 32`
+
+## v2.3
+
+Formbricks v2.3 introduces new colour options for rating questions, enhanced multi-language support for Chinese (Simplified & Traditional), and includes several bug fixes and performance improvements.
+
+### Steps to Migrate
+
+<Info>
+  You only need to run the data migration if you have surveys set up in Chinese (`zh`). If you don't have any
+  surveys in Chinese, you can skip the migration step.
+</Info>
+
+This guide is for users self-hosting Formbricks with our one-click setup. If you're using a different setup, adjust the commands as needed.
+
+To proceed, go to the folder where your `docker-compose.yml` file is located.
+
+- **Backup your Database**: This is a crucial step. Please make sure to backup your database before proceeding with the upgrade. You can use the following command to backup your database:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.3_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “**No such containe**r”, use `docker ps` to find your container name, e.g.
+  `formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a
+  restore scenario you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find your Docker Network name for your Postgres Database, find it using `docker network ls`</Info>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:v2.3.0 && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.3" \
+  ghcr.io/formbricks/data-migrations:v2.3.0
+
+```
+
+The command above will migrate your data to the latest schema, which is essential for updating your data structure. Changes will only be made if the script runs successfully. You can safely run the script multiple times.
+
+- Once the migration is complete, **you can access your Formbricks instance** at the same URL as before.
+
+### Additional Updates
+
+The feature to create short URLs in Formbricks is now deprecated. Existing short URLs will continue to work for now, but it is recommended to use long URLs instead. Support for short URL redirects will be removed in a future release.
+
+## v2.2
+
+Formbricks v2.2 introduces XM research presets, providing a brand-new product onboarding experience. Our goal is to make user research "obviously easy" across different industries, starting with Software-as-a-Service and E-Commerce.
+
+### Steps to Migrate
+
+This guide is for users who are self-hosting Formbricks with our one-click setup. If you're using a different setup, you may need to adjust the commands accordingly.
+
+To run all these steps, please navigate to the `formbricks` folder where your `docker-compose.yml` file is located.
+
+1. **Backup your Database**: This is a crucial step. Please make sure to backup your database before proceeding with the upgrade. You can use the following command to backup your database:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.2_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “No such container”, use `docker ps` to find your container name, e.g.
+  `formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a
+  restore scenario you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find your Docker Network name for your Postgres Database, find it using `docker network ls`</Info>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:v2.2 && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.2" \
+  ghcr.io/formbricks/data-migrations:v2.2
+```
+
+The command above will migrate your data to the latest schema. This is an important step to update your existing data. Changes will only be made if the script runs successfully. You can safely run the script multiple times.
+
+- Once the migration is complete, **you can access your Formbricks instance** at the same URL as before.
+
+### Changes in Environment Variables
+
+- The `ONBOARDING_DISABLED` environment variable is now deprecated. We have replaced the user onboarding with a product onboarding process that only runs when creating a new product.
+
+## v2.1
+
+Formbricks v2.1 introduces more options for creating No-Code Actions and improves the self-hosting experience with a new onboarding process for fresh instances.
+
+<Info>
+  To improve the user experience and simplify setup for self-hosting instances, we are transitioning to a single organization model. This change allows self-hosts to manage their instance centrally and more easily control access. A new permissions system will also be introduced soon, providing more granular control over projects and resources within an organization.
+
+If you've previously created multiple organizations, you can still switch between them in the UI, but creating new organizations will no longer be possible.
+
+</Info>
+
+### Steps to Migrate
+
+This guide is for users self-hosting Formbricks using our one-click setup. If you are using a different setup, you may need to adjust the commands accordingly.
+
+To follow these steps, please navigate to the Formbricks folder where your `docker-compose.yml` file is located.
+
+- **Backup your Database**: This is an essential step. Please ensure that you back up your database before proceeding with the upgrade. You can use the following command to back it up:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.1_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “No such container”, use `docker ps` to find your container name, e.g.
+  `formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as a `*.sql` file remove the `-Fc` (custom format) option. In case of a
+  restore scenario you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers.
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find your Docker network name for the Postgres database, run the following `docker network ls`</Info>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:v2.1.0 && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.1" \
+  ghcr.io/formbricks/data-migrations:v2.1.0
+```
+
+Once the migration script runs successfully, your data will be migrated to the latest schema. The script is designed to run safely multiple times, so you don’t need to worry if it’s executed more than once. After completing the migration, you can continue to access your Formbricks instance at the same URL as before.
+
+- That's it! Once the migration is complete, you can **now access your Formbricks instance** at the same URL as before.
+
+### Changes in Environment Variables
+
+- **SIGNUP_DISABLED** is now deprecated. Self-hosting instances have signup disabled by default, and new users can only be invited by the organization owner or admin.
+
+- **DEFAULT_TEAM_ID** has been renamed to **DEFAULT_ORGANIZATION_ID**.
+
+- **DEFAULT_TEAM_ROLE** has been renamed to **DEFAULT_ORGANIZATION_ROLE**.
+
+## v2.0
+
+Formbricks v2.0 introduces significant features such as **Multi-Language Surveys** and **Advanced Styling for Surveys**, aimed at improving the flexibility and appearance of your surveys. Additionally, the release includes several optimisations, bug fixes, and smaller improvements to ensure a smoother user experience.
+
+If you are upgrading to Formbricks v2.0, follow this guide to ensure a smooth migration of your existing Formbricks instance without encountering issues or build errors.
+
+<Info>
+  This upgrade requires a **data migration**. Please make sure to back up your database before proceeding.
+  Follow the steps below to upgrade your Formbricks instance to v2.0.
+</Info>
+
+<Info>
+  If you've used the Formbricks Enterprise Edition with a free beta license key, your instance will be
+  downgraded to the Community Edition 2.0. You can find all license details on the [license
+  page](https://formbricks.com/docs/self-hosting/license).
+</Info>
+
+<Warning>
+  We are moving from DockerHub to GitHub Packages for our images. If you are still pulling the images from
+  DockerHub please change `image:
+  formbricks/formbricks:latest` to `image:ghcr.io/formbricks/formbricks:latest` in
+  your `docker-compose.yml` file.
+</Warning>
+
+### Steps to Migrate
+
+This guide is for users who are self-hosting Formbricks using our one-click setup. If you are using a different setup, you might adjust the commands accordingly.
+
+To run all these steps, please navigate to the `formbricks` folder where your `docker-compose.yml` file is located.
+
+1. **Backup your Database**: This is an essential step. Please ensure that you back up your database before proceeding with the upgrade. You can use the following command to back it up:
+
+```bash
+docker exec formbricks-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v2.0_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “No such container”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Info>
+
+If you prefer storing the backup as an `*.sql` file remove the `-Fc` (custom format) option. In case of a restore scenario you will need to use `psql` then with an empty `formbricks` database.
+
+- Pull the latest version of Formbricks:
+
+```bash
+docker compose pull
+```
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers with the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find your Docker Network name for your Postgres Database, find it using `docker network ls`</Info>
+
+```bash
+docker pull ghcr.io/formbricks/data-migrations:v2.0.3 && \
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v2.0" \
+  ghcr.io/formbricks/data-migrations:v2.0.3
+```
+
+The above command will migrate your data to the latest schema. This is a crucial step to migrate your existing data to the new structure. Only if the script runs successful, changes are made to the database. The script can safely run multiple times.
+
+- That's it! Once the migration is complete, you can **now access your Formbricks instance** at the same URL as before.
+
+### App Surveys with @formbricks/js
+
+With this upgrade, we now dynamically fetch the package from our API endpoint and have updated the package entry points to support both app and website surveys. This ensures that you always have the latest version of the package (v2.0.0+).
+
+**Old approach:** (v1.6.5)
+
+```ts
+import formbricks from "@formbricks/js";
+
+formbricks.init({
+  environmentId: "<environment-id>",
+  apiHost: "<api-host>",
+  userId: "<user-id>", // optional
+});
+```
+
+**New approach:** (v2.0.0)
+
+Website surveys:
+
+```ts
+import formbricks from "@formbricks/js/website";
+
+formbricks.init({
+  environmentId: "<environment-id>",
+  apiHost: "<api-host>",
+  // userId is not supported here
+});
+```
+
+App surveys:
+
+```ts
+import formbricks from "@formbricks/js/app";
+
+formbricks.init({
+  environmentId: "<environment-id>",
+  apiHost: "<api-host>",
+  userId: "<user-id>", // required
+});
+```
+
+## v1.6
+
+Formbricks v1.6 introduces key features like Advanced Targeting, Segmentation, on-the-fly survey triggers, and stability improvements. This update also changes some environment variables. Follow this guide to upgrade your Formbricks instance to v1.6 smoothly.
+
+<Info>
+  This upgrade requires a data migration. Ensure you back up your database before proceeding. Follow the steps
+  below to upgrade your Formbricks instance to v1.6.
+</Info>
+
+### Steps to Migrate
+
+This guide is for users self-hosting Formbricks with our one-click setup. If you're using a different setup, adjust the commands accordingly.
+
+Navigate to the Formbricks folder containing your `docker-compose.yml` file to run the steps.
+
+- **Backup your Database**: This is a crucial step. Please make sure to backup your database before proceeding with the upgrade. You can use the following command to backup your database:
+
+```bash
+docker exec formbricks-quickstart-postgres-1 pg_dump -Fc -U postgres -d formbricks > formbricks_pre_v1.6_$(date +%Y%m%d_%H%M%S).dump
+```
+
+<Info>
+  If you run into “No such container”, use `docker ps` to find your container name,
+  e.g. `formbricks_postgres_1`.
+</Info>
+
+<Info>
+  If you prefer storing the backup as a `*.sql` file remove the `-Fc` (custom format) option. In case of a
+  restore scenario you will need to use `psql` then with an empty `formbricks` database.
+</Info>
+
+- Stop the running Formbricks instance & remove the related containers:
+
+```bash
+docker compose down
+```
+
+- Restarting the containers will automatically pull the latest version of Formbricks:
+
+```bash
+docker compose up -d
+```
+
+- Now let's migrate the data to the latest schema:
+
+<Info>To find your Docker Network name for your Postgres Database, find it using `docker network ps`</Info>
+
+```bash
+docker run --rm \
+  --network=formbricks_default \
+  -e DATABASE_URL="postgresql://postgres:postgres@postgres:5432/formbricks?schema=public" \
+  -e UPGRADE_TO_VERSION="v1.6" \
+  ghcr.io/formbricks/data-migrations:v1.6.1
+
+```
+
+The above command will migrate your data to the latest schema. This is a crucial step to migrate your existing data to the new structure. Only if the script runs successful, changes are made to the database. The script can safely run multiple times.
+
+1. That's it! Once the migration is complete, you can **now access your Formbricks instance** at the same URL as before.
+
+#### Restoring the database after a failed upgrade
+
+```bash
+docker exec -i formbricks-quickstart-postgres-1 pg_restore --clean -U postgres -v -d formbricks < formbricks_pre_v1.6_<timestamp_of_your_dump_file>.dump
+```
+
+<Info>
+  Replace the path to `formbricks_pre_v1.6_<timestamp_of_your_dump_file>.dump` with the exact path to your `.dump` file.
+</Info>
+
+<Info>This will wipe the database and restore from the `.dump` file.</Info>
+
+### App Surveys with `@formbricks/js`
+
+If you're using the `@formbricks/js` package, update it to version \~1.6.5 to access the latest features and improvements.
+
+<Info>
+  Currently, the package needs to be pinned to `~1.6.5`, see [this
+  issue](https://github.com/formbricks/formbricks/issues/2273).
+</Info>
+
+### Upgrade and pin the client package
+
+```bash
+npm install @formbricks/js@~1.6.5
+```
+
+### Deprecated Environment Variables
+
+| Environment Variable   | Comments                                                                                                                                                        |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GITHUB_AUTH_ENABLED`  | Was used to enable GitHub OAuth, but from v1.6, you can just set the `GITHUB_ID` and `GITHUB_SECRET` environment variables.                                     |
+| `GOOGLE_AUTH_ENABLED`  | Was used to enable Google OAuth, but from v1.6, you can just set the `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` environment variables.                       |
+| `AZUREAD_AUTH_ENABLED` | Was used to enable AzureAD OAuth, but from v1.6, you can just set the `AZUREAD_CLIENT_ID`, `AZUREAD_CLIENT_SECRET` & `AZUREAD_TENANT_ID` environment variables. |
+
+## v1.2
+
+Formbricks v1.2 introduces new features for Link Surveys and enhances security. However, there are some breaking changes related to environment variables. This guide will help you upgrade your Formbricks instance to v1.2 smoothly.
+
+### New Environment Variables
+
+| Environment Variable | Required | Recommended Generation | Comments                           |
+| -------------------- | -------- | ---------------------- | ---------------------------------- |
+| `ENCRYPTION_KEY`     | true     | `openssl rand -hex 32` | Needed for 2 Factor Authentication |
+
+### Deprecated / Removed Environment Variables
+
+| Environment Variable | Comments                                                                    |
+| -------------------- | --------------------------------------------------------------------------- |
+| `SURVEY_BASE_URL`    | The `WEBAPP_URL` is now used to determine the survey base URL in all places |
+
+## v1.1
+
+Formbricks v1.1 introduces new features and improvements but includes breaking changes with environment variables. This guide will help you upgrade your Formbricks instance to v1.1 without data loss.
+
+### Renamed Environment Variables
+
+| till v1.0                                 | v1.1                          |
+| ----------------------------------------- | ----------------------------- |
+| `NEXT_PUBLIC_EMAIL_VERIFICATION_DISABLED` | `EMAIL_VERIFICATION_DISABLED` |
+| `NEXT_PUBLIC_PASSWORD_RESET_DISABLED`     | `PASSWORD_RESET_DISABLED`     |
+| `NEXT_PUBLIC_SIGNUP_DISABLED`             | `SIGNUP_DISABLED`             |
+| `NEXT_PUBLIC_INVITE_DISABLED`             | `INVITE_DISABLED`             |
+| `NEXT_PUBLIC_PRIVACY_URL`                 | `PRIVACY_URL`                 |
+| `NEXT_PUBLIC_TERMS_URL`                   | `TERMS_URL`                   |
+| `NEXT_PUBLIC_IMPRINT_URL`                 | `IMPRINT_URL`                 |
+| `NEXT_PUBLIC_GITHUB_AUTH_ENABLED`         | `GITHUB_AUTH_ENABLED`         |
+| `NEXT_PUBLIC_GOOGLE_AUTH_ENABLED`         | `GOOGLE_AUTH_ENABLED`         |
+| `NEXT_PUBLIC_WEBAPP_URL`                  | `WEBAPP_URL`                  |
+| `NEXT_PUBLIC_IS_FORMBRICKS_CLOUD`         | `IS_FORMBRICKS_CLOUD`         |
+| `NEXT_PUBLIC_SURVEY_BASE_URL`             | `SURVEY_BASE_URL`             |
+
+Please note that their values and the logic remains exactly the same. Only the prefix has been deprecated. The other environment variables remain the same as well.
+
+### Deprecated Environment Variables
+
+- **`NEXT_PUBLIC_VERCEL_URL`**: Was used as deployment URL fallback (used instead of `WEBAPP_URL`), but from v1.1, you can just set the `WEBAPP_URL` environment variable.
+
+- **`RAILWAY_STATIC_URL`**: Was used as Railway Static URL (used instead of `WEBAPP_URL`), but from v1.1, you can just set the `WEBAPP_URL` environment variable.
+
+- **`RENDER_EXTERNAL_URL`**: Was used as an external URL to Render (used instead of `WEBAPP_URL`), but from v1.1, you can just set the `WEBAPP_URL` environment variable.
+
+- **`HEROKU_APP_NAME`**: Was used to build the App name on a Heroku hosted webapp, but from v1.1, you can just set the `WEBAPP_URL` environment variable.
+
+- **`NEXT_PUBLIC_WEBAPP_URL`**: Was used for the same purpose as `WEBAPP_URL`, but from v1.1, you can just set the `WEBAPP_URL` environment variable.
+
+- **`PRISMA_GENERATE_DATAPROXY`**: Was used to tell Prisma that it should generate the runtime for Dataproxy usage. But its officially deprecated now.
+
+### Helper Shell Script
+
+For a seamless migration, below is a shell script for your self-hosted instance that will automatically update your environment variables to be compliant with the new naming conventions.
+
+### Docker & Single Script Setup
+
+Now that these variables can be defined at runtime, you can append them inside your `x-environment` in the `docker-compose.yml` itself.
+For a more detailed guide on these environment variables, please refer to the
+[Environment Variables](/self-hosting/configuration/environment-variables) page.
+
+```yaml docker-compose.yml
+version: "3.3"
+x-environment: &environment
+  environment:
+    # The url of your Formbricks instance used in the admin panel
+    WEBAPP_URL:
+
+    # Required for next-auth. Should be the same as WEBAPP_URL
+    NEXTAUTH_URL:
+
+    # PostgreSQL DB for Formbricks to connect to
+    DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/formbricks?schema=public"
+
+    # NextJS Auth
+    # @see: https://next-auth.js.org/configuration/options#nextauth_secret
+    # You can use: `openssl rand -hex 32` to generate one
+    NEXTAUTH_SECRET:
+
+    # PostgreSQL password
+    POSTGRES_PASSWORD: postgres
+
+    # Email Configuration
+    MAIL_FROM:
+    MAIL_FROM_NAME:
+    SMTP_HOST:
+    SMTP_PORT:
+    SMTP_SECURE_ENABLED:
+    SMTP_USER:
+    SMTP_PASSWORD:
+
+    # Uncomment the below and set it to 1 to disable Email Verification for new signups
+    # EMAIL_VERIFICATION_DISABLED:
+
+    # Uncomment the below and set it to 1 to disable Password Reset
+    # PASSWORD_RESET_DISABLED:
+
+    # Uncomment the below and set it to 1 to disable Signups
+    # SIGNUP_DISABLED:
+
+    # Uncomment the below and set it to 1 to disable loging in with email
+    # EMAIL_AUTH_DISABLED:
+
+    # Uncomment the below and set it to 1 to disable Invites
+    # INVITE_DISABLED:
+
+    # Uncomment the below and set a value to have your own Privacy Page URL on the signup & login page
+    # PRIVACY_URL:
+
+    # Uncomment the below and set a value to have your own Terms Page URL on the auth and the surveys page
+    # TERMS_URL:
+
+    # Uncomment the below and set a value to have your own Imprint Page URL on the auth and the surveys page
+    # IMPRINT_URL:
+
+    # Uncomment the below and set to 1 if you want to enable GitHub OAuth
+    # GITHUB_AUTH_ENABLED:
+    # GITHUB_ID:
+    # GITHUB_SECRET:
+
+    # Uncomment the below and set to 1 if you want to enable Google OAuth
+    # GOOGLE_AUTH_ENABLED:
+    # GOOGLE_CLIENT_ID:
+    # GOOGLE_CLIENT_SECRET:
+```
+
+If you have any questions or require help, feel free to reach out to us on [**GitHub Discussions**](https://github.com/formbricks/formbricks/discussions). 😃[
+](https://formbricks.com/docs/developer-docs/rest-api)

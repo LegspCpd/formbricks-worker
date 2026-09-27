@@ -1,0 +1,850 @@
+import { describe, expect, test, vi } from "vitest";
+import { mergeReservedValues } from "@formbricks/types/embedded-data-resolver";
+import { TResponseData, TResponseVariables } from "@formbricks/types/responses";
+import { TSurvey, TSurveyRecallItem } from "@formbricks/types/surveys/types";
+import { structuredClone } from "@/lib/pollyfills/structuredClone";
+import {
+  checkForEmptyFallBackValue,
+  extractFallbackValue,
+  extractId,
+  extractIds,
+  extractRecallInfo,
+  fallbacks,
+  findRecallInfoById,
+  getFallbackValues,
+  getRecallItems,
+  headlineToRecall,
+  parseRecallInfo,
+  recallToHeadline,
+  replaceHeadlineRecall,
+  replaceRecallInfoWithUnderline,
+} from "./recall";
+
+// Mock dependencies
+vi.mock("@/lib/i18n/utils", () => ({
+  getLocalizedValue: (obj: any, lang: string) => {
+    if (typeof obj === "string") return obj;
+    if (!obj) return "";
+    return obj[lang] || obj["default"] || "";
+  },
+}));
+
+vi.mock("@/lib/pollyfills/structuredClone", () => ({
+  structuredClone: vi.fn((obj) => JSON.parse(JSON.stringify(obj))),
+}));
+
+vi.mock("@/lib/utils/date-display", () => ({
+  formatStoredDateForDisplay: vi.fn((value: string, format: string | undefined, locale: string) => {
+    if (value === "2023-01-01") {
+      return `formatted-${locale}-${format ?? "iso"}`;
+    }
+
+    if (value === "01-02-2023" && format === "M-d-y") {
+      return `legacy-${locale}-${format}`;
+    }
+
+    return null;
+  }),
+}));
+
+describe("recall utility functions", () => {
+  describe("extractId", () => {
+    test("extracts ID correctly from a string with recall pattern", () => {
+      const text = "This is a #recall:question123 example";
+      const result = extractId(text);
+      expect(result).toBe("question123");
+    });
+
+    test("returns null when no ID is found", () => {
+      const text = "This has no recall pattern";
+      const result = extractId(text);
+      expect(result).toBeNull();
+    });
+
+    test("returns null for malformed recall pattern", () => {
+      const text = "This is a #recall: malformed pattern";
+      const result = extractId(text);
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("extractIds", () => {
+    test("extracts multiple IDs from a string with multiple recall patterns", () => {
+      const text = "This has #recall:id1 and #recall:id2 and #recall:id3";
+      const result = extractIds(text);
+      expect(result).toEqual(["id1", "id2", "id3"]);
+    });
+
+    test("returns empty array when no IDs are found", () => {
+      const text = "This has no recall patterns";
+      const result = extractIds(text);
+      expect(result).toEqual([]);
+    });
+
+    test("handles mixed content correctly", () => {
+      const text = "Text #recall:id1 more text #recall:id2";
+      const result = extractIds(text);
+      expect(result).toEqual(["id1", "id2"]);
+    });
+  });
+
+  describe("extractFallbackValue", () => {
+    test("extracts fallback value correctly", () => {
+      const text = "Text #recall:id1/fallback:defaultValue# more text";
+      const result = extractFallbackValue(text);
+      expect(result).toBe("defaultValue");
+    });
+
+    test("returns empty string when no fallback value is found", () => {
+      const text = "Text with no fallback";
+      const result = extractFallbackValue(text);
+      expect(result).toBe("");
+    });
+
+    test("handles empty fallback value", () => {
+      const text = "Text #recall:id1/fallback:# more text";
+      const result = extractFallbackValue(text);
+      expect(result).toBe("");
+    });
+  });
+
+  describe("extractRecallInfo", () => {
+    test("extracts complete recall info from text", () => {
+      const text = "This is #recall:id1/fallback:default# text";
+      const result = extractRecallInfo(text);
+      expect(result).toBe("#recall:id1/fallback:default#");
+    });
+
+    test("returns null when no recall info is found", () => {
+      const text = "This has no recall info";
+      const result = extractRecallInfo(text);
+      expect(result).toBeNull();
+    });
+
+    test("extracts recall info for a specific ID when provided", () => {
+      const text = "This has #recall:id1/fallback:default1# and #recall:id2/fallback:default2#";
+      const result = extractRecallInfo(text, "id2");
+      expect(result).toBe("#recall:id2/fallback:default2#");
+    });
+  });
+
+  describe("findRecallInfoById", () => {
+    test("finds recall info by ID", () => {
+      const text = "Text #recall:id1/fallback:value1# and #recall:id2/fallback:value2#";
+      const result = findRecallInfoById(text, "id2");
+      expect(result).toBe("#recall:id2/fallback:value2#");
+    });
+
+    test("returns null when ID is not found", () => {
+      const text = "Text #recall:id1/fallback:value1#";
+      const result = findRecallInfoById(text, "id2");
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("recallToHeadline", () => {
+    test("converts recall pattern to headline format without slash", () => {
+      const headline = { en: "How do you like #recall:product/fallback:ournbspproduct#?" };
+      const survey = {
+        id: "test-survey",
+        blocks: [{ id: "b1", elements: [{ id: "product", headline: { en: "Product Question" } }] }],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as any;
+
+      const result = recallToHeadline(headline, survey, false, "en");
+      expect(result.en).toBe("How do you like @Product Question?");
+    });
+
+    test("converts recall pattern to headline format with slash", () => {
+      const headline = { en: "Rate #recall:product/fallback:ournbspproduct#" };
+      const survey = {
+        id: "test-survey",
+        blocks: [{ id: "b1", elements: [{ id: "product", headline: { en: "Product Question" } }] }],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as any;
+
+      const result = recallToHeadline(headline, survey, true, "en");
+      expect(result.en).toBe("Rate /Product Question\\");
+    });
+
+    test("handles hidden fields in recall", () => {
+      const headline = { en: "Your email is #recall:email/fallback:notnbspprovided#" };
+      const survey: TSurvey = {
+        id: "test-survey",
+        blocks: [],
+        hiddenFields: { fieldIds: ["email"] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      const result = recallToHeadline(headline, survey, false, "en");
+      expect(result.en).toBe("Your email is @email");
+    });
+
+    test("handles variables in recall", () => {
+      const headline = { en: "Your plan is #recall:plan/fallback:unknown#" };
+      const survey: TSurvey = {
+        id: "test-survey",
+        blocks: [],
+        hiddenFields: { fieldIds: [] },
+        variables: [{ id: "plan", name: "Subscription Plan" }],
+      } as unknown as TSurvey;
+
+      const result = recallToHeadline(headline, survey, false, "en");
+      expect(result.en).toBe("Your plan is @Subscription Plan");
+    });
+
+    test("returns unchanged headline when no recall pattern is found", () => {
+      const headline = { en: "Regular headline with no recall" };
+      const survey = {} as TSurvey;
+
+      const result = recallToHeadline(headline, survey, false, "en");
+      expect(result).toEqual(headline);
+    });
+
+    test("handles nested recall patterns", () => {
+      const headline = {
+        en: "This is #recall:inner/fallback:fallback2#",
+      };
+      const survey = {
+        id: "test-survey",
+        blocks: [{ id: "b1", elements: [{ id: "inner", headline: { en: "Inner with @outer" } }] }],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as any;
+
+      const result = recallToHeadline(headline, survey, false, "en");
+      expect(result.en).toBe("This is @Inner with @outer");
+    });
+  });
+
+  describe("replaceRecallInfoWithUnderline", () => {
+    test("replaces recall info with underline", () => {
+      const text = "This is a #recall:id1/fallback:default# example";
+      const result = replaceRecallInfoWithUnderline(text);
+      expect(result).toBe("This is a ___ example");
+    });
+
+    test("replaces multiple recall infos with underlines", () => {
+      const text = "This #recall:id1/fallback:v1# has #recall:id2/fallback:v2# multiple recalls";
+      const result = replaceRecallInfoWithUnderline(text);
+      expect(result).toBe("This ___ has ___ multiple recalls");
+    });
+
+    test("returns unchanged text when no recall info is present", () => {
+      const text = "This has no recall info";
+      const result = replaceRecallInfoWithUnderline(text);
+      expect(result).toBe(text);
+    });
+  });
+
+  describe("checkForEmptyFallBackValue", () => {
+    test("identifies question with empty fallback value", () => {
+      const questionHeadline = { en: "Question with #recall:id1/fallback:# empty fallback" };
+      const survey = {
+        blocks: [
+          {
+            id: "b1",
+            elements: [
+              {
+                id: "q1",
+                headline: questionHeadline,
+              },
+            ],
+          },
+        ],
+      } as any;
+
+      const result = checkForEmptyFallBackValue(survey, "en");
+      expect(result).toBe(survey.blocks[0].elements[0]);
+    });
+
+    test("identifies question with empty fallback in subheader", () => {
+      const questionSubheader = { en: "Subheader with #recall:id1/fallback:# empty fallback" };
+      const survey = {
+        blocks: [
+          {
+            id: "b1",
+            elements: [
+              {
+                id: "q1",
+                headline: { en: "Normal question" },
+                subheader: questionSubheader,
+              },
+            ],
+          },
+        ],
+      } as any;
+
+      const result = checkForEmptyFallBackValue(survey, "en");
+      expect(result).toBe(survey.blocks[0].elements[0]);
+    });
+
+    test("returns null when no empty fallback values are found", () => {
+      const questionHeadline = { en: "Question with #recall:id1/fallback:default# valid fallback" };
+      const survey = {
+        blocks: [
+          {
+            id: "b1",
+            elements: [
+              {
+                id: "q1",
+                headline: questionHeadline,
+              },
+            ],
+          },
+        ],
+      } as any;
+
+      const result = checkForEmptyFallBackValue(survey, "en");
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("replaceHeadlineRecall", () => {
+    test("processes all questions in a survey", () => {
+      const survey: TSurvey = {
+        blocks: [
+          {
+            id: "b1",
+            elements: [
+              {
+                id: "q1",
+                headline: { en: "Question with #recall:id1/fallback:default#" },
+              },
+              {
+                id: "q2",
+                headline: { en: "Another with #recall:id2/fallback:other#" },
+              },
+            ],
+          },
+        ],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      vi.mocked(structuredClone).mockImplementation((obj) => JSON.parse(JSON.stringify(obj)));
+
+      const result = replaceHeadlineRecall(survey, "en");
+
+      // Verify recallToHeadline was called for each question
+      expect(result).not.toBe(survey); // Should be a clone
+      expect(result.blocks[0].elements[0].headline).not.toEqual(survey.blocks[0].elements[0].headline);
+      expect(result.blocks[0].elements[1].headline).not.toEqual(survey.blocks[0].elements[1].headline);
+    });
+  });
+
+  describe("getRecallItems", () => {
+    test("extracts recall items from text", () => {
+      const text = "Text with #recall:id1/fallback:val1# and #recall:id2/fallback:val2#";
+      const survey: TSurvey = {
+        blocks: [
+          {
+            id: "b1",
+            elements: [
+              { id: "id1", headline: { en: "Question One" } },
+              { id: "id2", headline: { en: "Question Two" } },
+            ],
+          },
+        ],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems(text, survey, "en");
+
+      expect(result).toHaveLength(2);
+      expect(result[0].id).toBe("id1");
+      expect(result[0].label).toBe("Question One");
+      expect(result[0].type).toBe("element");
+      expect(result[1].id).toBe("id2");
+      expect(result[1].label).toBe("Question Two");
+      expect(result[1].type).toBe("element");
+    });
+
+    test("handles hidden fields in recall items", () => {
+      const text = "Text with #recall:hidden1/fallback:val1#";
+      const survey: TSurvey = {
+        blocks: [],
+        hiddenFields: { fieldIds: ["hidden1"] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems(text, survey, "en");
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("hidden1");
+      expect(result[0].type).toBe("hiddenField");
+    });
+
+    test("handles variables in recall items", () => {
+      const text = "Text with #recall:var1/fallback:val1#";
+      const survey: TSurvey = {
+        blocks: [],
+        hiddenFields: { fieldIds: [] },
+        variables: [{ id: "var1", name: "Variable One" }],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems(text, survey, "en");
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("var1");
+      expect(result[0].label).toBe("Variable One");
+      expect(result[0].type).toBe("variable");
+    });
+
+    test("returns empty array when no recall items are found", () => {
+      const text = "Text with no recall items";
+      const survey: TSurvey = {} as TSurvey;
+
+      const result = getRecallItems(text, survey, "en");
+      expect(result).toEqual([]);
+    });
+  });
+
+  /**
+   * ENG-1837: a recall token's label and type come from the survey's Embedded Data definitions
+   * instead of `hiddenFields.fieldIds` and `variables` — specifically from what the survey
+   * *declares*, because the picker writes `@label` into the text and these functions read it back,
+   * so the two must agree on the same instant. The precedence (ingested → element → computed) is
+   * load-bearing and unchanged.
+   */
+  describe("recall items resolve through the survey's declared Embedded Data", () => {
+    const embeddedField = (
+      storageKey: string,
+      name: string,
+      source: "computed" | "ingested",
+      dataType: "string" | "number" = "string"
+    ) => ({
+      field: { name, source, dataType, defaultValue: null, locked: false },
+      link: { storageKey },
+    });
+
+    test("labels a token from the declarations, not from a stale inlined row", () => {
+      // The editor's working copy carries the rows as of the last save. Labelling from them would
+      // desync this from the recall picker, which offers the current name.
+      const survey = {
+        blocks: [],
+        hiddenFields: { fieldIds: ["hidden1"] },
+        variables: [{ id: "var1", name: "Renamed Variable", type: "text", value: "" }],
+        embeddedFields: [
+          embeddedField("var1", "Stale Name", "computed"),
+          embeddedField("hidden1", "hidden1", "ingested"),
+        ],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems(
+        "Text with #recall:var1/fallback:a# and #recall:hidden1/fallback:b#",
+        survey,
+        "en"
+      );
+
+      expect(result).toEqual([
+        { id: "var1", label: "Renamed Variable", type: "variable" },
+        { id: "hidden1", label: "hidden1", type: "hiddenField" },
+      ]);
+    });
+
+    test("classifies a field declared since the last save, which the rows do not know", () => {
+      // The rows are non-empty and omit `hidden2`, so the stored accessor would not fall back — this
+      // fails if the resolution is switched back to it. Without the declared source the token stays
+      // unclassified and renders as a raw `#recall:…#` tag.
+      const survey = {
+        blocks: [],
+        hiddenFields: { fieldIds: ["hidden1", "hidden2"] },
+        variables: [],
+        embeddedFields: [embeddedField("hidden1", "hidden1", "ingested")],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems("Text with #recall:hidden2/fallback:b#", survey, "en");
+
+      expect(result).toEqual([{ id: "hidden2", label: "hidden2", type: "hiddenField" }]);
+    });
+
+    test("a storage key that also matches an element id still resolves as a hidden field", () => {
+      const survey = {
+        blocks: [{ id: "b1", elements: [{ id: "shared", headline: { en: "Question headline" } }] }],
+        hiddenFields: { fieldIds: ["shared"] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems("Text with #recall:shared/fallback:x#", survey, "en");
+
+      expect(result).toEqual([{ id: "shared", label: "shared", type: "hiddenField" }]);
+    });
+
+    test("an element wins over a computed field on a colliding key", () => {
+      const survey = {
+        blocks: [{ id: "b1", elements: [{ id: "shared", headline: { en: "Question headline" } }] }],
+        hiddenFields: { fieldIds: [] },
+        variables: [{ id: "shared", name: "Variable One", type: "text", value: "" }],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems("Text with #recall:shared/fallback:x#", survey, "en");
+
+      expect(result).toEqual([{ id: "shared", label: "Question headline", type: "element" }]);
+    });
+  });
+
+  describe("reserved fields in recall (ENG-1840)", () => {
+    test("a reserved token is labelled and typed, not left as a raw tag", () => {
+      // `getRecallItems` drops any id it cannot label, and the editor then renders the untouched
+      // `#recall:country/fallback:x#` as literal text. This is the test that catches that.
+      const survey = {
+        blocks: [],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems("You are in #recall:country/fallback:your-country#", survey, "en");
+
+      expect(result).toEqual([{ id: "country", label: "Country", type: "reserved" }]);
+      expect(result[0].label).not.toContain("#recall:");
+    });
+
+    test("a declared field of the same name shadows the reserved entry", () => {
+      // The grandfather rule, label side: a survey that already declares `country` keeps showing its
+      // own field, so the author never sees two identically-named rows.
+      const survey = {
+        blocks: [],
+        hiddenFields: { fieldIds: ["country"] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      const result = getRecallItems("You are in #recall:country/fallback:x#", survey, "en");
+
+      expect(result).toEqual([{ id: "country", label: "country", type: "hiddenField" }]);
+    });
+
+    test("an unknown reserved-looking name stays unresolved", () => {
+      const survey = {
+        blocks: [],
+        hiddenFields: { fieldIds: [] },
+        variables: [],
+      } as unknown as TSurvey;
+
+      expect(getRecallItems("#recall:notACatalogEntry/fallback:x#", survey, "en")).toEqual([]);
+    });
+  });
+
+  describe("the grandfather rule at value-resolution time (ENG-1840)", () => {
+    // These exercise `mergeReservedValues` — the one expression the guarantee rests on. Flip the two
+    // spreads there and the second test goes red:
+    //   pnpm --filter=@formbricks/web test lib/utils/recall.test.ts
+    const reserved = { country: "DE", url: "https://app.test/s/abc" };
+
+    test("a reserved token resolves from the projected value", () => {
+      const result = parseRecallInfo(
+        "You are in #recall:country/fallback:your-country#",
+        mergeReservedValues(reserved, {})
+      );
+
+      expect(result).toBe("You are in DE");
+    });
+
+    test("a survey declaring its own `country` resolves from response.data instead", () => {
+      const responseData: TResponseData = { country: "Declared answer" };
+
+      const result = parseRecallInfo(
+        "You are in #recall:country/fallback:your-country#",
+        mergeReservedValues(reserved, responseData)
+      );
+
+      expect(result).toBe("You are in Declared answer");
+      expect(result).not.toContain("DE");
+    });
+
+    test("shadowing is per-key: other reserved values still resolve", () => {
+      const result = parseRecallInfo(
+        "#recall:country/fallback:a# at #recall:url/fallback:b#",
+        mergeReservedValues(reserved, { country: "Declared answer" })
+      );
+
+      expect(result).toBe("Declared answer at https://app.test/s/abc");
+    });
+
+    test("a declared field that is present but empty still wins", () => {
+      // The respondent left the declared hidden field blank. That is an answer, and it must not fall
+      // back to reserved metadata just because the string is empty.
+      const result = parseRecallInfo(
+        "You are in #recall:country/fallback:your-country#",
+        mergeReservedValues(reserved, { country: "" })
+      );
+
+      // Asserted exactly, not as "does not contain DE": that weaker form also passes on an empty
+      // string or an unrendered raw token, neither of which would prove the declared field won.
+      expect(result).toBe("You are in your-country");
+    });
+
+    test("A DECLARED FIELD WITH NO VALUE AT ALL still owns its name (ENG-2538)", () => {
+      // The bug this ticket exists for, at the layer it was visible from. Every test above passes a
+      // key that *exists* — the asymmetry that hid it through review, unit tests and E2E. An optional
+      // hidden field the respondent never filled has no key at all, so the spread had nothing to lose
+      // to and the reserved value survived into respondent-facing copy.
+      //
+      // The fix is upstream of this call: `buildServerEmbeddedValues` / the renderer's projection now
+      // drop an entry the survey declares, so the map handed here has no `url` key. Simulated by
+      // omitting it, which is exactly what those functions now produce.
+      const withoutDeclaredUrl = { country: "DE" };
+
+      const result = parseRecallInfo(
+        "url=#recall:url/fallback:FALLBACK-HIT#",
+        mergeReservedValues(withoutDeclaredUrl, {})
+      );
+
+      expect(result).toBe("url=FALLBACK-HIT");
+      expect(result).not.toContain("app.test");
+    });
+  });
+
+  describe("getFallbackValues", () => {
+    test("extracts fallback values from text", () => {
+      const text = "Text #recall:id1/fallback:value1# and #recall:id2/fallback:value2#";
+      const result = getFallbackValues(text);
+
+      expect(result).toEqual({
+        id1: "value1",
+        id2: "value2",
+      });
+    });
+
+    test("returns empty object when no fallback values are found", () => {
+      const text = "Text with no fallback values";
+      const result = getFallbackValues(text);
+      expect(result).toEqual({});
+    });
+  });
+
+  describe("headlineToRecall", () => {
+    test("transforms headlines to recall info", () => {
+      const text = "What do you think of @Product?";
+      const recallItems: TSurveyRecallItem[] = [{ id: "product", label: "Product", type: "element" }];
+      const fallbacks: fallbacks = {
+        product: "our product",
+      };
+
+      const result = headlineToRecall(text, recallItems, fallbacks);
+      expect(result).toBe("What do you think of #recall:product/fallback:our product#?");
+    });
+
+    test("transforms multiple headlines", () => {
+      const text = "Rate @Product made by @Company";
+      const recallItems: TSurveyRecallItem[] = [
+        { id: "product", label: "Product", type: "element" },
+        { id: "company", label: "Company", type: "element" },
+      ];
+      const fallbacks: fallbacks = {
+        product: "our product",
+        company: "our company",
+      };
+
+      const result = headlineToRecall(text, recallItems, fallbacks);
+      expect(result).toBe(
+        "Rate #recall:product/fallback:our product# made by #recall:company/fallback:our company#"
+      );
+    });
+  });
+
+  describe("parseRecallInfo", () => {
+    test("replaces recall info with response data", () => {
+      const text = "Your answer was #recall:q1/fallback:not-provided#";
+      const responseData: TResponseData = {
+        q1: "Yes definitely",
+      };
+
+      const result = parseRecallInfo(text, responseData);
+      expect(result).toBe("Your answer was Yes definitely");
+    });
+
+    test("uses fallback when response data is missing", () => {
+      const text = "Your answer was #recall:q1/fallback:notnbspprovided#";
+      const responseData: TResponseData = {
+        q2: "Some other answer",
+      };
+
+      const result = parseRecallInfo(text, responseData);
+      expect(result).toBe("Your answer was not provided");
+    });
+
+    test("formats date values", () => {
+      const text = "You joined on #recall:joinDate/fallback:an-unknown-date#";
+      const responseData: TResponseData = {
+        joinDate: "2023-01-01",
+      };
+
+      const result = parseRecallInfo(text, responseData);
+      expect(result).toBe("You joined on formatted-en-US-iso");
+    });
+
+    test("formats legacy date values using the provided locale and stored format", () => {
+      const text = "You joined on #recall:joinDate/fallback:an-unknown-date#";
+      const responseData: TResponseData = {
+        joinDate: "01-02-2023",
+      };
+
+      const result = parseRecallInfo(text, responseData, undefined, false, "fr-FR", {
+        joinDate: "M-d-y",
+      });
+
+      expect(result).toBe("You joined on legacy-fr-FR-M-d-y");
+    });
+
+    test("formats array values as comma-separated list", () => {
+      const text = "Your selections: #recall:preferences/fallback:none#";
+      const responseData: TResponseData = {
+        preferences: ["Option A", "Option B", "Option C"],
+      };
+
+      const result = parseRecallInfo(text, responseData);
+      expect(result).toBe("Your selections: Option A, Option B, Option C");
+    });
+
+    test("uses variables when available", () => {
+      const text = "Welcome back, #recall:username/fallback:user#";
+      const variables: TResponseVariables = {
+        username: "John Doe",
+      };
+
+      const result = parseRecallInfo(text, {}, variables);
+      expect(result).toBe("Welcome back, John Doe");
+    });
+
+    test("prioritizes variables over response data", () => {
+      const text = "Your email is #recall:email/fallback:no-email#";
+      const responseData: TResponseData = {
+        email: "response@example.com",
+      };
+      const variables: TResponseVariables = {
+        email: "variable@example.com",
+      };
+
+      const result = parseRecallInfo(text, responseData, variables);
+      expect(result).toBe("Your email is variable@example.com");
+    });
+
+    test("handles withSlash parameter", () => {
+      const text = "Your name is #recall:name/fallback:anonymous#";
+      const variables: TResponseVariables = {
+        name: "John Doe",
+      };
+
+      const result = parseRecallInfo(text, {}, variables, true);
+      expect(result).toBe("Your name is #/John Doe\\#");
+    });
+
+    test("handles 'nbsp' in fallback values", () => {
+      const text = "Default spacing: #recall:space/fallback:nonnbspbreaking#";
+
+      const result = parseRecallInfo(text);
+      expect(result).toBe("Default spacing: non breaking");
+    });
+  });
+});
+
+describe("parseRecallInfo — escapeValues", () => {
+  const recall = (id: string) => `#recall:${id}/fallback:none#`;
+
+  // Regression: the recalled value is a respondent's answer, i.e. data, and must never become markup.
+  // Sanitizing the combined string afterwards cannot help — an allowlist that legitimately permits
+  // `<a href>` in the survey author's body passes an anchor spliced in from an answer just the same.
+  test("escapes HTML in a substituted response value when asked to", () => {
+    const result = parseRecallInfo(
+      `Hi ${recall("q1")}`,
+      { q1: '<a href="https://evil.tld">Action required</a>' },
+      undefined,
+      false,
+      "en-US",
+      undefined,
+      true
+    );
+
+    expect(result).not.toContain("<a href");
+    expect(result).toContain("&lt;a href=&quot;https://evil.tld&quot;&gt;");
+  });
+
+  test("escapes the ampersand first so escaping cannot be undone", () => {
+    const result = parseRecallInfo(
+      recall("q1"),
+      { q1: "&lt;script&gt;alert(1)&lt;/script&gt;" },
+      undefined,
+      false,
+      "en-US",
+      undefined,
+      true
+    );
+
+    expect(result).toBe("&amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;");
+  });
+
+  // Matrix and address answers arrive as records, which would coerce to "[object Object]" if handed
+  // straight to String().
+  test("stringifies a record-shaped answer by joining its filled entries", () => {
+    const result = parseRecallInfo(
+      recall("q1"),
+      { q1: { "Row 1": "Yes", "Row 2": "", "Row 3": "No" } },
+      undefined,
+      false,
+      "en-US",
+      undefined,
+      true
+    );
+
+    expect(result).toBe("Yes, No");
+  });
+
+  test("escapes a record-shaped answer's entries too", () => {
+    const result = parseRecallInfo(
+      recall("q1"),
+      { q1: { street: "<script>alert(1)</script>" } },
+      undefined,
+      false,
+      "en-US",
+      undefined,
+      true
+    );
+
+    expect(result).toBe("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  test("leaves the author's surrounding markup untouched", () => {
+    const result = parseRecallInfo(
+      `<p>Thanks <b>${recall("q1")}</b></p>`,
+      { q1: "Ada" },
+      undefined,
+      false,
+      "en-US",
+      undefined,
+      true
+    );
+
+    expect(result).toBe("<p>Thanks <b>Ada</b></p>");
+  });
+
+  // Default stays off: the React callers escape for themselves, so escaping here would double-escape.
+  test("does not escape by default", () => {
+    const result = parseRecallInfo(recall("q1"), { q1: "5 > 3 & rising" });
+
+    expect(result).toBe("5 > 3 & rising");
+  });
+
+  // Regression: stringifyRecallValue used to run only inside the escapeValues branch, so the default
+  // path cast a record-shaped answer straight to string and rendered "[object Object]". Every caller
+  // outside the follow-up-email flow takes that default. Raised by CodeRabbit on #8681.
+  test("stringifies a record-shaped answer on the default (unescaped) path", () => {
+    const result = parseRecallInfo(recall("q1"), { q1: { "Row 1": "Yes", "Row 2": "No" } });
+
+    expect(result).not.toContain("[object Object]");
+    expect(result).toContain("Yes");
+    expect(result).toContain("No");
+  });
+
+  test("stringifies a record-shaped answer identically whether or not values are escaped", () => {
+    const data = { q1: { "Row 1": "Yes" } };
+
+    const plain = parseRecallInfo(recall("q1"), data);
+    const escaped = parseRecallInfo(recall("q1"), data, undefined, false, undefined, undefined, true);
+
+    expect(plain).toBe(escaped);
+  });
+});

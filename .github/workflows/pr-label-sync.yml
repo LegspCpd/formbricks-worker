@@ -1,0 +1,149 @@
+name: PR Label Sync
+
+# Keeps PR labels in sync with checkboxes in the PR body (see .github/pull_request_template.md).
+# Generic engine: to drive a new label from a new "## <heading>" section, add one entry to RULES
+# below — no other changes needed.
+#
+# Currently configured:
+#   - the checkbox in the "Breaking changes" section -> `breaking-change`
+#     Release notes and the self-hoster migration guide are compiled from the PRs carrying it.
+#
+# Uses pull_request_target because adding a label needs a write-scoped token (incl. fork PRs). This is
+# safe here: the job only reads the PR *body* (data) and never checks out or runs PR code.
+# Note: pull_request_target always runs the workflow definition from the base branch, so changes here
+# take effect once merged to main — they do not self-run on their own introducing PR.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-label-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - name: Sync labels from PR body sections
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // A section drives its label from a GitHub task-list checkbox:
+            //
+            //     - [x] This PR contains breaking changes
+            //
+            // Ticked -> the label belongs on the PR. Unticked -> it does not. The prose around the
+            // checkbox is never read, and that is the whole point. The previous version inferred intent
+            // from the section text, so any explanation after "None" ("None — same public API, only
+            // out-of-workspace deletions are refused") read as a declaration and mislabelled the PR.
+            // Deciding is now the author's (or agent's) job, stated in one unambiguous bit; the text can
+            // say whatever it needs to.
+            //
+            // The trade-off: a forgotten tick silently omits a migration-guide entry that self-hosters
+            // need, where the old heuristic erred towards a spurious label instead. So the template asks
+            // for a deliberate answer, and PR review is the backstop.
+            //
+            // No checkbox in the section at all -> leave the label alone rather than assume "not
+            // breaking", so a restructured section or a hand-applied label survives.
+            //
+            // Each rule matches its own checkbox by the label text the template ships, rather than
+            // taking the first checkbox in the section: an unrelated item above it ("- [x] I read the
+            // list above") would otherwise flip the label. That couples this workflow to the template's
+            // wording, so a section that holds checkboxes but not *this* one warns rather than passing
+            // silently — the drift is then visible in the run instead of freezing the label.
+            const CHECKBOX_LINE = /^[ \t]*[-*+][ \t]+\[([ xX])\][ \t]*(.*)$/gm;
+
+            const checkboxFor = (declaration) => (content) => {
+              const boxes = [...content.matchAll(CHECKBOX_LINE)];
+              const box = boxes.find(([, , text]) => declaration.test(text.replace(/[*_`]/g, "").trim()));
+              if (box) return box[1].toLowerCase() === "x";
+              if (boxes.length > 0) {
+                core.warning(
+                  `Found ${boxes.length} checkbox(es) but none matching ${declaration} — the PR ` +
+                    "template and pr-label-sync.yml have drifted. Label left unchanged."
+                );
+              }
+              return null; // no signal in this section
+            };
+
+            // Label rules. Add an entry to sync a new label from a new "## <heading>" PR-body section.
+            // `isActive(content)` returns true/false to set the label, or null to leave it unchanged.
+            const RULES = [
+              {
+                heading: "Breaking changes",
+                label: "breaking-change",
+                // Prefix, not exact: an author who appends a clause ("… (see the table)") still gets a
+                // working label, while "I read the list above" still does not match.
+                isActive: checkboxFor(/^this pr contains breaking changes/i),
+              },
+            ];
+
+            const pr = context.payload.pull_request;
+            // Strip HTML comments so template guidance and example rows never count as content.
+            const body = (pr.body || "").replace(/<!--[\s\S]*?-->/g, "");
+
+            // Content under a "## <heading>" up to the next H2 (or end of body); null when absent.
+            const sectionContent = (heading) => {
+              const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const m = body.match(new RegExp(`^##\\s+${escaped}\\s*$`, "im"));
+              if (!m) return null;
+              const after = body.slice(m.index + m[0].length);
+              const nextH2 = after.search(/^##\s/m);
+              return (nextH2 === -1 ? after : after.slice(0, nextH2)).trim();
+            };
+
+            const current = new Set((pr.labels || []).map((l) => l.name));
+
+            for (const rule of RULES) {
+              const content = sectionContent(rule.heading);
+              if (content === null) {
+                core.info(`[${rule.label}] no "## ${rule.heading}" section found; leaving unchanged.`);
+                continue;
+              }
+              const active = rule.isActive(content);
+              if (active === null) {
+                core.info(`[${rule.label}] no checkbox under "## ${rule.heading}"; leaving unchanged.`);
+                continue;
+              }
+              const has = current.has(rule.label);
+              if (active && !has) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: [rule.label],
+                });
+                core.info(`[${rule.label}] added.`);
+              } else if (!active && has) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    name: rule.label,
+                  });
+                  core.info(`[${rule.label}] removed.`);
+                } catch (error) {
+                  // A 404 means the label is already gone. `pr.labels` is a snapshot taken when the event
+                  // fired, so a label removed by hand races with the `edited` event that still observes it
+                  // — #8762 went red exactly that way, the two events two seconds apart. The desired end
+                  // state is already in place, so treat it as success; anything else is a real failure.
+                  if (error.status !== 404) throw error;
+                  core.info(`[${rule.label}] already removed by hand; nothing to do.`);
+                }
+              } else {
+                core.info(`[${rule.label}] already in the correct state.`);
+              }
+            }

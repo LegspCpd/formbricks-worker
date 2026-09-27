@@ -1,0 +1,1003 @@
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { prisma } from "@formbricks/database";
+import { Prisma, type PrismaClientKnownRequestError } from "@formbricks/database/prisma";
+import { DatabaseError, InvalidInputError, ResourceNotFoundError } from "@formbricks/types/errors";
+import {
+  createFeedbackSourceWithMappings,
+  deleteFeedbackSource,
+  getFeedbackSourceWithMappingsById,
+  getFeedbackSourcesBySurveyId,
+  getFeedbackSourcesToReconcile,
+  getFeedbackSourcesWithMappings,
+  updateFeedbackSource,
+  updateFeedbackSourceWithMappings,
+} from "./service";
+
+vi.mock("@formbricks/database", () => ({
+  prisma: {
+    feedbackSource: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    feedbackSourceFormbricksMapping: {
+      create: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    feedbackSourceFieldMapping: {
+      create: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    $transaction: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/utils/validate", () => ({
+  validateInputs: vi.fn(),
+}));
+
+vi.mock("@formbricks/logger", () => ({
+  logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+}));
+
+const ENV_ID = "clxxxxxxxxxxxxxxxx001";
+const FEEDBACK_SOURCE_ID = "clxxxxxxxxxxxxxxxx002";
+const SURVEY_ID = "clxxxxxxxxxxxxxxxx003";
+const FRD_ID = "clxxxxxxxxxxxxxxxx004";
+const NOW = new Date("2026-02-24T10:00:00.000Z");
+
+const mockFeedbackSource = {
+  id: FEEDBACK_SOURCE_ID,
+  createdAt: NOW,
+  updatedAt: NOW,
+  name: "Test FeedbackSource",
+  type: "formbricks_survey" as const,
+  status: "active" as const,
+  importMode: "completedOnly" as const,
+  workspaceId: ENV_ID,
+  feedbackDirectoryId: FRD_ID,
+  lastSyncAt: null,
+  createdBy: null,
+};
+
+const mockFeedbackSourceWithMappingsFromDb = {
+  ...mockFeedbackSource,
+  creator: null,
+  formbricksMappings: [
+    {
+      id: "mapping-1",
+      createdAt: NOW,
+      feedbackSourceId: FEEDBACK_SOURCE_ID,
+      workspaceId: ENV_ID,
+      surveyId: SURVEY_ID,
+      elementId: "el-1",
+      hubFieldType: "text",
+      customFieldLabel: null,
+    },
+  ],
+  fieldMappings: [],
+};
+
+const mockFeedbackSourceWithMappings = {
+  ...mockFeedbackSource,
+  creatorName: null,
+  formbricksMappings: mockFeedbackSourceWithMappingsFromDb.formbricksMappings,
+  fieldMappings: [],
+};
+
+// Mirrors the real P2003 `meta` produced by Prisma 7 with the @prisma/adapter-pg driver: the
+// constraint name is nested under driverAdapterError.cause, NOT at the top level. Tests must use
+// this shape so the FK-mapping logic is exercised against what the DB layer actually emits.
+const makeForeignKeyError = (constraintName: string): PrismaClientKnownRequestError =>
+  new Prisma.PrismaClientKnownRequestError("Foreign key constraint violated", {
+    code: "P2003",
+    clientVersion: "7.8.0",
+    meta: {
+      modelName: "FeedbackSource",
+      driverAdapterError: {
+        name: "DriverAdapterError",
+        cause: {
+          kind: "ForeignKeyConstraintViolation",
+          originalCode: "23503",
+          originalMessage: `insert or update on table "FeedbackSource" violates foreign key constraint "${constraintName}"`,
+          constraint: { index: constraintName },
+        },
+      },
+    },
+  });
+
+describe("getFeedbackSourcesWithMappings", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("returns feedbackSources for the given environment", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockResolvedValue([
+      mockFeedbackSourceWithMappingsFromDb,
+    ] as never);
+
+    const result = await getFeedbackSourcesWithMappings(ENV_ID);
+
+    expect(prisma.feedbackSource.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { workspaceId: ENV_ID },
+        orderBy: { createdAt: "desc" },
+      })
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(FEEDBACK_SOURCE_ID);
+  });
+
+  test("applies pagination when page is provided", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockResolvedValue([] as never);
+
+    await getFeedbackSourcesWithMappings(ENV_ID, 2);
+
+    expect(prisma.feedbackSource.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        take: expect.any(Number),
+        skip: expect.any(Number),
+      })
+    );
+  });
+
+  test("returns empty array when no feedbackSources exist", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockResolvedValue([] as never);
+
+    const result = await getFeedbackSourcesWithMappings(ENV_ID);
+    expect(result).toEqual([]);
+  });
+
+  test("throws DatabaseError on Prisma error", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("connection error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(getFeedbackSourcesWithMappings(ENV_ID)).rejects.toThrow(DatabaseError);
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockRejectedValue(new Error("boom"));
+
+    await expect(getFeedbackSourcesWithMappings(ENV_ID)).rejects.toThrow("boom");
+  });
+});
+
+describe("getFeedbackSourceWithMappingsById", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("returns the feedbackSource when found", async () => {
+    vi.mocked(prisma.feedbackSource.findUnique).mockResolvedValue(
+      mockFeedbackSourceWithMappingsFromDb as never
+    );
+
+    const result = await getFeedbackSourceWithMappingsById(FEEDBACK_SOURCE_ID, ENV_ID);
+
+    expect(prisma.feedbackSource.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID },
+      })
+    );
+    expect(result).toEqual(mockFeedbackSourceWithMappings);
+  });
+
+  test("returns null when not found", async () => {
+    vi.mocked(prisma.feedbackSource.findUnique).mockResolvedValue(null as never);
+
+    const result = await getFeedbackSourceWithMappingsById(FEEDBACK_SOURCE_ID, ENV_ID);
+    expect(result).toBeNull();
+  });
+
+  test("throws DatabaseError on Prisma error", async () => {
+    vi.mocked(prisma.feedbackSource.findUnique).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("DB error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(getFeedbackSourceWithMappingsById(FEEDBACK_SOURCE_ID, ENV_ID)).rejects.toThrow(
+      DatabaseError
+    );
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.feedbackSource.findUnique).mockRejectedValue(new Error("boom"));
+
+    await expect(getFeedbackSourceWithMappingsById(FEEDBACK_SOURCE_ID, ENV_ID)).rejects.toThrow("boom");
+  });
+});
+
+describe("getFeedbackSourcesToReconcile", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // Deliberately NOT filtered to active, unlike the publish-path reader. A paused source is exactly
+  // the one whose rows must not drift: a question retyped to contactInfo while it is paused would keep
+  // its stale mapping, and resuming submits no mappings so nothing would fix it — the first response
+  // after the resume would publish that answer.
+  test("returns sources of every status, so a paused source's rows still get corrected", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockResolvedValue([
+      mockFeedbackSourceWithMappingsFromDb,
+    ] as never);
+
+    const result = await getFeedbackSourcesToReconcile(SURVEY_ID);
+
+    expect(prisma.feedbackSource.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          type: "formbricks_survey",
+          formbricksMappings: { some: { surveyId: SURVEY_ID } },
+        },
+      })
+    );
+    const [[args]] = vi.mocked(prisma.feedbackSource.findMany).mock.calls as any;
+    expect(args.where).not.toHaveProperty("status");
+    expect(result).toHaveLength(1);
+  });
+});
+
+describe("getFeedbackSourcesBySurveyId", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("returns active formbricks feedbackSources linked to the survey", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockResolvedValue([
+      mockFeedbackSourceWithMappingsFromDb,
+    ] as never);
+
+    const result = await getFeedbackSourcesBySurveyId(SURVEY_ID);
+
+    expect(prisma.feedbackSource.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          type: "formbricks_survey",
+          status: "active",
+          formbricksMappings: { some: { surveyId: SURVEY_ID } },
+        },
+      })
+    );
+    expect(result).toHaveLength(1);
+  });
+
+  test("returns empty when no feedbackSources match", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockResolvedValue([] as never);
+
+    const result = await getFeedbackSourcesBySurveyId(SURVEY_ID);
+    expect(result).toEqual([]);
+  });
+
+  test("throws DatabaseError on Prisma error", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("DB error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(getFeedbackSourcesBySurveyId(SURVEY_ID)).rejects.toThrow(DatabaseError);
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.feedbackSource.findMany).mockRejectedValue(new Error("boom"));
+
+    await expect(getFeedbackSourcesBySurveyId(SURVEY_ID)).rejects.toThrow("boom");
+  });
+});
+
+describe("updateFeedbackSource", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("updates feedbackSource name and returns the result", async () => {
+    const updated = { ...mockFeedbackSource, name: "Renamed" };
+    vi.mocked(prisma.feedbackSource.update).mockResolvedValue(updated as never);
+
+    const result = await updateFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID, { name: "Renamed" });
+
+    expect(prisma.feedbackSource.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID },
+        data: expect.objectContaining({ name: "Renamed" }),
+      })
+    );
+    expect(result.name).toBe("Renamed");
+  });
+
+  test("updates feedbackSource status", async () => {
+    const updated = { ...mockFeedbackSource, status: "paused" };
+    vi.mocked(prisma.feedbackSource.update).mockResolvedValue(updated as never);
+
+    const result = await updateFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID, { status: "paused" });
+    expect(result.status).toBe("paused");
+  });
+
+  /**
+   * ENG-2058. The select constants are `satisfies Prisma.FeedbackSourceSelect` and the mapper casts
+   * the row, so dropping importMode from either one typechecks clean and is simply absent at
+   * runtime — the setting would silently stop round-tripping with nothing going red.
+   */
+  test("persists importMode and selects it back", async () => {
+    const updated = { ...mockFeedbackSource, importMode: "all" };
+    vi.mocked(prisma.feedbackSource.update).mockResolvedValue(updated as never);
+
+    const result = await updateFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID, { importMode: "all" });
+
+    expect(prisma.feedbackSource.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ importMode: "all" }),
+        select: expect.objectContaining({ importMode: true }),
+      })
+    );
+    expect(result.importMode).toBe("all");
+  });
+
+  test("throws ResourceNotFoundError when feedbackSource does not exist", async () => {
+    vi.mocked(prisma.feedbackSource.update).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Not found", {
+        code: "P2025",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(updateFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      ResourceNotFoundError
+    );
+  });
+
+  test("throws DatabaseError on generic Prisma error", async () => {
+    vi.mocked(prisma.feedbackSource.update).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("DB error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(updateFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      DatabaseError
+    );
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.feedbackSource.update).mockRejectedValue(new Error("unexpected"));
+
+    await expect(updateFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      "unexpected"
+    );
+  });
+});
+
+describe("deleteFeedbackSource", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("deletes the feedbackSource and returns it", async () => {
+    vi.mocked(prisma.feedbackSource.delete).mockResolvedValue(mockFeedbackSource as never);
+
+    const result = await deleteFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID);
+
+    expect(prisma.feedbackSource.delete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID },
+      })
+    );
+    expect(result.id).toBe(FEEDBACK_SOURCE_ID);
+  });
+
+  test("throws ResourceNotFoundError when feedbackSource does not exist", async () => {
+    vi.mocked(prisma.feedbackSource.delete).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Not found", {
+        code: "P2025",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(deleteFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID)).rejects.toThrow(ResourceNotFoundError);
+  });
+
+  test("throws DatabaseError on generic Prisma error", async () => {
+    vi.mocked(prisma.feedbackSource.delete).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("DB error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(deleteFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID)).rejects.toThrow(DatabaseError);
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.feedbackSource.delete).mockRejectedValue(new Error("boom"));
+
+    await expect(deleteFeedbackSource(FEEDBACK_SOURCE_ID, ENV_ID)).rejects.toThrow("boom");
+  });
+});
+
+describe("createFeedbackSourceWithMappings", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const setupTransaction = () => {
+    const txMethods = {
+      feedbackSource: {
+        create: vi.fn(),
+        findUniqueOrThrow: vi.fn(),
+      },
+      feedbackSourceFormbricksMapping: {
+        create: vi.fn(),
+      },
+      feedbackSourceFieldMapping: {
+        create: vi.fn(),
+      },
+    };
+
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) => {
+      return (fn as unknown as (tx: typeof txMethods) => Promise<unknown>)(txMethods);
+    });
+
+    return txMethods;
+  };
+
+  test("creates feedbackSource without mappings", async () => {
+    const tx = setupTransaction();
+    tx.feedbackSource.create.mockResolvedValue({ id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID });
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue(mockFeedbackSourceWithMappingsFromDb);
+
+    const result = await createFeedbackSourceWithMappings(ENV_ID, {
+      name: "New",
+      type: "formbricks_survey",
+      feedbackDirectoryId: FRD_ID,
+    });
+
+    expect(tx.feedbackSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          name: "New",
+          type: "formbricks_survey",
+          workspaceId: ENV_ID,
+          feedbackDirectoryId: FRD_ID,
+        },
+      })
+    );
+    expect(tx.feedbackSourceFormbricksMapping.create).not.toHaveBeenCalled();
+    expect(tx.feedbackSourceFieldMapping.create).not.toHaveBeenCalled();
+    expect(result).toEqual(mockFeedbackSourceWithMappings);
+  });
+
+  // ENG-2058: the chosen import mode has to reach the row, or the historical import that reads it
+  // back moments later silently falls through to the completedOnly default.
+  test("persists importMode on create and selects it back", async () => {
+    const tx = setupTransaction();
+    tx.feedbackSource.create.mockResolvedValue({ id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID });
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue(mockFeedbackSourceWithMappingsFromDb);
+
+    await createFeedbackSourceWithMappings(ENV_ID, {
+      name: "New",
+      type: "formbricks_survey",
+      feedbackDirectoryId: FRD_ID,
+      importMode: "all",
+    });
+
+    expect(tx.feedbackSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ importMode: "all" }) })
+    );
+    expect(tx.feedbackSource.findUniqueOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ importMode: true }) })
+    );
+  });
+
+  test("creates feedbackSource with formbricks mappings", async () => {
+    const tx = setupTransaction();
+    tx.feedbackSource.create.mockResolvedValue({ id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID });
+    tx.feedbackSourceFormbricksMapping.create.mockResolvedValue({});
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue(mockFeedbackSourceWithMappingsFromDb);
+
+    await createFeedbackSourceWithMappings(
+      ENV_ID,
+      { name: "FB", type: "formbricks_survey", feedbackDirectoryId: FRD_ID },
+      {
+        type: "formbricks_survey",
+        elementScope: "all",
+        mappings: [
+          { surveyId: SURVEY_ID, elementId: "el-1", hubFieldType: "text" },
+          { surveyId: SURVEY_ID, elementId: "el-2", hubFieldType: "nps" },
+        ],
+      }
+    );
+
+    // The scope is the only record of whether the operator wanted every question tracked, so a create
+    // that drops it silently turns a "track everything" source into a curated one.
+    expect(tx.feedbackSource.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ elementScope: "all" }) })
+    );
+    expect(tx.feedbackSourceFormbricksMapping.create).toHaveBeenCalledTimes(2);
+    expect(tx.feedbackSourceFormbricksMapping.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          feedbackSourceId: FEEDBACK_SOURCE_ID,
+          workspaceId: ENV_ID,
+          surveyId: SURVEY_ID,
+          elementId: "el-1",
+          hubFieldType: "text",
+        }),
+      })
+    );
+  });
+
+  test("creates feedbackSource with field mappings", async () => {
+    const tx = setupTransaction();
+    tx.feedbackSource.create.mockResolvedValue({ id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID });
+    tx.feedbackSourceFieldMapping.create.mockResolvedValue({});
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue({
+      ...mockFeedbackSource,
+      formbricksMappings: [],
+      fieldMappings: [],
+    });
+
+    await createFeedbackSourceWithMappings(
+      ENV_ID,
+      { name: "CSV", type: "csv", feedbackDirectoryId: FRD_ID },
+      {
+        type: "field",
+        mappings: [{ sourceFieldId: "col-1", targetFieldId: "value_text" }],
+      }
+    );
+
+    expect(tx.feedbackSourceFieldMapping.create).toHaveBeenCalledTimes(1);
+    expect(tx.feedbackSourceFieldMapping.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          feedbackSourceId: FEEDBACK_SOURCE_ID,
+          workspaceId: ENV_ID,
+          sourceFieldId: "col-1",
+          targetFieldId: "value_text",
+        }),
+      })
+    );
+  });
+
+  test("throws FEEDBACK_SOURCE_NAME_DUPLICATE on FeedbackSource name unique violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+        meta: {
+          driverAdapterError: { cause: { constraint: { fields: ["workspaceId", "name"] } } },
+        },
+      })
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Dup",
+        type: "formbricks_survey",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_NAME_DUPLICATE"));
+  });
+
+  test("throws FEEDBACK_SOURCE_FORMBRICKS_MAPPING_DUPLICATE on mapping unique violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+        meta: {
+          driverAdapterError: {
+            cause: { constraint: { fields: ["workspaceId", "feedbackSourceId", "surveyId", "elementId"] } },
+          },
+        },
+      })
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Dup mapping",
+        type: "formbricks_survey",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_FORMBRICKS_MAPPING_DUPLICATE"));
+  });
+
+  test("throws FEEDBACK_SOURCE_FIELD_MAPPING_DUPLICATE on field mapping unique violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+        // Real Prisma 7 + adapter-pg shape: no meta.target, and columns are the @map()-ed DB names
+        // (source_field_id / target_field_id) — verifies the helper's mapped-column handling.
+        meta: {
+          driverAdapterError: {
+            cause: {
+              constraint: {
+                fields: ["workspaceId", "feedbackSourceId", "source_field_id", "target_field_id"],
+              },
+            },
+          },
+        },
+      })
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Dup field mapping",
+        type: "csv",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_FIELD_MAPPING_DUPLICATE"));
+  });
+
+  test("throws FEEDBACK_SOURCE_NAME_DUPLICATE on a unique violation without target meta", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Dup",
+        type: "formbricks_survey",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_NAME_DUPLICATE"));
+  });
+
+  test("throws FEEDBACK_SOURCE_DIRECTORY_NOT_ASSIGNED_TO_WORKSPACE on composite FK violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      makeForeignKeyError("FeedbackSource_feedbackDirectoryId_workspaceId_fkey")
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Unassigned directory",
+        type: "csv",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_DIRECTORY_NOT_ASSIGNED_TO_WORKSPACE"));
+  });
+
+  test("maps the column-only fallback shape (no exact constraint name) to the typed error", async () => {
+    // Some Prisma/meta shapes expose the columns + model but not the constraint name; the anchored
+    // fallback (FeedbackSource + feedbackDirectoryId + workspaceId) must still classify it.
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Foreign key constraint violated", {
+        code: "P2003",
+        clientVersion: "7.8.0",
+        meta: { modelName: "FeedbackSource", field_name: "feedbackDirectoryId_workspaceId" },
+      })
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Column-only meta",
+        type: "csv",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_DIRECTORY_NOT_ASSIGNED_TO_WORKSPACE"));
+  });
+
+  test("throws DatabaseError on an unrelated foreign-key violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      makeForeignKeyError("FeedbackSourceFormbricksMapping_surveyId_workspaceId_fkey")
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, {
+        name: "Bad survey",
+        type: "formbricks_survey",
+        feedbackDirectoryId: FRD_ID,
+      })
+    ).rejects.toThrow(DatabaseError);
+  });
+
+  test("throws DatabaseError on generic Prisma error", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("DB error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, { name: "Fail", type: "csv", feedbackDirectoryId: FRD_ID })
+    ).rejects.toThrow(DatabaseError);
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(new Error("boom"));
+
+    await expect(
+      createFeedbackSourceWithMappings(ENV_ID, { name: "Fail", type: "csv", feedbackDirectoryId: FRD_ID })
+    ).rejects.toThrow("boom");
+  });
+});
+
+describe("updateFeedbackSourceWithMappings", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // The source's status as the transaction would leave it, tracked across both write methods so a test
+  // can assert the outcome rather than which Prisma call produced it.
+  let trackedStatus: string;
+  const persistedStatus = () => trackedStatus;
+
+  const setupTransaction = (initialStatus = "active") => {
+    trackedStatus = initialStatus;
+
+    const applyStatus = (args: { where?: { status?: string }; data?: { status?: string } }) => {
+      if (args.data?.status === undefined) return { count: 0 };
+      // Mirror the where filter: a scoped write only lands when the current status matches.
+      if (args.where?.status !== undefined && args.where.status !== trackedStatus) return { count: 0 };
+      trackedStatus = args.data.status;
+      return { count: 1 };
+    };
+
+    const txMethods = {
+      feedbackSource: {
+        update: vi.fn(applyStatus),
+        // The error -> active reset runs as its own updateMany, so that a healthy source is a no-op
+        // rather than a P2025 from a `status` filter on the main update.
+        updateMany: vi.fn(applyStatus),
+        findUniqueOrThrow: vi.fn(),
+      },
+      feedbackSourceFormbricksMapping: {
+        create: vi.fn(),
+        deleteMany: vi.fn(),
+      },
+      feedbackSourceFieldMapping: {
+        create: vi.fn(),
+        deleteMany: vi.fn(),
+      },
+    };
+
+    vi.mocked(prisma.$transaction).mockImplementation(async (fn) => {
+      return (fn as unknown as (tx: typeof txMethods) => Promise<unknown>)(txMethods);
+    });
+
+    return txMethods;
+  };
+
+  test("updates feedbackSource name without changing mappings", async () => {
+    const tx = setupTransaction();
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue(mockFeedbackSourceWithMappingsFromDb);
+
+    const result = await updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "Updated" });
+
+    expect(tx.feedbackSource.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID },
+        data: expect.objectContaining({ name: "Updated" }),
+      })
+    );
+    expect(tx.feedbackSourceFormbricksMapping.deleteMany).not.toHaveBeenCalled();
+    expect(tx.feedbackSourceFieldMapping.deleteMany).not.toHaveBeenCalled();
+    expect(result).toEqual(mockFeedbackSourceWithMappings);
+  });
+
+  test("replaces formbricks mappings when provided", async () => {
+    const tx = setupTransaction();
+    tx.feedbackSourceFormbricksMapping.deleteMany.mockResolvedValue({ count: 1 });
+    tx.feedbackSourceFormbricksMapping.create.mockResolvedValue({});
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue(mockFeedbackSourceWithMappingsFromDb);
+
+    await updateFeedbackSourceWithMappings(
+      FEEDBACK_SOURCE_ID,
+      ENV_ID,
+      { name: "Updated" },
+      {
+        type: "formbricks_survey",
+        elementScope: "all",
+        mappings: [{ surveyId: SURVEY_ID, elementId: "el-new", hubFieldType: "nps" }],
+      }
+    );
+
+    expect(tx.feedbackSourceFormbricksMapping.deleteMany).toHaveBeenCalledWith({
+      where: { feedbackSourceId: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID },
+    });
+    expect(tx.feedbackSourceFormbricksMapping.create).toHaveBeenCalledTimes(1);
+    // Re-derived on every save in the same transaction as the rows: this is also what gives sources
+    // created before the column existed their real scope.
+    expect(tx.feedbackSource.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ elementScope: "all" }) })
+    );
+  });
+
+  // ENG-2064: nothing else clears `status`. The edit modal sends only {name, importMode}, `status` is
+  // optional on the input so Prisma leaves it alone, and getFeedbackSourcesBySurveyId filters on
+  // "active" — so a source reconciliation flagged `error` was repaired by a re-map and then stayed
+  // dark forever, reachable only through the unrelated pause/resume toggle.
+  const seedUpdateTransaction = () => {
+    const tx = setupTransaction();
+    tx.feedbackSourceFormbricksMapping.deleteMany.mockResolvedValue({ count: 1 });
+    tx.feedbackSourceFormbricksMapping.create.mockResolvedValue({});
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue(mockFeedbackSourceWithMappingsFromDb);
+    return tx;
+  };
+  const formbricksMappings = {
+    type: "formbricks_survey" as const,
+    elementScope: "all" as const,
+    mappings: [{ surveyId: SURVEY_ID, elementId: "el-new", hubFieldType: "nps" as const }],
+  };
+
+  test("returns an errored source to active when a re-map gives it rows again", async () => {
+    const tx = seedUpdateTransaction();
+
+    await updateFeedbackSourceWithMappings(
+      FEEDBACK_SOURCE_ID,
+      ENV_ID,
+      { name: "Updated" },
+      formbricksMappings
+    );
+
+    // updateMany, not update: `status` in the where of the main update would miss every healthy
+    // source and throw P2025 on the normal save path.
+    expect(tx.feedbackSource.updateMany).toHaveBeenCalledWith({
+      where: { id: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID, status: "error" },
+      data: { status: "active" },
+    });
+  });
+
+  test("leaves status alone when the caller set it explicitly", async () => {
+    const tx = seedUpdateTransaction();
+
+    // The pause/resume toggle. Reviving a source it just paused would fight the operator.
+    await updateFeedbackSourceWithMappings(
+      FEEDBACK_SOURCE_ID,
+      ENV_ID,
+      { name: "Updated", status: "paused" },
+      formbricksMappings
+    );
+
+    expect(tx.feedbackSource.updateMany).not.toHaveBeenCalled();
+  });
+
+  test("does not revive a source when the save supplies no mappings", async () => {
+    const tx = seedUpdateTransaction();
+
+    await updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "Renamed only" });
+
+    // A rename does not repair anything, so there is nothing to come back from.
+    expect(tx.feedbackSource.updateMany).not.toHaveBeenCalled();
+  });
+
+  test("replaces field mappings when provided", async () => {
+    // Starts errored: a csv save must not clear a flag only the formbricks reconciler can set.
+    const tx = setupTransaction("error");
+    tx.feedbackSourceFieldMapping.deleteMany.mockResolvedValue({ count: 1 });
+    tx.feedbackSourceFieldMapping.create.mockResolvedValue({});
+    tx.feedbackSource.findUniqueOrThrow.mockResolvedValue({
+      ...mockFeedbackSource,
+      formbricksMappings: [],
+      fieldMappings: [],
+    });
+
+    await updateFeedbackSourceWithMappings(
+      FEEDBACK_SOURCE_ID,
+      ENV_ID,
+      { name: "CSV Updated" },
+      {
+        type: "field",
+        mappings: [{ sourceFieldId: "col-x", targetFieldId: "value_number" }],
+      }
+    );
+
+    expect(tx.feedbackSourceFieldMapping.deleteMany).toHaveBeenCalledWith({
+      where: { feedbackSourceId: FEEDBACK_SOURCE_ID, workspaceId: ENV_ID },
+    });
+    expect(tx.feedbackSourceFieldMapping.create).toHaveBeenCalledTimes(1);
+    // The outcome, not the persistence call: an errored source is still errored afterwards.
+    //
+    // `status: "error"` is written by exactly one thing, the formbricks mapping reconciler, so saving
+    // FIELD mappings cannot be repairing an error it could have caused — and the update action accepts
+    // fieldMappings regardless of source type. `persistedStatus` follows both `update` and `updateMany`,
+    // so this still holds if the clear moves between them.
+    expect(persistedStatus()).toBe("error");
+  });
+
+  test("throws ResourceNotFoundError when feedbackSource does not exist", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Not found", {
+        code: "P2025",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      ResourceNotFoundError
+    );
+  });
+
+  test("throws FEEDBACK_SOURCE_NAME_DUPLICATE on FeedbackSource name unique violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+        meta: {
+          driverAdapterError: { cause: { constraint: { fields: ["workspaceId", "name"] } } },
+        },
+      })
+    );
+
+    await expect(
+      updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "Dup" })
+    ).rejects.toThrow(new InvalidInputError("FEEDBACK_SOURCE_NAME_DUPLICATE"));
+  });
+
+  test("throws FEEDBACK_SOURCE_FORMBRICKS_MAPPING_DUPLICATE on formbricks mapping unique violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+        meta: {
+          driverAdapterError: {
+            cause: { constraint: { fields: ["workspaceId", "feedbackSourceId", "surveyId", "elementId"] } },
+          },
+        },
+      })
+    );
+
+    await expect(updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      new InvalidInputError("FEEDBACK_SOURCE_FORMBRICKS_MAPPING_DUPLICATE")
+    );
+  });
+
+  test("throws FEEDBACK_SOURCE_FIELD_MAPPING_DUPLICATE on field mapping unique violation", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint", {
+        code: "P2002",
+        clientVersion: "5.0.0",
+        // Real Prisma 7 + adapter-pg shape: no meta.target, and columns are the @map()-ed DB names
+        // (source_field_id / target_field_id) — verifies the helper's mapped-column handling.
+        meta: {
+          driverAdapterError: {
+            cause: {
+              constraint: {
+                fields: ["workspaceId", "feedbackSourceId", "source_field_id", "target_field_id"],
+              },
+            },
+          },
+        },
+      })
+    );
+
+    await expect(updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      new InvalidInputError("FEEDBACK_SOURCE_FIELD_MAPPING_DUPLICATE")
+    );
+  });
+
+  test("throws DatabaseError on generic Prisma error", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("DB error", {
+        code: "P1001",
+        clientVersion: "5.0.0",
+      })
+    );
+
+    await expect(updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      DatabaseError
+    );
+  });
+
+  test("rethrows non-Prisma errors", async () => {
+    vi.mocked(prisma.$transaction).mockRejectedValue(new Error("boom"));
+
+    await expect(updateFeedbackSourceWithMappings(FEEDBACK_SOURCE_ID, ENV_ID, { name: "x" })).rejects.toThrow(
+      "boom"
+    );
+  });
+});

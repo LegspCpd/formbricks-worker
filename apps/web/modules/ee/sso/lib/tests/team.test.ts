@@ -1,0 +1,201 @@
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { prisma } from "@formbricks/database";
+import { logger } from "@formbricks/logger";
+import { getMembershipByUserIdOrganizationId } from "@/lib/membership/service";
+import { validateInputs } from "@/lib/utils/validate";
+import { createDefaultTeamMembership, getOrganizationByTeamId } from "../team";
+import {
+  MOCK_DEFAULT_TEAM,
+  MOCK_DEFAULT_TEAM_USER,
+  MOCK_IDS,
+  MOCK_ORGANIZATION_MEMBERSHIP,
+} from "./__mock__/team.mock";
+
+// Setup all mocks
+const setupMocks = () => {
+  // Mock dependencies
+  vi.mock("@formbricks/database", () => ({
+    prisma: {
+      team: {
+        findUnique: vi.fn(),
+      },
+      teamUser: {
+        upsert: vi.fn(),
+      },
+    },
+  }));
+
+  vi.mock("@/lib/constants", () => ({
+    DEFAULT_TEAM_ID: "team-123",
+    DEFAULT_ORGANIZATION_ID: "org-123",
+  }));
+
+  vi.mock("@/lib/membership/service", () => ({
+    getMembershipByUserIdOrganizationId: vi.fn(),
+  }));
+
+  vi.mock("@/lib/authzed/team-workspace", () => ({
+    reconcileTeamWorkspaceRelationships: vi.fn(),
+  }));
+
+  vi.mock("@formbricks/logger", () => ({
+    logger: {
+      error: vi.fn(),
+    },
+  }));
+
+  vi.mock("@/lib/utils/validate", () => ({
+    validateInputs: vi.fn((args) => args),
+  }));
+
+  // Mock reactCache to control the getDefaultTeam function
+  vi.mock("react", async () => {
+    const actual = await vi.importActual("react");
+    return {
+      ...actual,
+      cache: vi.fn().mockImplementation((fn) => fn),
+    };
+  });
+};
+
+// Set up mocks
+setupMocks();
+
+describe("Team Management", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe("createDefaultTeamMembership", () => {
+    describe("when all dependencies are available", () => {
+      test("creates the default team membership successfully", async () => {
+        vi.mocked(prisma.team.findUnique).mockResolvedValue(MOCK_DEFAULT_TEAM);
+        vi.mocked(getMembershipByUserIdOrganizationId).mockResolvedValue(MOCK_ORGANIZATION_MEMBERSHIP);
+        vi.mocked(prisma.teamUser.upsert).mockResolvedValue(MOCK_DEFAULT_TEAM_USER as any);
+
+        await createDefaultTeamMembership(MOCK_IDS.userId);
+
+        expect(prisma.team.findUnique).toHaveBeenCalledWith({
+          where: {
+            id: "team-123",
+          },
+        });
+        expect(getMembershipByUserIdOrganizationId).toHaveBeenCalledWith(
+          MOCK_IDS.userId,
+          MOCK_DEFAULT_TEAM.organizationId,
+          undefined
+        );
+
+        expect(prisma.teamUser.upsert).toHaveBeenCalledWith({
+          create: {
+            teamId: "team-123",
+            userId: MOCK_IDS.userId,
+            role: "admin",
+          },
+          update: {
+            role: "admin",
+          },
+          where: {
+            teamId_userId: {
+              teamId: "team-123",
+              userId: MOCK_IDS.userId,
+            },
+          },
+        });
+      });
+
+      test("passes the transaction client into membership resolution when provided", async () => {
+        const tx = {
+          team: {
+            findUnique: vi.fn().mockResolvedValue(MOCK_DEFAULT_TEAM),
+          },
+          teamUser: {
+            upsert: vi.fn().mockResolvedValue(MOCK_DEFAULT_TEAM_USER),
+          },
+        } as any;
+
+        vi.mocked(getMembershipByUserIdOrganizationId).mockResolvedValue(MOCK_ORGANIZATION_MEMBERSHIP);
+
+        await createDefaultTeamMembership(MOCK_IDS.userId, {
+          projection: "deferred",
+          transaction: tx,
+        });
+
+        expect(getMembershipByUserIdOrganizationId).toHaveBeenCalledWith(
+          MOCK_IDS.userId,
+          MOCK_DEFAULT_TEAM.organizationId,
+          tx
+        );
+      });
+    });
+
+    describe("error handling", () => {
+      test("handles missing default team gracefully", async () => {
+        vi.mocked(prisma.team.findUnique).mockResolvedValue(null);
+        await expect(createDefaultTeamMembership(MOCK_IDS.userId)).resolves.toBeUndefined();
+        expect(prisma.teamUser.upsert).not.toHaveBeenCalled();
+      });
+
+      test("handles missing organization membership gracefully", async () => {
+        vi.mocked(prisma.team.findUnique).mockResolvedValue(MOCK_DEFAULT_TEAM);
+        vi.mocked(getMembershipByUserIdOrganizationId).mockResolvedValue(null);
+
+        await expect(createDefaultTeamMembership(MOCK_IDS.userId)).resolves.toBeUndefined();
+        expect(prisma.teamUser.upsert).not.toHaveBeenCalled();
+      });
+
+      test("handles database errors gracefully", async () => {
+        vi.mocked(prisma.team.findUnique).mockResolvedValue(MOCK_DEFAULT_TEAM);
+        vi.mocked(getMembershipByUserIdOrganizationId).mockResolvedValue(MOCK_ORGANIZATION_MEMBERSHIP);
+        vi.mocked(prisma.teamUser.upsert).mockRejectedValue(new Error("Database error"));
+
+        await expect(createDefaultTeamMembership(MOCK_IDS.userId)).resolves.toBeUndefined();
+      });
+    });
+  });
+
+  describe("getOrganizationByTeamId", () => {
+    const mockOrganization = { id: "org-1", name: "Test Org" };
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    test("returns organization when team is found", async () => {
+      vi.mocked(prisma.team.findUnique).mockResolvedValueOnce({
+        organization: mockOrganization,
+      } as any);
+
+      const result = await getOrganizationByTeamId("team-1");
+      expect(result).toEqual(mockOrganization);
+      expect(prisma.team.findUnique).toHaveBeenCalledWith({
+        where: { id: "team-1" },
+        select: { organization: true },
+      });
+    });
+
+    test("returns null when team is not found", async () => {
+      vi.mocked(prisma.team.findUnique).mockResolvedValueOnce(null);
+
+      const result = await getOrganizationByTeamId("team-2");
+      expect(result).toBeNull();
+    });
+
+    test("returns null and logs error when prisma throws", async () => {
+      const error = new Error("DB error");
+      vi.mocked(prisma.team.findUnique).mockRejectedValueOnce(error);
+
+      const result = await getOrganizationByTeamId("team-3");
+      expect(result).toBeNull();
+      expect(logger.error).toHaveBeenCalledWith(error, "Error getting organization by team id team-3");
+    });
+
+    test("calls validateInputs with correct arguments", async () => {
+      const mockTeamId = "team-xyz";
+      vi.mocked(prisma.team.findUnique).mockResolvedValueOnce({ organization: mockOrganization } as any);
+
+      await getOrganizationByTeamId(mockTeamId);
+      expect(validateInputs).toHaveBeenCalledWith([mockTeamId, expect.anything()]);
+    });
+  });
+});

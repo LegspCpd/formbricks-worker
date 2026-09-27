@@ -1,0 +1,1372 @@
+// utils.test.ts
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { mockSurveyId } from "@/lib/common/tests/__mocks__/config.mock";
+import {
+  checkUrlMatch,
+  diffInDays,
+  evaluateNoCodeConfigClick,
+  filterSurveys,
+  getDefaultLanguageCode,
+  getIsDebug,
+  getLanguageCode,
+  getSecureRandom,
+  getStyling,
+  handleUrlFilters,
+  isNowExpired,
+  shouldDisplayBasedOnPercentage,
+  wrapThrows,
+  wrapThrowsAsync,
+} from "@/lib/common/utils";
+import type {
+  TUserState,
+  TWorkspaceState,
+  TWorkspaceStateActionClass,
+  TWorkspaceStateSettings,
+  TWorkspaceStateSurvey,
+} from "@/types/config";
+import { type TActionClassNoCodeConfig, type TActionClassPageUrlRule } from "@/types/survey";
+
+const mockSurveyId1 = "e3kxlpnzmdp84op9qzxl9olj";
+const mockSurveyId2 = "qo9rwjmms42hoy3k85fp8vgu";
+const mockSegmentId1 = "p6yrnz3s2tvoe5r0l28unq7k";
+const mockSegmentId2 = "wz43zrxeddhb1uo9cicustar";
+
+describe("utils.ts", () => {
+  // ---------------------------------------------------------------------------------
+  // diffInDays
+  // ---------------------------------------------------------------------------------
+  describe("diffInDays()", () => {
+    test("calculates correct day difference", () => {
+      const date1 = new Date("2023-01-01");
+      const date2 = new Date("2023-01-05");
+      expect(diffInDays(date1, date2)).toBe(4); // four days apart
+    });
+
+    test("handles negative differences (abs)", () => {
+      const date1 = new Date("2023-01-10");
+      const date2 = new Date("2023-01-05");
+      expect(diffInDays(date1, date2)).toBe(5);
+    });
+
+    test("0 if same day", () => {
+      const date = new Date("2023-01-01");
+      expect(diffInDays(date, date)).toBe(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // wrapThrows
+  // ---------------------------------------------------------------------------------
+  describe("wrapThrows()", () => {
+    test("returns ok on success", () => {
+      const fn = vi.fn(() => "success");
+      const wrapped = wrapThrows(fn);
+      const result = wrapped();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe("success");
+      }
+    });
+
+    test("returns err on error", () => {
+      const fn = vi.fn(() => {
+        throw new Error("Something broke");
+      });
+      const wrapped = wrapThrows(fn);
+      const result = wrapped();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toBe("Something broke");
+      }
+    });
+
+    test("passes arguments to wrapped function", () => {
+      const fn = vi.fn((a: number, b: number) => a + b);
+      const wrapped = wrapThrows(fn);
+      const result = wrapped(2, 3);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe(5);
+      }
+      expect(fn).toHaveBeenCalledWith(2, 3);
+    });
+
+    test("handles async function", () => {
+      const fn = vi.fn(async () => {
+        await new Promise((r) => {
+          setTimeout(r, 10);
+        });
+        return "async success";
+      });
+      const wrapped = wrapThrows(fn);
+      const result = wrapped();
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBeInstanceOf(Promise);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // wrapThrowsAsync
+  // ---------------------------------------------------------------------------------
+  describe("wrapThrowsAsync()", () => {
+    test("returns ok on success", async () => {
+      const fn = vi.fn(async (x: number) => {
+        await new Promise((r) => {
+          setTimeout(r, 10);
+        });
+        return x * 2;
+      });
+
+      const wrapped = wrapThrowsAsync(fn);
+
+      const result = await wrapped(5);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data).toBe(10);
+      }
+    });
+
+    test("returns err on error", async () => {
+      const fn = vi.fn(async () => {
+        await new Promise((r) => {
+          setTimeout(r, 10);
+        });
+        throw new Error("Something broke");
+      });
+      const wrapped = wrapThrowsAsync(fn);
+
+      const result = await wrapped();
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.message).toBe("Something broke");
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // filterSurveys
+  // ---------------------------------------------------------------------------------
+  describe("filterSurveys()", () => {
+    // We'll create a minimal workspace state
+    let workspace: TWorkspaceState;
+    let user: TUserState;
+    const baseSurvey: Partial<TWorkspaceStateSurvey> = {
+      id: mockSurveyId,
+      displayOption: "displayOnce",
+      displayLimit: 1,
+      recontactDays: null,
+      languages: [],
+    };
+
+    beforeEach(() => {
+      workspace = {
+        expiresAt: new Date(),
+        data: {
+          settings: {
+            recontactDays: 7, // fallback if survey doesn't have it
+            clickOutsideClose: false,
+            overlay: "none",
+            placement: "bottomRight",
+            inAppSurveyBranding: true,
+            styling: { allowStyleOverwrite: false },
+          },
+          surveys: [],
+          actionClasses: [],
+        },
+      };
+      user = {
+        expiresAt: null,
+        data: {
+          userId: null,
+          contactId: null,
+          segments: [],
+          displays: [],
+          responses: [],
+          lastDisplayAt: null,
+        },
+      };
+    });
+
+    test("returns no surveys if user has no segments and userId is set", () => {
+      user.data.userId = "user_abc";
+      // workspace has a single survey
+      workspace.data.surveys = [
+        { ...baseSurvey, id: mockSurveyId1, segment: { id: mockSegmentId1 } } as TWorkspaceStateSurvey,
+      ];
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toEqual([]); // no segments => none pass
+    });
+
+    test("returns surveys if user has no userId but displayOnce and no displays yet", () => {
+      // userId is null => it won't segment filter
+      workspace.data.surveys = [
+        { ...baseSurvey, id: mockSurveyId1, displayOption: "displayOnce" } as TWorkspaceStateSurvey,
+      ];
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(mockSurveyId1);
+    });
+
+    test("skips surveys that already displayed if displayOnce is used", () => {
+      workspace.data.surveys = [
+        { ...baseSurvey, id: mockSurveyId1, displayOption: "displayOnce" } as TWorkspaceStateSurvey,
+      ];
+      user.data.displays = [{ surveyId: mockSurveyId1, createdAt: new Date() }];
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toEqual([]);
+    });
+
+    test("skips surveys if user responded to them and displayOption=displayMultiple", () => {
+      workspace.data.surveys = [
+        { ...baseSurvey, id: mockSurveyId1, displayOption: "displayMultiple" } as TWorkspaceStateSurvey,
+      ];
+      user.data.responses = [mockSurveyId1];
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toEqual([]);
+    });
+
+    test("handles displaySome logic with displayLimit", () => {
+      workspace.data.surveys = [
+        {
+          ...baseSurvey,
+          id: mockSurveyId1,
+          displayOption: "displaySome",
+          displayLimit: 2,
+        } as TWorkspaceStateSurvey,
+      ];
+      // user has 1 display of s1
+      user.data.displays = [{ surveyId: mockSurveyId1, createdAt: new Date() }];
+
+      // No responses => so it's still allowed
+      const result = filterSurveys(workspace, user);
+      expect(result).toHaveLength(1);
+    });
+
+    test("filters out surveys if recontactDays not met", () => {
+      // Suppose survey uses workspace fallback (7 days)
+      workspace.data.surveys = [
+        { ...baseSurvey, id: mockSurveyId1, displayOption: "displayOnce" } as TWorkspaceStateSurvey,
+      ];
+      // user last displayAt is only 3 days ago
+      user.data.lastDisplayAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toHaveLength(0);
+    });
+
+    test("passes surveys if enough days have passed since lastDisplayAt", () => {
+      // user last displayAt is 8 days ago
+      user.data.lastDisplayAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+
+      workspace.data.surveys = [
+        {
+          ...baseSurvey,
+          id: mockSurveyId1,
+          displayOption: "respondMultiple",
+          recontactDays: null,
+        } as TWorkspaceStateSurvey,
+      ];
+      const result = filterSurveys(workspace, user);
+      expect(result).toHaveLength(1);
+    });
+
+    test("anonymous user: excludes segment-targeted surveys (new shape: hasFilters=true)", () => {
+      workspace.data.surveys = [
+        {
+          ...baseSurvey,
+          id: mockSurveyId1,
+          segment: { id: mockSegmentId1, hasFilters: true },
+          displayOption: "respondMultiple",
+        } as TWorkspaceStateSurvey,
+        {
+          ...baseSurvey,
+          id: mockSurveyId2,
+          segment: { id: mockSegmentId2, hasFilters: false },
+          displayOption: "respondMultiple",
+        } as TWorkspaceStateSurvey,
+      ];
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(mockSurveyId2);
+    });
+
+    test("anonymous user: excludes segment-targeted surveys when cached payload uses legacy shape (filters array)", () => {
+      // Simulates a localStorage payload written by an older SDK version that
+      // still has `segment.filters` and no `hasFilters`. The defensive check
+      // must fall back to the legacy shape so anonymous users don't receive
+      // segment-targeted surveys.
+      workspace.data.surveys = [
+        {
+          ...baseSurvey,
+          id: mockSurveyId1,
+          segment: { id: mockSegmentId1, filters: [{ type: "attribute", value: "plan" }] },
+          displayOption: "respondMultiple",
+        } as unknown as TWorkspaceStateSurvey,
+        {
+          ...baseSurvey,
+          id: mockSurveyId2,
+          segment: { id: mockSegmentId2, filters: [] },
+          displayOption: "respondMultiple",
+        } as unknown as TWorkspaceStateSurvey,
+      ];
+
+      const result = filterSurveys(workspace, user);
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(mockSurveyId2);
+    });
+
+    test("filters by segment if userId is set and user has segments", () => {
+      user.data.userId = "user_abc";
+      user.data.segments = [mockSegmentId1];
+      workspace.data.surveys = [
+        {
+          ...baseSurvey,
+          id: mockSurveyId1,
+          segment: { id: mockSegmentId1 },
+          displayOption: "respondMultiple",
+        } as TWorkspaceStateSurvey,
+        {
+          ...baseSurvey,
+          id: mockSurveyId2,
+          segment: { id: mockSegmentId2 },
+          displayOption: "respondMultiple",
+        } as TWorkspaceStateSurvey,
+      ];
+
+      const result = filterSurveys(workspace, user);
+      // only the one that matches user's segment
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(mockSurveyId1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // getStyling
+  // ---------------------------------------------------------------------------------
+  describe("getStyling()", () => {
+    test("returns workspace styling if allowStyleOverwrite=false", () => {
+      const settings = {
+        styling: { allowStyleOverwrite: false, brandColor: { light: "#fff" } },
+      } as TWorkspaceStateSettings;
+      const survey = {
+        styling: {
+          overwriteThemeStyling: true,
+          brandColor: { light: "#000" },
+        },
+      } as TWorkspaceStateSurvey;
+
+      const result = getStyling(settings, survey);
+      // should get workspace styling
+      expect(result).toEqual(settings.styling);
+    });
+
+    test("returns workspace styling if allowStyleOverwrite=true but survey overwriteThemeStyling=false", () => {
+      const settings = {
+        styling: { allowStyleOverwrite: true, brandColor: { light: "#fff" } },
+      } as TWorkspaceStateSettings;
+      const survey = {
+        styling: {
+          overwriteThemeStyling: false,
+          brandColor: { light: "#000" },
+        },
+      } as TWorkspaceStateSurvey;
+
+      const result = getStyling(settings, survey);
+      // should get workspace styling still
+      expect(result).toEqual(settings.styling);
+    });
+
+    test("returns survey styling if allowStyleOverwrite=true and survey overwriteThemeStyling=true", () => {
+      const settings = {
+        styling: { allowStyleOverwrite: true, brandColor: { light: "#fff" } },
+      } as TWorkspaceStateSettings;
+      const survey = {
+        styling: {
+          overwriteThemeStyling: true,
+          brandColor: { light: "#000" },
+        },
+      } as TWorkspaceStateSurvey;
+
+      const result = getStyling(settings, survey);
+      expect(result).toEqual(survey.styling);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // getDefaultLanguageCode
+  // ---------------------------------------------------------------------------------
+  describe("getDefaultLanguageCode()", () => {
+    test("returns code of the language if it is flagged default", () => {
+      const survey = {
+        languages: [
+          {
+            language: { code: "en" },
+            default: false,
+            enabled: true,
+          },
+          {
+            language: { code: "fr" },
+            default: true,
+            enabled: true,
+          },
+        ],
+      } as unknown as TWorkspaceStateSurvey;
+      expect(getDefaultLanguageCode(survey)).toBe("fr");
+    });
+
+    test("returns undefined if no default language found", () => {
+      const survey = {
+        languages: [
+          { language: { code: "en" }, default: false, enabled: true },
+          { language: { code: "fr" }, default: false, enabled: true },
+        ],
+      } as unknown as TWorkspaceStateSurvey;
+      expect(getDefaultLanguageCode(survey)).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // getLanguageCode
+  // ---------------------------------------------------------------------------------
+  describe("getLanguageCode()", () => {
+    test("returns 'default' if no language param is passed", () => {
+      const survey = {
+        languages: [{ language: { code: "en" }, default: true, enabled: true }],
+      } as unknown as TWorkspaceStateSurvey;
+      const code = getLanguageCode(survey, undefined);
+      expect(code).toBe("default");
+    });
+
+    test("returns 'default' if the chosen language is the default one", () => {
+      const survey = {
+        languages: [
+          { language: { code: "en" }, default: true, enabled: true },
+          { language: { code: "fr" }, default: false, enabled: true },
+        ],
+      } as unknown as TWorkspaceStateSurvey;
+      const code = getLanguageCode(survey, "en");
+      expect(code).toBe("default");
+    });
+
+    test("returns undefined if language not found or disabled", () => {
+      const survey = {
+        languages: [
+          { language: { code: "en" }, default: true, enabled: true },
+          { language: { code: "fr" }, default: false, enabled: false },
+        ],
+      } as unknown as TWorkspaceStateSurvey;
+      const code = getLanguageCode(survey, "fr");
+      expect(code).toBeUndefined();
+    });
+
+    test("returns the language code if found and enabled", () => {
+      const survey = {
+        languages: [
+          { language: { code: "en", alias: "English" }, default: true, enabled: true },
+          { language: { code: "fr", alias: "fr-FR" }, default: false, enabled: true },
+        ],
+      } as unknown as TWorkspaceStateSurvey;
+      expect(getLanguageCode(survey, "fr")).toBe("fr");
+      expect(getLanguageCode(survey, "fr-FR")).toBe("fr");
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // shouldDisplayBasedOnPercentage
+  // ---------------------------------------------------------------------------------
+  describe("shouldDisplayBasedOnPercentage()", () => {
+    test("returns true if random number <= displayPercentage", () => {
+      const mockGetRandomValues = vi
+        .spyOn(crypto, "getRandomValues")
+        .mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+          if (array instanceof Uint32Array) {
+            array[0] = Math.floor((20 / 100) * 2 ** 32);
+            return array;
+          }
+          return array;
+        });
+      expect(shouldDisplayBasedOnPercentage(30)).toBe(true);
+
+      mockGetRandomValues.mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+        if (array instanceof Uint32Array) {
+          array[0] = Math.floor((80 / 100) * 2 ** 32);
+          return array;
+        }
+        return array;
+      });
+      expect(shouldDisplayBasedOnPercentage(30)).toBe(false);
+
+      mockGetRandomValues.mockRestore();
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // isNowExpired
+  // ---------------------------------------------------------------------------------
+  describe("isNowExpired()", () => {
+    test("returns true if expiration date is in the past", () => {
+      const expirationDate = new Date(Date.now() - 1000);
+      expect(isNowExpired(expirationDate)).toBe(true);
+    });
+
+    test("returns false if expiration date is in the future", () => {
+      const expirationDate = new Date(Date.now() + 1000);
+      expect(isNowExpired(expirationDate)).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // checkUrlMatch
+  // ---------------------------------------------------------------------------------
+  describe("checkUrlMatch()", () => {
+    test("returns true if url matches", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com/path";
+      const pageUrlRule = "exactMatch" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(true);
+    });
+
+    test("returns false if url does not match", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com/other";
+      const pageUrlRule = "exactMatch" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(false);
+    });
+
+    test("returns true if url matches with startsWith rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com";
+      const pageUrlRule = "startsWith" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(true);
+    });
+
+    test("returns false if url does not match with startsWith rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com/other";
+      const pageUrlRule = "startsWith" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(false);
+    });
+
+    test("returns true if url matches with endsWith rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "path";
+      const pageUrlRule = "endsWith" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(true);
+    });
+
+    test("returns false if url does not match with endsWith rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "other";
+      const pageUrlRule = "endsWith" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(false);
+    });
+
+    test("returns true if url matches with contains rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "path";
+      const pageUrlRule = "contains" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(true);
+    });
+
+    test("returns false if url does not match with contains rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "other";
+      const pageUrlRule = "contains" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(false);
+    });
+
+    test("returns true if url matches with notMatch rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com/other";
+      const pageUrlRule = "notMatch" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(true);
+    });
+
+    test("returns false if url does not match with notMatch rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com/path";
+      const pageUrlRule = "notMatch" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(false);
+    });
+
+    test("returns true if url matches with notContains rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "https://example.com/other";
+      const pageUrlRule = "notContains" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(true);
+    });
+
+    test("returns false if url does not match with notContains rule", () => {
+      const url = "https://example.com/path";
+      const pageUrlValue = "path";
+      const pageUrlRule = "notContains" as unknown as TActionClassPageUrlRule;
+
+      expect(checkUrlMatch(url, pageUrlValue, pageUrlRule)).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // handleUrlFilters
+  // ---------------------------------------------------------------------------------
+  describe("handleUrlFilters()", () => {
+    test("returns true if url matches with urlFilters", () => {
+      const urlFilters = [
+        {
+          value: "https://example.com/path",
+          rule: "exactMatch" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters);
+      expect(result).toBe(true);
+    });
+
+    test("returns true if urlFilters is empty", () => {
+      const urlFilters: TActionClassNoCodeConfig["urlFilters"] = [];
+
+      const result = handleUrlFilters(urlFilters);
+      expect(result).toBe(true);
+    });
+
+    test("returns false if no urlFilters match", () => {
+      const urlFilters = [
+        {
+          value: "https://example.com/other",
+          rule: "exactMatch" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters);
+      expect(result).toBe(false);
+    });
+
+    test("returns true if any urlFilter matches", () => {
+      const urlFilters = [
+        {
+          value: "https://example.com/other",
+          rule: "exactMatch" as unknown as TActionClassPageUrlRule,
+        },
+        {
+          value: "path",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters);
+      expect(result).toBe(true);
+    });
+
+    test("returns true with OR connector when any urlFilter matches", () => {
+      const urlFilters = [
+        {
+          value: "https://example.com/other",
+          rule: "exactMatch" as unknown as TActionClassPageUrlRule,
+        },
+        {
+          value: "path",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters, "or");
+      expect(result).toBe(true);
+    });
+
+    test("returns false with OR connector when no urlFilter matches", () => {
+      const urlFilters = [
+        {
+          value: "https://example.com/other",
+          rule: "exactMatch" as unknown as TActionClassPageUrlRule,
+        },
+        {
+          value: "different",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters, "or");
+      expect(result).toBe(false);
+    });
+
+    test("returns true with AND connector when all urlFilters match", () => {
+      const urlFilters = [
+        {
+          value: "example.com",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+        {
+          value: "path",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters, "and");
+      expect(result).toBe(true);
+    });
+
+    test("returns false with AND connector when not all urlFilters match", () => {
+      const urlFilters = [
+        {
+          value: "example.com",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+        {
+          value: "different",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters, "and");
+      expect(result).toBe(false);
+    });
+
+    test("returns true with AND connector when single filter matches", () => {
+      const urlFilters = [
+        {
+          value: "example.com",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters, "and");
+      expect(result).toBe(true);
+    });
+
+    test("returns false with AND connector when single filter does not match", () => {
+      const urlFilters = [
+        {
+          value: "different.com",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const result = handleUrlFilters(urlFilters, "and");
+      expect(result).toBe(false);
+    });
+
+    test("defaults to OR connector when connector is not specified", () => {
+      const urlFilters = [
+        {
+          value: "https://example.com/other",
+          rule: "exactMatch" as unknown as TActionClassPageUrlRule,
+        },
+        {
+          value: "path",
+          rule: "contains" as unknown as TActionClassPageUrlRule,
+        },
+      ];
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const resultWithoutConnector = handleUrlFilters(urlFilters);
+      const resultWithOr = handleUrlFilters(urlFilters, "or");
+
+      expect(resultWithoutConnector).toBe(resultWithOr);
+      expect(resultWithoutConnector).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // evaluateNoCodeConfigClick
+  // ---------------------------------------------------------------------------------
+  describe("evaluateNoCodeConfigClick()", () => {
+    test("returns false if type is not click", () => {
+      const targetElement = document.createElement("div");
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "pageView",
+          urlFilters: [],
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(false);
+    });
+
+    test("returns false if innerHtml does not match", () => {
+      const targetElement = document.createElement("div");
+      targetElement.innerHTML = "Test";
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: {
+            innerHtml: "Testing",
+          },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(false);
+    });
+
+    test("returns true if cssSelector matches", () => {
+      const targetElement = document.createElement("div");
+      const cssSelector = ".test";
+      targetElement.className = "test";
+
+      targetElement.matches = vi.fn(() => true);
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: {
+            cssSelector,
+          },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(true);
+    });
+
+    test("returns false if cssSelector does not match", () => {
+      const targetElement = document.createElement("div");
+      const cssSelector = ".test";
+      targetElement.className = "other";
+
+      targetElement.matches = vi.fn(() => false);
+      targetElement.closest = vi.fn(() => null); // no ancestor matches either
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: {
+            cssSelector,
+          },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(false);
+    });
+
+    test("returns false if neither innerHtml nor cssSelector is provided", () => {
+      const targetElement = document.createElement("div");
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: {},
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(false);
+    });
+
+    test("returns false if urlFilters do not match", () => {
+      const targetElement = document.createElement("div");
+      targetElement.innerHTML = "Test";
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [
+            {
+              value: "https://example.com/other",
+              rule: "exactMatch",
+            },
+          ],
+          elementSelector: {
+            innerHtml: "Test",
+          },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(false);
+    });
+
+    test("returns true if both innerHtml and urlFilters match", () => {
+      const targetElement = document.createElement("div");
+      targetElement.innerHTML = "Test";
+
+      // mock window.location.href
+      vi.stubGlobal("window", {
+        location: {
+          href: "https://example.com/path",
+        },
+      });
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [
+            {
+              value: "path",
+              rule: "contains",
+            },
+          ],
+          elementSelector: {
+            innerHtml: "Test",
+          },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(true);
+    });
+
+    // --- Regression tests for nested child click target (issue #7314) ---
+    // In this test environment document.createElement() returns a plain mock object,
+    // so we set .matches and .closest as vi.fn() — the same pattern used by existing tests.
+    // This exercises the exact code path of the fix: matches() fails → closest() succeeds.
+
+    test("returns true when clicking a child element inside a button matched by cssSelector", () => {
+      const button = document.createElement("button");
+      const icon = document.createElement("span");
+
+      // Simulate: icon does NOT directly match ".my-btn", but its closest ancestor does
+      (icon as unknown as { matches: ReturnType<typeof vi.fn> }).matches = vi.fn(() => false);
+      (icon as unknown as { closest: ReturnType<typeof vi.fn> }).closest = vi.fn(() => button);
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: { cssSelector: ".my-btn" },
+        },
+      };
+
+      // Before fix: matches() → false → returns false (bug)
+      // After fix:  matches() → false → closest() → button → returns true (correct)
+      const result = evaluateNoCodeConfigClick(icon, action);
+      expect(result).toBe(true);
+    });
+
+    test("returns false when clicking a child element with no matching ancestor", () => {
+      const other = document.createElement("div");
+
+      // Simulate: element doesn't match, and no ancestor matches either
+      (other as unknown as { matches: ReturnType<typeof vi.fn> }).matches = vi.fn(() => false);
+      (other as unknown as { closest: ReturnType<typeof vi.fn> }).closest = vi.fn(() => null);
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: { cssSelector: ".my-btn" },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(other, action);
+      expect(result).toBe(false);
+    });
+
+    test("uses direct target (not closest) when target directly matches cssSelector", () => {
+      const button = document.createElement("button");
+
+      // Simulate: click on the button itself — matches() succeeds, closest() should NOT be called
+      (button as unknown as { matches: ReturnType<typeof vi.fn> }).matches = vi.fn(() => true);
+      const closestSpy = vi.fn();
+      (button as unknown as { closest: ReturnType<typeof vi.fn> }).closest = closestSpy;
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: { cssSelector: ".my-btn" },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(button, action);
+      expect(result).toBe(true);
+      expect(closestSpy).not.toHaveBeenCalled(); // closest() is only a fallback
+    });
+
+    test("handles multiple cssSelectors correctly", () => {
+      const targetElement = document.createElement("div");
+      targetElement.className = "test other";
+
+      targetElement.matches = vi.fn((selector) => {
+        return selector === ".test" || selector === ".other" || selector === ".test .other";
+      });
+      targetElement.closest = vi.fn(() => null); // not needed but consistent with mock environment
+
+      const action: TWorkspaceStateActionClass = {
+        id: "clabc123abc",
+        name: "Test Action",
+        type: "noCode",
+        key: null,
+        noCodeConfig: {
+          type: "click",
+          urlFilters: [],
+          elementSelector: {
+            cssSelector: ".test .other",
+          },
+        },
+      };
+
+      const result = evaluateNoCodeConfigClick(targetElement, action);
+      expect(result).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // getIsDebug
+  // ---------------------------------------------------------------------------------
+  describe("getIsDebug()", () => {
+    beforeEach(() => {
+      // Reset window.location.search before each test
+      Object.defineProperty(window, "location", {
+        value: { search: "" },
+        writable: true,
+      });
+    });
+
+    test("returns true if debug parameter is set", () => {
+      Object.defineProperty(window, "location", {
+        value: { search: "?formbricksDebug=true" },
+        writable: true,
+      });
+      expect(getIsDebug()).toBe(true);
+    });
+
+    test("returns false if debug parameter is not set", () => {
+      Object.defineProperty(window, "location", {
+        value: { search: "?otherParam=value" },
+        writable: true,
+      });
+      expect(getIsDebug()).toBe(false);
+    });
+
+    test("returns false if search string is empty", () => {
+      Object.defineProperty(window, "location", {
+        value: { search: "" },
+        writable: true,
+      });
+      expect(getIsDebug()).toBe(false);
+    });
+
+    test("returns false if search string is just '?'", () => {
+      Object.defineProperty(window, "location", {
+        value: { search: "?" },
+        writable: true,
+      });
+      expect(getIsDebug()).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------------------
+  // getSecureRandom
+  // ---------------------------------------------------------------------------------
+  describe("getSecureRandom()", () => {
+    test("returns a number between 0 and 1", () => {
+      const result = getSecureRandom();
+      expect(result).toBeGreaterThanOrEqual(0);
+      expect(result).toBeLessThan(1);
+    });
+
+    test("returns different values on subsequent calls", () => {
+      const result1 = getSecureRandom();
+      const result2 = getSecureRandom();
+      expect(result1).not.toBe(result2);
+    });
+
+    test("uses crypto.getRandomValues", () => {
+      const mockGetRandomValues = vi.spyOn(crypto, "getRandomValues");
+      getSecureRandom();
+      expect(mockGetRandomValues).toHaveBeenCalled();
+      mockGetRandomValues.mockRestore();
+    });
+  });
+});
+
+describe("filterSurveys() — interaction targeting × recontact/display-cap matrix", () => {
+  // Composition seam (ENG-1275): the client decides show/no-show from server-computed segment
+  // membership (`user.segments`) combined with local displayOption / recontactDays / workspace
+  // cooldown / lastDisplayAt. Interaction-segment membership is computed server-side, so at this
+  // layer it's an input ("is the survey's segment in user.segments?"). This matrix locks the
+  // interplay — a survey shows only when membership AND display-cap AND recontact all pass.
+  const SURVEY = "e3kxlpnzmdp84op9qzxl9olj";
+  const SEGMENT = "p6yrnz3s2tvoe5r0l28unq7k";
+  const DAY = 1000 * 60 * 60 * 24;
+  const daysAgo = (n: number): Date => new Date(Date.now() - n * DAY);
+
+  const buildWorkspace = (survey: TWorkspaceStateSurvey, cooldownDays: number): TWorkspaceState => ({
+    expiresAt: new Date(),
+    data: {
+      settings: {
+        recontactDays: cooldownDays,
+        clickOutsideClose: false,
+        overlay: "none",
+        placement: "bottomRight",
+        inAppSurveyBranding: true,
+        styling: { allowStyleOverwrite: false },
+      },
+      surveys: [survey],
+      actionClasses: [],
+    },
+  });
+
+  const buildUser = (data: Partial<TUserState["data"]>): TUserState => ({
+    expiresAt: null,
+    data: {
+      userId: "user_abc",
+      contactId: null,
+      segments: [],
+      displays: [],
+      responses: [],
+      lastDisplayAt: null,
+      ...data,
+    },
+  });
+
+  const buildSurvey = (survey: Partial<TWorkspaceStateSurvey>): TWorkspaceStateSurvey =>
+    ({
+      id: SURVEY,
+      displayOption: "respondMultiple",
+      displayLimit: null,
+      recontactDays: null,
+      languages: [],
+      segment: { id: SEGMENT, hasFilters: true },
+      ...survey,
+    }) as TWorkspaceStateSurvey;
+
+  const cases: {
+    name: string;
+    survey: Partial<TWorkspaceStateSurvey>;
+    cooldownDays?: number;
+    user: Partial<TUserState["data"]>;
+    shown: boolean;
+  }[] = [
+    {
+      name: "in segment + respondMultiple → shown",
+      survey: { displayOption: "respondMultiple" },
+      user: { segments: [SEGMENT] },
+      shown: true,
+    },
+    {
+      name: "identified but not in segment → hidden (membership gates it out)",
+      survey: { displayOption: "respondMultiple" },
+      user: { segments: [] },
+      shown: false,
+    },
+    {
+      name: "in segment but displayOnce + already displayed → hidden (display cap beats membership)",
+      survey: { displayOption: "displayOnce", displayLimit: 1 },
+      user: { segments: [SEGMENT], displays: [{ surveyId: SURVEY, createdAt: daysAgo(0) }] },
+      shown: false,
+    },
+    {
+      name: "in segment + displayOnce + never displayed → shown",
+      survey: { displayOption: "displayOnce", displayLimit: 1 },
+      user: { segments: [SEGMENT] },
+      shown: true,
+    },
+    {
+      name: "in segment but survey recontactDays not elapsed → hidden",
+      survey: { displayOption: "respondMultiple", recontactDays: 7 },
+      user: { segments: [SEGMENT], lastDisplayAt: daysAgo(2) },
+      shown: false,
+    },
+    {
+      name: "in segment + survey recontactDays elapsed → shown",
+      survey: { displayOption: "respondMultiple", recontactDays: 7 },
+      user: { segments: [SEGMENT], lastDisplayAt: daysAgo(10) },
+      shown: true,
+    },
+    {
+      name: "in segment but workspace cooldown not elapsed (survey recontactDays null) → hidden",
+      survey: { displayOption: "respondMultiple", recontactDays: null },
+      cooldownDays: 7,
+      user: { segments: [SEGMENT], lastDisplayAt: daysAgo(3) },
+      shown: false,
+    },
+    {
+      name: "in segment + workspace cooldown elapsed → shown",
+      survey: { displayOption: "respondMultiple", recontactDays: null },
+      cooldownDays: 7,
+      user: { segments: [SEGMENT], lastDisplayAt: daysAgo(8) },
+      shown: true,
+    },
+    {
+      name: "in segment + displayMultiple + already responded → hidden",
+      survey: { displayOption: "displayMultiple" },
+      user: { segments: [SEGMENT], responses: [SURVEY] },
+      shown: false,
+    },
+    {
+      name: "in segment + displayMultiple + no response → shown",
+      survey: { displayOption: "displayMultiple" },
+      user: { segments: [SEGMENT] },
+      shown: true,
+    },
+    {
+      name: "in segment + displaySome under limit → shown",
+      survey: { displayOption: "displaySome", displayLimit: 2 },
+      user: { segments: [SEGMENT], displays: [{ surveyId: SURVEY, createdAt: daysAgo(0) }] },
+      shown: true,
+    },
+    {
+      name: "in segment + displaySome at limit → hidden",
+      survey: { displayOption: "displaySome", displayLimit: 2 },
+      user: {
+        segments: [SEGMENT],
+        displays: [
+          { surveyId: SURVEY, createdAt: daysAgo(0) },
+          { surveyId: SURVEY, createdAt: daysAgo(1) },
+        ],
+      },
+      shown: false,
+    },
+    {
+      name: "anonymous (no userId) + interaction segment (hasFilters) → hidden (needs identity)",
+      survey: { displayOption: "respondMultiple", segment: { id: SEGMENT, hasFilters: true } },
+      user: { userId: null, segments: [] },
+      shown: false,
+    },
+    {
+      name: "anonymous (no userId) + segment without filters → shown",
+      survey: { displayOption: "respondMultiple", segment: { id: SEGMENT, hasFilters: false } },
+      user: { userId: null, segments: [] },
+      shown: true,
+    },
+  ];
+
+  test.each(cases)("$name", ({ survey, cooldownDays = 7, user, shown }) => {
+    const workspace = buildWorkspace(buildSurvey(survey), cooldownDays);
+    const userState = buildUser(user);
+    const result = filterSurveys(workspace, userState);
+    expect(result.some((s) => s.id === SURVEY)).toBe(shown);
+  });
+});

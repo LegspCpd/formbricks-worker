@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "formbricks-worker",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-09-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "CACHE_KV",
+      "id": "formbricks_cache_kv"
+    },
+    {
+      "binding": "TAG_CACHE_KV",
+      "id": "formbricks_tag_cache_kv"
+    },
+    {
+      "binding": "MEMORY_CACHE_KV",
+      "id": "formbricks_memory_cache_kv"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "STORAGE_R2",
+      "bucket_name": "formbricks-storage"
+    }
+  ],
+  "queues": [
+    {
+      "name": "formbricks-jobs",
+      "binding": "JOBS_QUEUE"
+    }
+  ],
+  "images": {
+    "binding": "IMAGES"
+  },
+  "vars": {
+    "NODE_ENV": "production"
+  }
+}

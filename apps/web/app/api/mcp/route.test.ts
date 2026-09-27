@@ -1,0 +1,809 @@
+import { NextRequest } from "next/server";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { ApiKeyPermission } from "@formbricks/database/prisma";
+import { buildV3AuditLog, queueV3AuditLog } from "@/app/api/v3/lib/audit";
+import {
+  createdResponse,
+  problemBadRequest,
+  successListResponse,
+  successResponse,
+} from "@/app/api/v3/lib/response";
+import {
+  createV3SurveyResponseFromRawInput,
+  listV3Surveys,
+  validateV3SurveyFromRawInput,
+} from "@/app/api/v3/surveys/lib/operations";
+import { DEFAULT_REQUEST_BODY_LIMIT_BYTES } from "@/app/lib/api/request-body";
+import { authenticateApiKeyFromHeaders } from "@/modules/api/lib/api-key-auth";
+import { applyIPRateLimit, applyRateLimit } from "@/modules/core/rate-limit/helpers";
+import { POST } from "./route";
+
+const { verifyBearerTokenMock, userFindUniqueMock } = vi.hoisted(() => ({
+  verifyBearerTokenMock: vi.fn(),
+  userFindUniqueMock: vi.fn(),
+}));
+
+vi.mock("@better-auth/oauth-provider/resource-client", () => ({
+  oauthProviderResourceClient: vi.fn(() => ({
+    getActions: () => ({
+      verifyBearerToken: verifyBearerTokenMock,
+    }),
+  })),
+}));
+
+vi.mock("@/modules/auth/lib/auth", () => ({
+  auth: {},
+}));
+
+vi.mock("@formbricks/database", () => ({
+  prisma: {
+    user: {
+      findUnique: userFindUniqueMock,
+    },
+  },
+}));
+
+// Only the env-dependent URL getters are mocked. The scope constants are the real ones: the route's
+// minimum-scope gate and its WWW-Authenticate challenge are both derived from them, so literals here
+// would test a world production doesn't have and mask scope drift (ENG-2175).
+vi.mock("@/modules/auth/lib/oauth-urls", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/modules/auth/lib/oauth-urls")>()),
+  getAuthIssuerUrl: () => "http://localhost/api/auth",
+  getMcpOrigin: () => "http://localhost",
+  getMcpOAuthJwksUrl: () => "http://formbricks:3000/api/auth/jwks",
+  getMcpProtectedResourceMetadataUrl: () => "http://localhost/.well-known/oauth-protected-resource/api/mcp",
+  getMcpResourceUrl: () => "http://localhost/api/mcp",
+}));
+
+const { MCP_CHALLENGE_SCOPE } = await import("@/modules/auth/lib/oauth-urls");
+// The auth-params are comma-separated per RFC 9110 §11.6.1 (#8718): asserting the whole string is what
+// keeps the separator from regressing, since a strict client parser needs it to read `resource_metadata`.
+// The scope list interpolates the real constant, so this stays honest as the advertised scopes change.
+// Real tokens always carry `aud`; the resource server rejects any token not minted for it, so the
+// fixtures have to look like something the authorization server would actually issue.
+const MCP_AUDIENCE = "http://localhost/api/mcp";
+
+const EXPECTED_CHALLENGE = `Bearer resource_metadata="http://localhost/.well-known/oauth-protected-resource/api/mcp", scope="${MCP_CHALLENGE_SCOPE}"`;
+
+vi.mock("@/modules/api/lib/api-key-auth", () => ({
+  authenticateApiKeyFromHeaders: vi.fn(),
+  getBearerTokenFromHeaders: vi.fn((headers: Headers) => {
+    const authorization = headers.get("authorization");
+    return authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
+  }),
+}));
+
+vi.mock("@/modules/core/rate-limit/helpers", () => ({
+  applyIPRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
+  applyRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
+}));
+
+vi.mock("@/app/api/v3/surveys/lib/operations", () => ({
+  createV3SurveyResponseFromRawInput: vi.fn(),
+  deleteV3Survey: vi.fn(),
+  getV3Survey: vi.fn(),
+  listV3Surveys: vi.fn(),
+  patchV3SurveyResponse: vi.fn(),
+  validateV3SurveyFromRawInput: vi.fn(),
+}));
+
+/**
+ * Mocked for the same reason the survey operations above are: this file tests the route, not the
+ * operations behind it. It is also load-bearing — the real module reaches `@/app/lib/pipelines` and
+ * so `@formbricks/jobs`, which does not load under this config, exactly as every other test whose
+ * graph touches the pipeline mocks it out.
+ */
+vi.mock("@/app/api/v3/responses/lib/operations", () => ({
+  batchDeleteV3Responses: vi.fn(),
+  countV3ResponsesOperation: vi.fn(),
+  createV3ResponseFromRawInput: vi.fn(),
+  deleteV3Response: vi.fn(),
+  getV3Response: vi.fn(),
+  listV3Responses: vi.fn(),
+  updateV3ResponseFromRawInput: vi.fn(),
+}));
+
+vi.mock("@/app/api/v3/responses/lib/validate-operations", () => ({
+  validateV3ResponseFromRawInput: vi.fn(),
+}));
+
+vi.mock("@/app/api/v3/lib/audit", () => ({
+  buildV3AuditLog: vi.fn(),
+  queueV3AuditLog: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@formbricks/logger", () => ({
+  logger: {
+    withContext: vi.fn(() => ({
+      error: vi.fn(),
+      warn: vi.fn(),
+    })),
+  },
+}));
+
+const apiKeyAuth = {
+  type: "apiKey" as const,
+  apiKeyId: "key_1",
+  organizationId: "org_1",
+  organizationAccess: {
+    accessControl: { read: true, write: true },
+  },
+  workspacePermissions: [
+    {
+      workspaceId: "clxx1234567890123456789012",
+      workspaceName: "Workspace",
+      permission: ApiKeyPermission.write,
+    },
+  ],
+};
+
+function createMcpRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): NextRequest {
+  return new NextRequest("http://localhost/api/mcp", {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-06-18",
+      "x-api-key": "fbk_test",
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function readMcpResponse(response: Response): Promise<Record<string, any>> {
+  const text = await response.text();
+  const dataLine = text
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("data:"));
+
+  return JSON.parse(dataLine ? dataLine.slice("data:".length).trim() : text);
+}
+
+describe("POST /api/mcp", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(authenticateApiKeyFromHeaders).mockResolvedValue(apiKeyAuth);
+    vi.mocked(applyRateLimit).mockResolvedValue({ allowed: true });
+    vi.mocked(applyIPRateLimit).mockResolvedValue({ allowed: true });
+    userFindUniqueMock.mockResolvedValue({ isActive: true });
+    verifyBearerTokenMock.mockResolvedValue({
+      aud: MCP_AUDIENCE,
+      sub: "user_1",
+      email: "person@example.com",
+      name: "Person",
+      scope: "openid profile email surveys:read surveys:write",
+      exp: Math.floor(Date.now() / 1000) + 900,
+      azp: "client_1",
+    });
+    vi.mocked(listV3Surveys).mockResolvedValue(
+      successListResponse([], { limit: 20, nextCursor: null, totalCount: 0 }, { requestId: "req_mcp" })
+    );
+  });
+
+  /**
+   * `subscriptions/listen` exists only in 2026-07-28 and became reachable with the SDK v2 migration: under
+   * v1's `disableSse: true` there was no long-lived path at all. We register no resources and emit no
+   * list-changed notifications, so an accepted stream can never deliver anything — it would just hold a
+   * connection and a keepalive timer per caller, 1024 of them per process on the SDK's default.
+   *
+   * Driven through the real route rather than asserted on the handler options, so it also covers the option
+   * actually reaching the SDK.
+   *
+   * The request is a fully valid one — 2026 `_meta` envelope, `Mcp-Method` header, and a real
+   * `notifications` filter — so the refusal can only come from the subscription cap. That completeness is
+   * load-bearing, not tidiness: the cap is checked *before* param validation, so with a half-built payload
+   * this test passes even with the cap removed. Verified by removing `maxSubscriptions` — with a valid
+   * payload the stream is then accepted and held open, and this test fails on a timeout rather than an
+   * assertion (slower, but red either way).
+   */
+  test("refuses a subscriptions/listen stream instead of holding it open", async () => {
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "subscriptions/listen",
+          // 2026-07-28 is sessionless, so what `initialize` used to carry once per session now rides on
+          // every request's `_meta`. The SDK rejects the call with -32602 if any part is missing.
+          params: {
+            notifications: { toolsListChanged: true },
+            _meta: {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientCapabilities": {},
+              "io.modelcontextprotocol/clientInfo": { name: "route-test", version: "1.0.0" },
+            },
+          },
+        },
+        {
+          "mcp-protocol-version": "2026-07-28",
+          // 2026-07-28 requires the method in a header as well, and rejects the call if the two disagree.
+          "mcp-method": "subscriptions/listen",
+          "x-request-id": "req_listen",
+        }
+      )
+    );
+    const body = await readMcpResponse(response);
+
+    expect(body.error).toMatchObject({
+      code: -32603,
+      message: expect.stringContaining("Subscription limit"),
+    });
+  });
+
+  test("returns 401 before MCP handling when authentication fails", async () => {
+    vi.mocked(authenticateApiKeyFromHeaders).mockResolvedValue(null);
+
+    const response = await POST(
+      createMcpRequest({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+        params: {},
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("Content-Type")).toBe("application/problem+json");
+    expect(response.headers.get("WWW-Authenticate")).toBe(EXPECTED_CHALLENGE);
+    expect(applyIPRateLimit).toHaveBeenCalled();
+  });
+
+  test("returns 413 before MCP handling when content-length exceeds the v3 body limit", async () => {
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/list",
+          params: {},
+        },
+        {
+          "content-length": String(DEFAULT_REQUEST_BODY_LIMIT_BYTES + 1),
+          "x-request-id": "req_large",
+        }
+      )
+    );
+
+    expect(response.status).toBe(413);
+    expect(response.headers.get("X-Request-Id")).toBe("req_large");
+    expect(authenticateApiKeyFromHeaders).not.toHaveBeenCalled();
+  });
+
+  test("lists MCP tools for a valid API key", async () => {
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/list",
+          params: {},
+        },
+        {
+          "x-request-id": "req_tools",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Request-Id")).toBe("req_tools");
+    const message = await readMcpResponse(response);
+    expect(message.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "list_surveys",
+      "get_survey",
+      "create_survey",
+      "validate_survey",
+      "patch_survey",
+      "edit_survey_blocks",
+      "set_survey_block_order",
+      "delete_survey",
+      "list_workflows",
+      "get_workflow",
+      "list_workflow_runs",
+      "get_workflow_run",
+      "test_workflow",
+      "create_workflow",
+      "patch_workflow",
+      "duplicate_workflow",
+      "delete_workflow",
+      "enable_workflow",
+      "disable_workflow",
+      "archive_workflow",
+      "unarchive_workflow",
+      "list_workspaces",
+      "list_feedback_datasets",
+      "list_feedback_records",
+      "count_feedback_records",
+      "get_feedback_record",
+      "create_feedback_record",
+      "create_feedback_records",
+      "update_feedback_record",
+      "delete_feedback_record",
+      "search_feedback_records",
+      "find_similar_feedback_records",
+      "list_responses",
+      "count_responses",
+      "get_response",
+      "validate_response",
+      "create_response",
+      "update_response",
+      "delete_response",
+      "batch_delete_responses",
+    ]);
+    const tools = new Map(message.result.tools.map((tool: { name: string }) => [tool.name, tool]));
+    expect(Object.keys((tools.get("create_survey") as any).inputSchema.properties)).toEqual(
+      expect.arrayContaining([
+        "workspaceId",
+        "name",
+        "type",
+        "status",
+        "defaultLanguage",
+        "metadata",
+        "languages",
+        "welcomeCard",
+        "blocks",
+        "endings",
+        "hiddenFields",
+        "variables",
+      ])
+    );
+    expect(Object.keys((tools.get("validate_survey") as any).inputSchema.properties)).toEqual(
+      expect.arrayContaining(["operation", "surveyId", "data"])
+    );
+    expect(Object.keys((tools.get("patch_survey") as any).inputSchema.properties)).toEqual(
+      expect.arrayContaining(["surveyId", "data"])
+    );
+    expect(message.result.tools.find((tool: { name: string }) => tool.name === "list_surveys")).toMatchObject(
+      {
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+        },
+      }
+    );
+    expect(message.result.tools.find((tool: { name: string }) => tool.name === "patch_survey")).toMatchObject(
+      {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+        },
+      }
+    );
+    expect(
+      message.result.tools.find((tool: { name: string }) => tool.name === "delete_survey")
+    ).toMatchObject({
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+      },
+    });
+  });
+
+  test("calls list_surveys through the MCP route", async () => {
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "list_surveys",
+            arguments: {
+              workspaceId: "clxx1234567890123456789012",
+              limit: 20,
+              includeTotalCount: true,
+            },
+          },
+        },
+        {
+          "x-request-id": "req_mcp",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const message = await readMcpResponse(response);
+    expect(message.result.structuredContent).toEqual({
+      data: [],
+      meta: { limit: 20, nextCursor: null, totalCount: 0 },
+      requestId: "req_mcp",
+    });
+    expect(listV3Surveys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authentication: apiKeyAuth,
+        requestId: "req_mcp",
+        instance: "/api/mcp",
+      })
+    );
+  });
+
+  test("authenticates an API key from an Authorization bearer token", async () => {
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "list_surveys",
+            arguments: {
+              workspaceId: "clxx1234567890123456789012",
+            },
+          },
+        },
+        {
+          authorization: "Bearer fbk_secret-with-hyphens",
+          "x-api-key": "",
+          "x-request-id": "req_bearer_api_key",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    await readMcpResponse(response);
+    expect(authenticateApiKeyFromHeaders).toHaveBeenCalledTimes(1);
+    expect(verifyBearerTokenMock).not.toHaveBeenCalled();
+    expect(listV3Surveys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authentication: apiKeyAuth,
+        requestId: "req_bearer_api_key",
+      })
+    );
+  });
+
+  test("authenticates OAuth bearer tokens without API-key lookup", async () => {
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 7,
+          method: "tools/call",
+          params: {
+            name: "list_surveys",
+            arguments: {
+              workspaceId: "clxx1234567890123456789012",
+              limit: 20,
+              includeTotalCount: true,
+            },
+          },
+        },
+        {
+          authorization: "Bearer eyJhbGciOiJFZERTQSJ9.payload.signature",
+          "x-api-key": "",
+          "x-request-id": "req_oauth",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    expect(authenticateApiKeyFromHeaders).not.toHaveBeenCalled();
+    expect(verifyBearerTokenMock).toHaveBeenCalledWith(
+      "eyJhbGciOiJFZERTQSJ9.payload.signature",
+      expect.objectContaining({
+        jwksUrl: "http://formbricks:3000/api/auth/jwks",
+        verifyOptions: expect.objectContaining({
+          audience: "http://localhost/api/mcp",
+          issuer: "http://localhost/api/auth",
+        }),
+      })
+    );
+    expect(applyRateLimit).toHaveBeenCalledWith(expect.any(Object), "oauth:user_1:client_1");
+    await readMcpResponse(response);
+    expect(listV3Surveys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authentication: {
+          user: {
+            id: "user_1",
+            email: "person@example.com",
+            name: "Person",
+          },
+          expires: expect.any(String),
+        },
+        requestId: "req_oauth",
+        instance: "/api/mcp",
+      })
+    );
+  });
+
+  test("rejects invalid OAuth bearer tokens with an OAuth challenge", async () => {
+    verifyBearerTokenMock.mockRejectedValueOnce(new Error("invalid token"));
+
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 8,
+          method: "tools/list",
+          params: {},
+        },
+        {
+          authorization: "Bearer eyJhbGciOiJFZERTQSJ9.invalid.signature",
+          "x-api-key": "",
+          "x-request-id": "req_invalid_oauth",
+        }
+      )
+    );
+
+    expect(response.status).toBe(401);
+    expect(authenticateApiKeyFromHeaders).not.toHaveBeenCalled();
+    expect(applyIPRateLimit).toHaveBeenCalled();
+    expect(response.headers.get("WWW-Authenticate")).toBe(EXPECTED_CHALLENGE);
+  });
+
+  test("blocks write tools for read-only OAuth tokens", async () => {
+    verifyBearerTokenMock.mockResolvedValueOnce({
+      aud: MCP_AUDIENCE,
+      sub: "user_1",
+      email: "person@example.com",
+      scope: "openid profile email surveys:read",
+      exp: Math.floor(Date.now() / 1000) + 900,
+      azp: "client_read_only",
+    });
+
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 9,
+          method: "tools/call",
+          params: {
+            name: "delete_survey",
+            arguments: {
+              surveyId: "clsv1234567890123456789012",
+            },
+          },
+        },
+        {
+          authorization: "Bearer eyJhbGciOiJFZERTQSJ9.readonly.signature",
+          "x-api-key": "",
+          "x-request-id": "req_read_only",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const message = await readMcpResponse(response);
+    expect(message.result.isError).toBe(true);
+    expect(message.result.structuredContent.error).toMatchObject({
+      status: 403,
+      code: "forbidden",
+      // Names the scope this specific call needed, not just that some scope was missing — that is
+      // the only thing the client can act on.
+      detail: "OAuth token does not include the required MCP scope: surveys:write",
+      requestId: "req_read_only",
+    });
+  });
+
+  test("blocks workflow write tools for tokens without workflows:write", async () => {
+    // A write-capable user whose OAuth token was only granted read scopes (surveys:read + workflows:read)
+    // must not be able to reach a workflow mutation — the ENG-1967 token-scope boundary.
+    verifyBearerTokenMock.mockResolvedValueOnce({
+      aud: MCP_AUDIENCE,
+      sub: "user_1",
+      email: "person@example.com",
+      scope: "openid profile email surveys:read workflows:read",
+      exp: Math.floor(Date.now() / 1000) + 900,
+      azp: "client_wf_read_only",
+    });
+    // The module mock returns nothing by default; the guard only queues what the builder hands back.
+    vi.mocked(buildV3AuditLog).mockReturnValue({ status: "failure" } as never);
+
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 10,
+          method: "tools/call",
+          params: {
+            name: "delete_workflow",
+            arguments: {
+              workflowId: "wf1234567890123456789012ab",
+            },
+          },
+        },
+        {
+          authorization: "Bearer eyJhbGciOiJFZERTQSJ9.wfreadonly.signature",
+          "x-api-key": "",
+          "x-request-id": "req_wf_read_only",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const message = await readMcpResponse(response);
+    expect(message.result.isError).toBe(true);
+    expect(message.result.structuredContent.error).toMatchObject({
+      status: 403,
+      code: "forbidden",
+      // The refusal names the scope the client must obtain, since a JSON-RPC tool result carries no
+      // WWW-Authenticate header for it to read.
+      detail: "OAuth token does not include the required MCP scope: workflows:write",
+      requestId: "req_wf_read_only",
+    });
+    // The scope gate fires BEFORE any mutation side effect — the workflow handler never runs — but the
+    // refusal itself is written down as a failed attempt by the caller (ENG-2872): a read-only token
+    // reaching for `delete_workflow` is exactly the event an audit reviewer wants to see.
+    expect(buildV3AuditLog).toHaveBeenCalledTimes(1);
+    expect(buildV3AuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ user: expect.objectContaining({ id: "user_1" }) }),
+      "deleted",
+      "workflow",
+      expect.any(String)
+    );
+    expect(queueV3AuditLog).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(queueV3AuditLog).mock.calls[0][0]).toMatchObject({
+      status: "failure",
+      eventId: "req_wf_read_only",
+      targetId: "wf1234567890123456789012ab",
+    });
+  });
+
+  test("calls create_survey through the MCP route", async () => {
+    vi.mocked(createV3SurveyResponseFromRawInput).mockResolvedValue(
+      createdResponse(
+        { id: "clsv1234567890123456789012" },
+        { requestId: "req_create", location: "/api/v3/surveys/clsv1234567890123456789012" }
+      )
+    );
+
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "create_survey",
+            arguments: {
+              workspaceId: "clxx1234567890123456789012",
+              name: "MCP QA create",
+              blocks: [
+                {
+                  id: "clbk1234567890123456789012",
+                  name: "Main Block",
+                  elements: [
+                    {
+                      id: "feedback",
+                      type: "openText",
+                      headline: { "en-US": "What should we improve?" },
+                      required: true,
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        {
+          "x-request-id": "req_create",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const message = await readMcpResponse(response);
+    expect(message.result.structuredContent).toEqual({
+      data: { id: "clsv1234567890123456789012" },
+      requestId: "req_create",
+    });
+    expect(createV3SurveyResponseFromRawInput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authentication: apiKeyAuth,
+        requestId: "req_create",
+        instance: "/api/mcp",
+      })
+    );
+  });
+
+  test("calls validate_survey patch through the MCP route", async () => {
+    vi.mocked(validateV3SurveyFromRawInput).mockResolvedValue(
+      successResponse({ valid: true, operation: "patch", invalid_params: [] }, { requestId: "req_validate" })
+    );
+
+    const response = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: {
+            name: "validate_survey",
+            arguments: {
+              operation: "patch",
+              surveyId: "clsv1234567890123456789012",
+              data: { name: "Updated survey" },
+            },
+          },
+        },
+        {
+          "x-request-id": "req_validate",
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const message = await readMcpResponse(response);
+    expect(message.result.structuredContent).toEqual({
+      data: { valid: true, operation: "patch", invalid_params: [] },
+      requestId: "req_validate",
+    });
+    expect(validateV3SurveyFromRawInput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: {
+          operation: "patch",
+          surveyId: "clsv1234567890123456789012",
+          data: { name: "Updated survey" },
+        },
+        authentication: apiKeyAuth,
+        requestId: "req_validate",
+        instance: "/api/mcp",
+      })
+    );
+  });
+
+  test("maps v3 create and validate bad requests to MCP tool errors", async () => {
+    vi.mocked(createV3SurveyResponseFromRawInput).mockResolvedValueOnce(
+      problemBadRequest("req_create_invalid", "Invalid survey document", {
+        instance: "/api/mcp",
+        invalid_params: [{ name: "blocks.0.elements", reason: "Required" }],
+      })
+    );
+    vi.mocked(validateV3SurveyFromRawInput).mockResolvedValueOnce(
+      problemBadRequest("req_validate_invalid", "Invalid survey validation request", {
+        instance: "/api/mcp",
+        invalid_params: [{ name: "surveyId", reason: "Required" }],
+      })
+    );
+
+    const createResponse = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "create_survey",
+            arguments: {
+              workspaceId: "clxx1234567890123456789012",
+              name: "Invalid create",
+              blocks: [{ id: "clbk1234567890123456789012" }],
+            },
+          },
+        },
+        { "x-request-id": "req_create_invalid" }
+      )
+    );
+    const validateResponse = await POST(
+      createMcpRequest(
+        {
+          jsonrpc: "2.0",
+          id: 6,
+          method: "tools/call",
+          params: {
+            name: "validate_survey",
+            arguments: {
+              operation: "patch",
+              data: {},
+            },
+          },
+        },
+        { "x-request-id": "req_validate_invalid" }
+      )
+    );
+
+    expect((await readMcpResponse(createResponse)).result.structuredContent.error).toMatchObject({
+      status: 400,
+      detail: "Invalid survey document",
+      invalid_params: [{ name: "blocks.0.elements", reason: "Required" }],
+    });
+    expect((await readMcpResponse(validateResponse)).result.structuredContent.error).toMatchObject({
+      status: 400,
+      detail: "Invalid survey validation request",
+      invalid_params: [{ name: "surveyId", reason: "Required" }],
+    });
+  });
+});

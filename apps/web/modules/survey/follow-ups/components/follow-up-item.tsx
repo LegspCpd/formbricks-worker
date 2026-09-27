@@ -1,0 +1,287 @@
+"use client";
+
+import { createId } from "@paralleldrive/cuid2";
+import { CopyIcon, Trash2Icon } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { getDeclaredIngestedStorageKeys } from "@formbricks/types/embedded-data-resolver";
+import { TSurveyElementTypeEnum } from "@formbricks/types/surveys/elements";
+import { TSurveyFollowUp } from "@formbricks/types/surveys/follow-up";
+import { TSurvey } from "@formbricks/types/surveys/types";
+import { TUserLocale } from "@formbricks/types/user";
+import { cn } from "@/lib/cn";
+import { TFollowUpEmailToUser } from "@/modules/survey/editor/types/survey-follow-up";
+import { FollowUpModal } from "@/modules/survey/follow-ups/components/follow-up-modal";
+import { getElementsFromBlocks } from "@/modules/survey/lib/client-utils";
+import { Badge } from "@/modules/ui/components/badge";
+import { Button } from "@/modules/ui/components/button";
+import { ConfirmationModal } from "@/modules/ui/components/confirmation-modal";
+import { TooltipRenderer } from "@/modules/ui/components/tooltip";
+
+interface FollowUpItemProps {
+  followUp: TSurveyFollowUp;
+  localSurvey: TSurvey;
+  selectedLanguageCode: string;
+  mailFrom: string;
+  userEmail: string;
+  teamMemberDetails: TFollowUpEmailToUser[];
+  /**
+   * Whether a *new* follow-up may still be created. Duplicating mints one with a fresh id, so it
+   * sits behind the same gate as the create buttons: without it a Workflows-enabled deployment
+   * could keep minting follow-ups from any survey that already has one, and an organization whose
+   * entitlement has lapsed could add a row that `checkSurveyFollowUpsPermission` then rejects on
+   * every subsequent save of the survey — including edits unrelated to follow-ups.
+   */
+  canDuplicate: boolean;
+  /**
+   * Whether this follow-up is actually being sent. False once the organization's entitlement has
+   * lapsed: `sendFollowUpsForResponse` refuses to send, so the row is styled as inactive rather
+   * than left looking live. Muted rather than red — this is disabled, not broken, and the warning
+   * colour already means "this follow-up is misconfigured" on the issue badge below.
+   */
+  isSending: boolean;
+  setLocalSurvey: React.Dispatch<React.SetStateAction<TSurvey>>;
+  locale: TUserLocale;
+}
+
+export const FollowUpItem = ({
+  followUp,
+  localSurvey,
+  mailFrom,
+  selectedLanguageCode,
+  userEmail,
+  teamMemberDetails,
+  setLocalSurvey,
+  locale,
+  canDuplicate,
+  isSending,
+}: Readonly<FollowUpItemProps>) => {
+  const { t } = useTranslation();
+  const [editFollowUpModalOpen, setEditFollowUpModalOpen] = useState(false);
+  const [deleteFollowUpModalOpen, setDeleteFollowUpModalOpen] = useState(false);
+
+  const isEmailToInvalid = useMemo(() => {
+    const { to } = followUp.action.properties;
+
+    if (!to) return true;
+
+    // Verified email is always valid as an option (handled at execution time)
+    if (to === "verifiedEmail") {
+      return false;
+    }
+
+    // Derive questions from blocks
+    const questions = getElementsFromBlocks(localSurvey.blocks);
+
+    const matchedQuestion = questions.find((question) => {
+      if (question.id !== to) {
+        return false;
+      }
+
+      if (question.type === TSurveyElementTypeEnum.OpenText) {
+        return question.inputType === "email";
+      }
+
+      if (question.type === TSurveyElementTypeEnum.ContactInfo) {
+        return question.email.show;
+      }
+
+      return false;
+    });
+
+    // ENG-1837: the id list comes from the Embedded Data definitions, but the `enabled` gate stays.
+    // `deriveLegacyEmbeddedData` ignores `hiddenFields.enabled` by design and TLinkedEmbeddedField
+    // carries no equivalent, and this is the one reader that consults the flag — reading it here is a
+    // flag read, not a field-list read, so it keeps this recipient label behaving exactly as before.
+    const matchedHiddenField = localSurvey.hiddenFields?.enabled
+      ? // Editor surface: the ids come from the Hidden Fields card, not the saved rows. Only the
+        // slice that feeds it is passed, so this memo keeps depending on it rather than on the whole
+        // survey object.
+        getDeclaredIngestedStorageKeys({ hiddenFields: localSurvey.hiddenFields }).find(
+          (storageKey) => storageKey === to
+        )
+      : undefined;
+
+    const updatedTeamMemberDetails = teamMemberDetails.map((teamMemberDetail) => {
+      if (teamMemberDetail.email === userEmail) {
+        return { name: "Yourself", email: userEmail };
+      }
+
+      return teamMemberDetail;
+    });
+
+    const isUserEmailInTeamMemberDetails = updatedTeamMemberDetails.some(
+      (teamMemberDetail) => teamMemberDetail.email === userEmail
+    );
+
+    const updatedTeamMembers = isUserEmailInTeamMemberDetails
+      ? updatedTeamMemberDetails
+      : [...updatedTeamMemberDetails, { email: userEmail, name: "Yourself" }];
+
+    const matchedEmail = updatedTeamMembers.find((detail) => detail.email === to);
+
+    return !matchedQuestion && !matchedHiddenField && !matchedEmail;
+  }, [
+    followUp.action.properties,
+    // The whole `hiddenFields`, not its two sub-properties: a narrower dependency than the body
+    // actually reads lets the memo keep a value built from stale hidden fields (ENG-2366).
+    localSurvey.hiddenFields,
+    localSurvey.blocks,
+    teamMemberDetails,
+    userEmail,
+  ]);
+
+  const isEndingInvalid = useMemo(() => {
+    return followUp.trigger.type === "endings" && !followUp.trigger.properties?.endingIds?.length;
+  }, [followUp.trigger.properties?.endingIds?.length, followUp.trigger.type]);
+
+  const duplicateFollowUp = useCallback(() => {
+    const newFollowUp = {
+      ...followUp,
+      id: createId(),
+      name: `${followUp.name} ${t("common.duplicate_copy")}`,
+    };
+
+    setLocalSurvey((prev) => ({
+      ...prev,
+      followUps: [...prev.followUps, newFollowUp],
+    }));
+  }, [followUp, setLocalSurvey, t]);
+
+  return (
+    <>
+      <div
+        className={cn(
+          "relative cursor-pointer rounded-lg border border-slate-300 p-4",
+          // Muted, not red: sending is disabled but the row stays clickable, because the owner
+          // still has to be able to read, fix and later migrate it. Stops at slate-50 so the gray
+          // badges inside (themselves `bg-slate-100`) keep their edge against the card.
+          isSending ? "bg-white hover:bg-slate-50" : "bg-slate-50 hover:bg-slate-100"
+        )}>
+        <button
+          type="button"
+          className="flex w-full flex-col items-start gap-y-2"
+          onClick={() => {
+            setEditFollowUpModalOpen(true);
+          }}>
+          <h3 className={isSending ? "text-slate-900" : "text-slate-500"}>{followUp.name}</h3>
+          <div className="flex gap-x-2">
+            <Badge
+              size="normal"
+              type="gray"
+              text={
+                followUp.trigger.type === "response"
+                  ? t("workspace.surveys.edit.follow_ups_item_response_tag")
+                  : t("workspace.surveys.edit.follow_ups_item_ending_tag")
+              }
+            />
+
+            <Badge
+              size="normal"
+              type="gray"
+              text={t("workspace.surveys.edit.follow_ups_item_send_email_tag")}
+            />
+
+            {!isSending ? (
+              <Badge
+                size="normal"
+                type="gray"
+                text={t("workspace.surveys.edit.follow_ups_item_not_sending_tag")}
+              />
+            ) : null}
+
+            {isEmailToInvalid || isEndingInvalid ? (
+              <Badge
+                size="normal"
+                type="warning"
+                text={t("workspace.surveys.edit.follow_ups_item_issue_detected_tag")}
+              />
+            ) : null}
+          </div>
+        </button>
+
+        <div className="absolute top-4 right-4 flex items-center">
+          <TooltipRenderer tooltipContent={t("common.delete")}>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={async (e) => {
+                e.stopPropagation();
+                setDeleteFollowUpModalOpen(true);
+              }}
+              aria-label={t("common.delete")}>
+              <Trash2Icon className="size-4 text-slate-500" />
+            </Button>
+          </TooltipRenderer>
+
+          {canDuplicate && (
+            <TooltipRenderer tooltipContent={t("common.duplicate")}>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  duplicateFollowUp();
+                }}
+                aria-label={t("common.duplicate")}>
+                <CopyIcon className="size-4 text-slate-500" />
+              </Button>
+            </TooltipRenderer>
+          )}
+        </div>
+      </div>
+
+      <FollowUpModal
+        localSurvey={localSurvey}
+        setLocalSurvey={setLocalSurvey}
+        open={editFollowUpModalOpen}
+        setOpen={setEditFollowUpModalOpen}
+        mailFrom={mailFrom}
+        selectedLanguageCode={selectedLanguageCode}
+        defaultValues={{
+          surveyFollowUpId: followUp.id,
+          followUpName: followUp.name,
+          triggerType: followUp.trigger.type,
+          endingIds: followUp.trigger.type === "endings" ? followUp.trigger.properties?.endingIds : null,
+          subject: followUp.action.properties.subject,
+          body: followUp.action.properties.body,
+          emailTo: followUp.action.properties.to,
+          replyTo: followUp.action.properties.replyTo,
+          attachResponseData: followUp.action.properties.attachResponseData,
+          includeVariables: followUp.action.properties.includeVariables ?? false,
+          includeHiddenFields: followUp.action.properties.includeHiddenFields ?? false,
+        }}
+        mode="edit"
+        teamMemberDetails={teamMemberDetails}
+        userEmail={userEmail}
+        locale={locale}
+      />
+
+      <ConfirmationModal
+        open={deleteFollowUpModalOpen}
+        setOpen={setDeleteFollowUpModalOpen}
+        buttonText={t("common.delete")}
+        onConfirm={async () => {
+          setLocalSurvey((prev) => {
+            return {
+              ...prev,
+              followUps: prev.followUps.map((f) => {
+                if (f.id === followUp.id) {
+                  return {
+                    ...f,
+                    deleted: true,
+                  };
+                }
+
+                return f;
+              }),
+            };
+          });
+        }}
+        body={t("workspace.surveys.edit.follow_ups_delete_modal_text")}
+        title={t("workspace.surveys.edit.follow_ups_delete_modal_title")}
+        buttonVariant="destructive"
+      />
+    </>
+  );
+};

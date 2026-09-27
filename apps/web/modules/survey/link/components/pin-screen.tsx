@@ -1,0 +1,167 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { Response, Workspace } from "@formbricks/database/prisma-browser";
+import { getLinkSurveyCardMaxWidth } from "@formbricks/types/styling";
+import { TSurvey, TSurveyStyling } from "@formbricks/types/surveys/types";
+import { TUserLocale } from "@formbricks/types/user";
+import { TWorkspaceStyling } from "@formbricks/types/workspace";
+import { cn } from "@/lib/cn";
+import { getFormattedErrorMessage } from "@/lib/utils/helper";
+import { validateSurveyPinAction } from "@/modules/survey/link/actions";
+import { SurveyClientWrapper } from "@/modules/survey/link/components/survey-client-wrapper";
+import { useAppLocale } from "@/modules/survey/link/hooks/use-app-locale";
+import { OTPInput } from "@/modules/ui/components/otp-input";
+
+interface PinScreenProps {
+  surveyId: string;
+  workspace: Pick<Workspace, "styling" | "logo" | "linkSurveyBranding" | "customHeadScripts">;
+  singleUseId?: string;
+  singleUseResponse?: Pick<Response, "id" | "finished">;
+  publicDomain: string;
+  IMPRINT_URL?: string;
+  PRIVACY_URL?: string;
+  TERMS_URL?: string;
+  IS_FORMBRICKS_CLOUD: boolean;
+  verifiedEmail?: string;
+  languageCode: string;
+  /** Locale for the gate's own chrome, resolved server-side from `?lang=` or Accept-Language. */
+  locale: TUserLocale;
+  isEmbed: boolean;
+  isPreview: boolean;
+  contactId?: string;
+  canReadUserIdFromUrl?: boolean;
+  recaptchaSiteKey?: string;
+  isSpamProtectionEnabled?: boolean;
+  responseCount?: number;
+  styling: TWorkspaceStyling | TSurveyStyling;
+}
+
+export const PinScreen = (props: Readonly<PinScreenProps>) => {
+  const {
+    surveyId,
+    workspace,
+    publicDomain,
+    singleUseId,
+    singleUseResponse,
+    IMPRINT_URL,
+    PRIVACY_URL,
+    TERMS_URL,
+    IS_FORMBRICKS_CLOUD,
+    verifiedEmail,
+    languageCode,
+    locale,
+    isEmbed,
+    isPreview,
+    contactId,
+    canReadUserIdFromUrl = false,
+    recaptchaSiteKey,
+    isSpamProtectionEnabled = false,
+    responseCount,
+    styling,
+  } = props;
+
+  const [localPinEntry, setLocalPinEntry] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(false);
+  const { t } = useTranslation();
+  const isLocaleReady = useAppLocale(locale);
+  const [error, setError] = useState("");
+  const [survey, setSurvey] = useState<TSurvey>();
+  const [pinAuthToken, setPinAuthToken] = useState<string | undefined>();
+  const isCardless = styling.cardArrangement?.linkSurveys === "cardless";
+  const linkSurveyCardMaxWidth = getLinkSurveyCardMaxWidth(styling.linkSurveyCardWidth);
+
+  const resetState = useCallback(() => {
+    setError("");
+    setLoading(false);
+    setLocalPinEntry("");
+  }, []);
+
+  useEffect(() => {
+    if (error) {
+      const timeout = setTimeout(() => {
+        resetState();
+      }, 2 * 1000);
+      return () => {
+        clearTimeout(timeout);
+      };
+    }
+  }, [error, resetState]);
+
+  useEffect(() => {
+    const validateSurveyPin = async () => {
+      const validPinRegex = /^\d{4}$/;
+      const isValidPin = validPinRegex.test(localPinEntry);
+      if (isValidPin) {
+        setLoading(true);
+        const response = await validateSurveyPinAction({ surveyId, pin: localPinEntry });
+        if (response?.data?.survey) {
+          setSurvey(response.data.survey);
+          setPinAuthToken(response.data.pinAuthToken ?? undefined);
+        } else {
+          const errorMessage = getFormattedErrorMessage(response);
+          setError(errorMessage);
+        }
+        setLoading(false);
+      }
+    };
+
+    void validateSurveyPin();
+  }, [localPinEntry, surveyId]);
+
+  if (!survey) {
+    // The gate is nothing but translated chrome, so it waits for its locale instead of asking for the
+    // PIN in the browser's language and switching a frame later.
+    if (!isLocaleReady) return null;
+
+    return (
+      <div
+        className={cn(
+          "mx-auto flex h-full w-full items-center justify-center",
+          isCardless && "px-4 py-12 sm:px-6"
+        )}
+        style={{ maxWidth: linkSurveyCardMaxWidth }}>
+        <div className="flex flex-col items-center justify-center">
+          <div className="my-4 font-semibold">
+            <h4>{t("s.enter_pin")}</h4>
+          </div>
+          <OTPInput
+            disabled={Boolean(error) || loading}
+            value={localPinEntry}
+            onChange={(value) => {
+              setLocalPinEntry(value);
+            }}
+            valueLength={4}
+            inputBoxClassName={cn({ "border-red-400": Boolean(error) })}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <SurveyClientWrapper
+      survey={survey}
+      workspace={workspace}
+      styling={styling}
+      publicDomain={publicDomain}
+      responseCount={responseCount}
+      languageCode={languageCode}
+      isEmbed={isEmbed}
+      singleUseId={singleUseId}
+      singleUseResponseId={singleUseResponse?.id}
+      contactId={contactId}
+      canReadUserIdFromUrl={canReadUserIdFromUrl}
+      recaptchaSiteKey={recaptchaSiteKey}
+      isSpamProtectionEnabled={isSpamProtectionEnabled}
+      isPreview={isPreview}
+      verifiedEmail={verifiedEmail}
+      IMPRINT_URL={IMPRINT_URL}
+      PRIVACY_URL={PRIVACY_URL}
+      TERMS_URL={TERMS_URL}
+      IS_FORMBRICKS_CLOUD={IS_FORMBRICKS_CLOUD}
+      pinAuthToken={pinAuthToken}
+    />
+  );
+};

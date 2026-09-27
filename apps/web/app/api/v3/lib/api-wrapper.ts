@@ -1,0 +1,541 @@
+import { type NextRequest } from "next/server";
+import { z } from "zod";
+import { logger } from "@formbricks/logger";
+import { TooManyRequestsError } from "@formbricks/types/errors";
+import { authenticateRequest } from "@/app/api/v1/auth";
+import { reportApiError } from "@/app/lib/api/api-error-reporter";
+import { RequestBodyTooLargeError, parseJsonBodyWithLimit } from "@/app/lib/api/request-body";
+import { withAuthorizationSurface } from "@/lib/authorization/context";
+import { getApiKeyFromHeaders } from "@/modules/api/lib/api-key-auth";
+import { getSession } from "@/modules/auth/lib/session";
+import { applyRateLimit } from "@/modules/core/rate-limit/helpers";
+import { rateLimitConfigs } from "@/modules/core/rate-limit/rate-limit-configs";
+import type { TRateLimitConfig } from "@/modules/core/rate-limit/types/rate-limit";
+import { TAuditAction, TAuditTarget } from "@/modules/ee/audit-logs/types/audit-log";
+import { buildV3AuditLog, queueV3AuditLog } from "./audit";
+import { mapV3ThrownError } from "./errors";
+import {
+  type InvalidParam,
+  isInvalidParamCode,
+  problemBadRequest,
+  problemPayloadTooLarge,
+  problemTooManyRequests,
+  problemUnauthorized,
+  withBearerChallenge,
+} from "./response";
+import type { TV3AuditLog, TV3Authentication } from "./types";
+
+type TV3Schema = z.ZodTypeAny;
+type MaybePromise<T> = T | Promise<T>;
+
+export type TV3AuthMode = "none" | "session" | "apiKey" | "both";
+
+export type TV3Schemas = {
+  body?: TV3Schema;
+  query?: TV3Schema;
+  params?: TV3Schema;
+};
+
+export type TV3ParsedInput<S extends TV3Schemas | undefined> = S extends object
+  ? {
+      [K in keyof S as NonNullable<S[K]> extends TV3Schema ? K : never]: z.infer<NonNullable<S[K]>>;
+    }
+  : Record<string, never>;
+
+export type TV3HandlerParams<TParsedInput = Record<string, never>, TProps = unknown> = {
+  req: NextRequest;
+  props: TProps;
+  authentication: TV3Authentication;
+  auditLog?: TV3AuditLog;
+  parsedInput: TParsedInput;
+  requestId: string;
+  instance: string;
+};
+
+export type TWithV3ApiWrapperParams<S extends TV3Schemas | undefined, TProps = unknown> = {
+  auth?: TV3AuthMode;
+  schemas?: S;
+  rateLimit?: boolean;
+  customRateLimitConfig?: TRateLimitConfig;
+  action?: TAuditAction;
+  targetType?: TAuditTarget;
+  handler: (params: TV3HandlerParams<TV3ParsedInput<S>, TProps>) => MaybePromise<Response>;
+};
+
+function getUnauthenticatedDetail(authMode: TV3AuthMode): string {
+  if (authMode === "session") {
+    return "Session required";
+  }
+
+  if (authMode === "apiKey") {
+    return "API key required";
+  }
+
+  return "Not authenticated";
+}
+
+/** How many unknown keys a 400 will name before it stops enumerating them. */
+const MAX_REPORTED_UNKNOWN_KEYS = 20;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Expand a strict object's single unrecognized-keys issue into one param per offending key.
+ *
+ * Zod reports every unknown key in ONE issue whose path points at the object rather than at any of
+ * the keys, so left as-is a caller is told it sent something unsupported without being told what.
+ * Bounded, because the key list is caller-controlled and both the response and the log line carry it.
+ */
+function expandUnrecognizedKeys(issue: z.core.$ZodIssue, fallbackName: string): InvalidParam[] {
+  const prefix = issue.path.length > 0 ? `${issue.path.join(".")}.` : "";
+  // Read defensively rather than through the `code` narrowing: `error.issues` is typed as the base
+  // `$ZodIssue`, which does not discriminate on `code`, so `issue.keys` is not reachable through it
+  // even though the runtime value carries it.
+  const rawKeys = (issue as { keys?: unknown }).keys;
+  const unknownKeys = Array.isArray(rawKeys) ? rawKeys.map(String) : [];
+
+  if (unknownKeys.length === 0) {
+    // An empty list would silently drop the issue, leaving a 400 with no `invalid_params` at all.
+    return [{ name: fallbackName, reason: issue.message, code: "unsupported_field" }];
+  }
+
+  const named = unknownKeys.slice(0, MAX_REPORTED_UNKNOWN_KEYS);
+  const params: InvalidParam[] = named.map((key) => ({
+    name: `${prefix}${key}`,
+    reason: `Unsupported field '${key}'`,
+    code: "unsupported_field",
+  }));
+
+  if (unknownKeys.length > named.length) {
+    params.push({
+      name: prefix ? prefix.slice(0, -1) : fallbackName,
+      reason: `${unknownKeys.length - named.length} further unsupported fields were not listed`,
+      code: "unsupported_field",
+    });
+  }
+
+  return params;
+}
+
+/**
+ * Zod issues as `invalid_params`, with the unknown-key expansion the v3 400 contract needs.
+ *
+ * Exported because `POST /api/v3/responses/validate` reports problems *inside* its payload as a 200
+ * body rather than a 400, and those params have to be the ones the real write would have produced —
+ * a second formatter would let the dry run describe the same rejection differently.
+ */
+export function formatZodIssues(error: z.ZodError, fallbackName: string): InvalidParam[] {
+  return error.issues.flatMap((issue) => {
+    if (issue.code === "unrecognized_keys") {
+      return expandUnrecognizedKeys(issue, fallbackName);
+    }
+
+    const params = "params" in issue && isPlainObject(issue.params) ? issue.params : {};
+    const code = isInvalidParamCode(params.code) ? params.code : undefined;
+
+    return [
+      {
+        name: issue.path.length > 0 ? issue.path.join(".") : fallbackName,
+        reason: issue.message,
+        ...(code ? { code } : {}),
+      },
+    ];
+  });
+}
+
+type TV3InputParseFailure = {
+  ok: false;
+  response: Response;
+  detail: string;
+  invalidParams: InvalidParam[];
+};
+
+function searchParamsToObject(searchParams: URLSearchParams): Record<string, string | string[]> {
+  const query: Record<string, string | string[]> = {};
+
+  for (const key of new Set(searchParams.keys())) {
+    const values = searchParams.getAll(key);
+    query[key] = values.length > 1 ? values : (values[0] ?? "");
+  }
+
+  return query;
+}
+
+function getRateLimitIdentifier(authentication: TV3Authentication): string | null {
+  if (!authentication) {
+    return null;
+  }
+
+  if ("user" in authentication && authentication.user?.id) {
+    return authentication.user.id;
+  }
+
+  if ("apiKeyId" in authentication) {
+    return authentication.apiKeyId;
+  }
+
+  return null;
+}
+
+function isPromiseLike<T>(value: unknown): value is Promise<T> {
+  return typeof value === "object" && value !== null && "then" in value;
+}
+
+async function getRouteParams<TProps>(props: TProps): Promise<Record<string, unknown>> {
+  if (!props || typeof props !== "object" || !("params" in props)) {
+    return {};
+  }
+
+  const params = (props as { params?: unknown }).params;
+  if (!params) {
+    return {};
+  }
+
+  const resolvedParams = isPromiseLike<Record<string, unknown>>(params) ? await params : params;
+  return typeof resolvedParams === "object" && resolvedParams !== null
+    ? (resolvedParams as Record<string, unknown>)
+    : {};
+}
+
+async function authenticateV3Request(req: NextRequest, authMode: TV3AuthMode): Promise<TV3Authentication> {
+  if (authMode === "none") {
+    return null;
+  }
+
+  if (authMode === "both" && getApiKeyFromHeaders(req.headers)) {
+    return await authenticateRequest(req);
+  }
+
+  if (authMode === "session" || authMode === "both") {
+    const session = await getSession();
+    if (session?.user?.id) {
+      return session;
+    }
+
+    if (authMode === "session") {
+      return null;
+    }
+  }
+
+  if (authMode === "apiKey" || authMode === "both") {
+    return await authenticateRequest(req);
+  }
+
+  return null;
+}
+
+async function parseV3Input<S extends TV3Schemas | undefined, TProps>(
+  req: NextRequest,
+  props: TProps,
+  schemas: S | undefined,
+  requestId: string,
+  instance: string
+): Promise<{ ok: true; parsedInput: TV3ParsedInput<S> } | TV3InputParseFailure> {
+  const parsedInput = {} as TV3ParsedInput<S>;
+
+  if (schemas?.body) {
+    let bodyData: unknown;
+
+    try {
+      bodyData = await parseJsonBodyWithLimit(req);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return {
+          ok: false,
+          detail: error.message,
+          invalidParams: [],
+          response: problemPayloadTooLarge(requestId, error.message, instance),
+        };
+      }
+
+      const invalidParams = [
+        { name: "body", reason: "Malformed JSON input, please check your request body" },
+      ];
+      return {
+        ok: false,
+        detail: "Invalid request body",
+        invalidParams,
+        response: problemBadRequest(requestId, "Invalid request body", {
+          instance,
+          invalid_params: invalidParams,
+        }),
+      };
+    }
+
+    const bodyResult = schemas.body.safeParse(bodyData);
+    if (!bodyResult.success) {
+      const invalidParams = formatZodIssues(bodyResult.error, "body");
+      return {
+        ok: false,
+        detail: "Invalid request body",
+        invalidParams,
+        response: problemBadRequest(requestId, "Invalid request body", {
+          instance,
+          invalid_params: invalidParams,
+        }),
+      };
+    }
+
+    parsedInput.body = bodyResult.data as TV3ParsedInput<S>["body"];
+  }
+
+  if (schemas?.query) {
+    const queryResult = schemas.query.safeParse(searchParamsToObject(req.nextUrl.searchParams));
+    if (!queryResult.success) {
+      const invalidParams = formatZodIssues(queryResult.error, "query");
+      return {
+        ok: false,
+        detail: "Invalid query parameters",
+        invalidParams,
+        response: problemBadRequest(requestId, "Invalid query parameters", {
+          instance,
+          invalid_params: invalidParams,
+        }),
+      };
+    }
+
+    parsedInput.query = queryResult.data as TV3ParsedInput<S>["query"];
+  }
+
+  if (schemas?.params) {
+    const paramsResult = schemas.params.safeParse(await getRouteParams(props));
+    if (!paramsResult.success) {
+      const invalidParams = formatZodIssues(paramsResult.error, "params");
+      return {
+        ok: false,
+        detail: "Invalid route parameters",
+        invalidParams,
+        response: problemBadRequest(requestId, "Invalid route parameters", {
+          instance,
+          invalid_params: invalidParams,
+        }),
+      };
+    }
+
+    parsedInput.params = paramsResult.data as TV3ParsedInput<S>["params"];
+  }
+
+  return { ok: true, parsedInput };
+}
+
+function ensureRequestIdHeader(response: Response, requestId: string): Response {
+  if (response.headers.get("X-Request-Id")) {
+    return response;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set("X-Request-Id", requestId);
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+async function authenticateV3RequestOrRespond(
+  req: NextRequest,
+  authMode: TV3AuthMode,
+  requestId: string,
+  instance: string
+): Promise<
+  { authentication: TV3Authentication; response: null } | { authentication: null; response: Response }
+> {
+  const authentication = await authenticateV3Request(req, authMode);
+
+  if (!authentication && authMode !== "none") {
+    const unauthorized = problemUnauthorized(requestId, getUnauthenticatedDetail(authMode), instance);
+    return {
+      authentication: null,
+      // RFC 9110 §15.5.2 wants a challenge *applicable to the target resource*. A "session" route accepts
+      // no HTTP authentication scheme at all — cookies are not one — so there is none to send, and
+      // advertising Bearer would tell a caller to try a credential this route never consults (see the
+      // `authMode === "session"` early return above). The other modes do accept `Authorization: Bearer`.
+      response: authMode === "session" ? unauthorized : withBearerChallenge(unauthorized),
+    };
+  }
+
+  return {
+    authentication,
+    response: null,
+  };
+}
+
+async function applyV3RateLimitOrRespond(params: {
+  authentication: TV3Authentication;
+  enabled: boolean;
+  config: TRateLimitConfig;
+  requestId: string;
+  log: ReturnType<typeof logger.withContext>;
+}): Promise<Response | null> {
+  const { authentication, enabled, config, requestId, log } = params;
+  if (!enabled) {
+    return null;
+  }
+
+  const identifier = getRateLimitIdentifier(authentication);
+  if (!identifier) {
+    return null;
+  }
+
+  try {
+    await applyRateLimit(config, identifier);
+  } catch (error) {
+    log.warn({ err: error, statusCode: 429 }, "V3 API rate limit exceeded");
+    return problemTooManyRequests(
+      requestId,
+      error instanceof Error ? error.message : "Rate limit exceeded",
+      error instanceof TooManyRequestsError ? error.retryAfter : undefined
+    );
+  }
+
+  return null;
+}
+
+/**
+ * Report a 5xx to the logs and to Sentry, through the same reporter v1 already uses.
+ *
+ * There was no error reporting under `app/api/v3` at all before this — the surface MCP agents and the
+ * SDK consume was the one with no signal when it broke. `reportApiError` is reused rather than calling
+ * `Sentry.captureException` here: it already owns the gating (`SENTRY_DSN && IS_PRODUCTION`), the
+ * correlation id, the safe error serialization, and the rule that a reporter failure can never affect
+ * the response.
+ *
+ * Called on both exits, because a v3 500 usually is not thrown. Operations return a problem response
+ * rather than throwing — they have to, since the MCP server calls them directly with no wrapper — so
+ * reporting only from the `catch` would miss almost every real failure. The thrown path additionally
+ * passes the original error, which is what gives Sentry a stack rather than a synthetic one.
+ *
+ * `apiVersion` is passed explicitly instead of being derived from the path: under a `basePath`
+ * deployment the request URL is prefixed, and the reporter's own matcher would fall back to "unknown".
+ *
+ * 503 is excluded. In v3 it is a deployment state, not a fault: `problemServiceUnavailable` means "this
+ * capability is not enabled here", and a transient outage is a 502 (`response.ts`), which still reports.
+ * So every 503 is an operator configuration answer — a self-hoster with a Sentry DSN and no Hub or AI
+ * key would otherwise raise an `error`-level event on every such request, forever, for a deployment
+ * that is behaving exactly as configured. Downgrading instead of skipping is not an option worth taking:
+ * `buildSentryCaptureContext` hardcodes `level: "error"` for v1 and v2 as well, so a severity knob
+ * belongs to the shared reporter, not to this wrapper. Nothing is lost locally either — the Hub paths
+ * that produce most 503s already log at `warn` with a hint in `@/modules/hub/service`.
+ */
+const reportServerError = (req: NextRequest, response: Response, error?: unknown): void => {
+  if (response.status < 500 || response.status === 503) {
+    return;
+  }
+
+  try {
+    reportApiError({ request: req, status: response.status, error, apiVersion: "v3" });
+  } catch {
+    // `reportApiError` already swallows its own failures, so this should be unreachable — but it is
+    // called on the success return path, where an escaping throw would be caught by the wrapper's own
+    // `catch` and rewrite the handler's status. A 502 becoming a 500 because Sentry hiccuped is the
+    // exact class of thing observability must not do.
+  }
+};
+
+export const withV3ApiWrapper = <S extends TV3Schemas | undefined, TProps = unknown>(
+  params: TWithV3ApiWrapperParams<S, TProps>
+): ((req: NextRequest, props: TProps) => Promise<Response>) => {
+  const {
+    auth = "both",
+    schemas,
+    rateLimit = true,
+    customRateLimitConfig,
+    handler,
+    action,
+    targetType,
+  } = params;
+
+  return async (req: NextRequest, props: TProps): Promise<Response> => {
+    const requestId = req.headers.get("x-request-id") ?? crypto.randomUUID();
+    const instance = req.nextUrl.pathname;
+    const log = logger.withContext({
+      requestId,
+      method: req.method,
+      path: instance,
+    });
+    let auditLog: TV3AuditLog | undefined;
+
+    try {
+      const authResult = await authenticateV3RequestOrRespond(req, auth, requestId, instance);
+      if (authResult.response) {
+        log.warn(
+          { statusCode: authResult.response.status, detail: getUnauthenticatedDetail(auth) },
+          "V3 API authentication failed"
+        );
+        return authResult.response;
+      }
+
+      const rateLimitResponse = await applyV3RateLimitOrRespond({
+        authentication: authResult.authentication,
+        enabled: rateLimit,
+        config: customRateLimitConfig ?? rateLimitConfigs.api.v3,
+        requestId,
+        log,
+      });
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
+
+      const parsedInputResult = await parseV3Input(req, props, schemas, requestId, instance);
+      if (!parsedInputResult.ok) {
+        log.warn(
+          {
+            statusCode: parsedInputResult.response.status,
+            detail: parsedInputResult.detail,
+            invalidParams: parsedInputResult.invalidParams,
+          },
+          "V3 API request validation failed"
+        );
+        return parsedInputResult.response;
+      }
+
+      // Built after authentication, rate limiting and parsing on purpose (ENG-2872). A 401 has no actor
+      // to attribute — and an unauthenticated caller could fill the audit store one row per bad key; a
+      // 429 is already logged by the limiter; a 400 is a malformed request, not an authorization event.
+      // The rejection a reviewer wants — the 403 an authenticated caller gets for someone else's
+      // resource — is raised by the operation below and is audited as a failure. MCP's scope gate
+      // audits its own refusals in `registerScopedTool`.
+      auditLog = buildV3AuditLog(authResult.authentication, action, targetType, req.url);
+
+      const execute = () =>
+        handler({
+          req,
+          props,
+          authentication: authResult.authentication,
+          auditLog,
+          parsedInput: parsedInputResult.parsedInput,
+          requestId,
+          instance,
+        });
+      const response = authResult.authentication
+        ? await withAuthorizationSurface("api_v3", execute)
+        : await execute();
+
+      if (auditLog) {
+        if (response.ok) {
+          auditLog.status = "success";
+        } else {
+          auditLog.eventId = requestId;
+        }
+      }
+
+      await queueV3AuditLog(auditLog, requestId, log);
+      reportServerError(req, response);
+      return ensureRequestIdHeader(response, requestId);
+    } catch (error) {
+      if (auditLog) {
+        auditLog.eventId = requestId;
+        await queueV3AuditLog(auditLog, requestId, log);
+      }
+      // Defence in depth. Operations map their own throws and return a problem response — they have to,
+      // because the MCP tools call them directly, without this wrapper. Anything reaching here escaped
+      // that, so it is mapped by the same rules rather than being flattened into a blanket 500.
+      const mapped = mapV3ThrownError(error, { log, requestId, instance });
+      reportServerError(req, mapped, error);
+      return ensureRequestIdHeader(mapped, requestId);
+    }
+  };
+};

@@ -1,0 +1,93 @@
+"use client";
+
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { SubmitHandler, useForm } from "react-hook-form";
+import { toast } from "react-hot-toast";
+import { useTranslation } from "react-i18next";
+import { z } from "zod";
+import { ZOrganization } from "@formbricks/types/organizations";
+import { createOrganizationAction } from "@/app/setup/organization/create/actions";
+import { getFormattedErrorMessage } from "@/lib/utils/helper";
+import { Button } from "@/modules/ui/components/button";
+import { FormControl, FormError, FormField, FormItem, FormProvider } from "@/modules/ui/components/form";
+import { Input } from "@/modules/ui/components/input";
+
+const ZCreateOrganizationFormSchema = ZOrganization.pick({ name: true });
+type TCreateOrganizationForm = z.infer<typeof ZCreateOrganizationFormSchema>;
+
+export const CreateOrganization = () => {
+  const { t } = useTranslation();
+  const router = useRouter();
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const form = useForm<TCreateOrganizationForm>({
+    defaultValues: {
+      name: "",
+    },
+    mode: "onChange",
+    resolver: zodResolver(ZCreateOrganizationFormSchema),
+  });
+
+  const organizationName = form.watch("name");
+
+  const onSubmit: SubmitHandler<TCreateOrganizationForm> = async () => {
+    try {
+      setIsSubmitting(true);
+      const createOrganizationResponse = await createOrganizationAction({ organizationName });
+      if (createOrganizationResponse?.serverError) {
+        toast.error(getFormattedErrorMessage(createOrganizationResponse));
+        setIsSubmitting(false);
+        return;
+      }
+      if (createOrganizationResponse?.data) {
+        router.push(`/setup/organization/${createOrganizationResponse.data.id}/invite`);
+      }
+    } catch (error) {
+      toast.error(t("common.something_went_wrong"));
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <FormProvider {...form}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void form.handleSubmit(onSubmit)(e);
+        }}>
+        <div className="flex flex-col items-center gap-y-4">
+          <h2 className="text-2xl font-medium">{t("setup.organization.create.title")}</h2>
+          <p>{t("setup.organization.create.description")}</p>
+          <FormField
+            control={form.control}
+            name="name"
+            render={({ field }) => (
+              <FormItem>
+                <FormControl>
+                  <Input
+                    {...field}
+                    isInvalid={Boolean(form.formState.errors.name)}
+                    placeholder="e.g., Acme Inc"
+                    className="w-80"
+                    required
+                  />
+                </FormControl>
+
+                <FormError />
+              </FormItem>
+            )}
+          />
+          <Button
+            type="submit"
+            className="flex w-80 justify-center"
+            loading={isSubmitting}
+            disabled={isSubmitting || organizationName.trim() === ""}>
+            {t("setup.organization.create.continue")}
+          </Button>
+        </div>
+      </form>
+    </FormProvider>
+  );
+};

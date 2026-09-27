@@ -1,0 +1,133 @@
+name: Build Cloud Deployment Images
+
+# This workflow builds Formbricks Docker images for ECR deployment:
+# - workflow_call: Used by releases with explicit SemVer versions
+# - workflow_dispatch: Auto-detects version from current branch or uses override
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: "Override version (SemVer only, e.g., 1.2.3). Leave empty to auto-detect from branch."
+        required: false
+        type: string
+      deploy_production:
+        description: "Tag image for production deployment"
+        required: false
+        default: false
+        type: boolean
+      deploy_staging:
+        description: "Tag image for staging deployment"
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Image tag to push (required for workflow_call)"
+        required: true
+        type: string
+      IS_PRERELEASE:
+        description: "Whether this is a prerelease (auto-tags for staging/production)"
+        required: false
+        type: boolean
+        default: false
+      MAKE_LATEST:
+        description: "Whether to tag for production (from GitHub release 'Set as the latest release' option)"
+        required: false
+        type: boolean
+        default: false
+      deployment_tag:
+        description: "Additional mutable environment tag for a manual environment deployment"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AWS_ECR_PUSH_ROLE_ARN:
+        required: true
+      DEPOT_PROJECT_TOKEN:
+        required: true
+      DUMMY_DATABASE_URL:
+        required: false
+      DUMMY_ENCRYPTION_KEY:
+        required: false
+      DUMMY_REDIS_URL:
+        required: false
+      DUMMY_HUB_API_URL:
+        required: false
+      DUMMY_HUB_API_KEY:
+        required: false
+      DUMMY_CUBEJS_API_URL:
+        required: false
+      DUMMY_CUBEJS_API_SECRET:
+        required: false
+      SENTRY_AUTH_TOKEN:
+        required: false
+      POSTHOG_KEY:
+        required: false
+    outputs:
+      IMAGE_TAG:
+        description: "Normalized image tag used for the build"
+        value: ${{ jobs.build-and-push.outputs.IMAGE_TAG }}
+      TAGS:
+        description: "Newline-separated list of ECR tags pushed"
+        value: ${{ jobs.build-and-push.outputs.TAGS }}
+
+permissions:
+  contents: read
+  id-token: write
+
+# Serialize writers of each mutable environment tag across releases and manual deployments.
+concurrency:
+  group: ecr-${{ inputs.deployment_tag || (inputs.IS_PRERELEASE && 'staging') || (inputs.deploy_staging && 'staging') || (inputs.deploy_production && 'production') || (inputs.MAKE_LATEST && 'production') || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  ECR_REGION: ${{ vars.ECR_REGION }}
+  # ECR settings are sourced from repository/environment variables for portability across envs/forks
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
+jobs:
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      IMAGE_TAG: ${{ steps.build.outputs.image_tag }}
+      TAGS: ${{ steps.build.outputs.registry_tags }}
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build and push cloud deployment image
+        id: build
+        uses: ./.github/actions/build-and-push-docker
+        with:
+          registry_type: "ecr"
+          ecr_registry: ${{ env.ECR_REGISTRY }}
+          ecr_repository: ${{ env.ECR_REPOSITORY }}
+          ecr_region: ${{ env.ECR_REGION }}
+          aws_role_arn: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
+          version: ${{ inputs.version_override || inputs.image_tag }}
+          deploy_production: ${{ inputs.deploy_production }}
+          deploy_staging: ${{ inputs.deploy_staging }}
+          deployment_tag: ${{ inputs.deployment_tag }}
+          is_prerelease: ${{ inputs.IS_PRERELEASE }}
+          make_latest: ${{ inputs.MAKE_LATEST }}
+        env:
+          DEPOT_PROJECT_TOKEN: ${{ secrets.DEPOT_PROJECT_TOKEN }}
+          DUMMY_DATABASE_URL: ${{ secrets.DUMMY_DATABASE_URL }}
+          DUMMY_ENCRYPTION_KEY: ${{ secrets.DUMMY_ENCRYPTION_KEY }}
+          DUMMY_REDIS_URL: ${{ secrets.DUMMY_REDIS_URL }}
+          DUMMY_HUB_API_URL: ${{ secrets.DUMMY_HUB_API_URL }}
+          DUMMY_HUB_API_KEY: ${{ secrets.DUMMY_HUB_API_KEY }}
+          DUMMY_CUBEJS_API_URL: ${{ secrets.DUMMY_CUBEJS_API_URL }}
+          DUMMY_CUBEJS_API_SECRET: ${{ secrets.DUMMY_CUBEJS_API_SECRET }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}

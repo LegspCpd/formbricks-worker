@@ -1,0 +1,1575 @@
+# Override the name for the application.
+# If not set, the chart name will be used.
+nameOverride: ""
+
+# Override the name of the application component.
+# Defaults to the same value as nameOverride.
+componentOverride: ""
+
+# Override the application "part-of" label.
+# Defaults to the chart name if not set.
+partOfOverride: ""
+
+##########################################################
+# Formbricks Configuration
+##########################################################
+formbricks:
+  # REQUIRED: Base URL of the site (e.g., https://formbricks.example.com)
+  # This is used for WEBAPP_URL and BETTER_AUTH_URL
+  webappUrl: ""
+
+  # Optional: Public URL for surveys (defaults to webappUrl if not set)
+  publicUrl: ""
+
+  # Optional: Server-side Better Auth JWKS endpoint for MCP OAuth verification.
+  # Leave empty to fetch keys from the public Better Auth issuer. Set an internal HTTP URL only when
+  # the cluster cannot reach its public origin and the application network is trusted. Include the
+  # configured service port and complete custom subpath, if any.
+  mcpOauthJwksUrl: ""
+
+##########################################################
+# Enterprise Configuration
+##########################################################
+enterprise:
+  # Deprecated compatibility field. Templates do not consume it; omit it from new values files.
+  enabled: false
+  # Adds ENTERPRISE_LICENSE_KEY to the chart-generated app Secret when secret.enabled=true.
+  # With an existing Secret or ExternalSecret, provide ENTERPRISE_LICENSE_KEY there instead.
+  licenseKey: ""
+
+##########################################################
+# Database Migration Job Configuration Helm
+##########################################################
+migration:
+  # Enable the migration job. In Argo CD, it runs as a Sync hook in wave -1
+  # after chart-managed secrets and bundled PostgreSQL are healthy. When enabled,
+  # the startup migration in the application container is skipped.
+  enabled: true
+
+  # Additional annotations for the migration job
+  annotations: {}
+
+  # Time to keep the job after completion (seconds)
+  ttlSecondsAfterFinished: 300
+
+  # Number of retries before marking the job as failed
+  backoffLimit: 3
+
+  # Wait for the effective migration database endpoint before starting migrations.
+  # MIGRATE_DATABASE_URL takes precedence over DATABASE_URL, matching the migration runner.
+  waitForDatabase:
+    enabled: true
+    timeoutSeconds: 900
+    intervalSeconds: 5
+    connectionTimeoutSeconds: 5
+
+  # Resource requests and limits for the migration job
+  resources:
+    limits:
+      memory: 512Mi
+    requests:
+      memory: 256Mi
+      cpu: "100m"
+
+##########################################################
+# Deployment Configuration
+##########################################################
+deployment:
+  # Deployment strategy configuration
+  strategy:
+    type: RollingUpdate # Type of deployment strategy (RollingUpdate/Recreate)
+    # rollingUpdate:
+    #   maxSurge: 25%
+    #   maxUnavailable: 25%
+
+  # Time Kubernetes allows the Pod to stop gracefully
+  # Must exceed any preStop drain below because lifecycle hooks run inside this budget
+  terminationGracePeriodSeconds: 30
+
+  # Optional app container lifecycle hooks
+  lifecycle: {}
+  # Native sleep requires Kubernetes >= 1.29; use an exec handler on older clusters
+  #   preStop:
+  #     sleep:
+  #       seconds: 20
+
+  # Automatically reload deployment when ConfigMaps or Secrets change
+  reloadOnChange: false
+
+  # NodeSelector for scheduling pods on specific nodes
+  nodeSelector: {}
+
+  # Additional labels for Deployment
+  additionalLabels: {}
+
+  # Additional pod labels to be used in the Service's label selector
+  additionalPodLabels: {}
+
+  # Deployment annotations
+  annotations: {}
+
+  # Additional pod annotations
+  additionalPodAnnotations: {}
+
+  # Number of replicas when autoscaling is disabled
+  replicas: 1
+
+  # Image pull secrets for private container registries
+  imagePullSecrets: ""
+
+  # Environment variables from ConfigMaps or Secrets
+  envFrom:
+    # app-secrets:
+    #   type: secret
+    #   nameSuffix: app-secrets
+
+  # Environment variables passed to the app container.
+  # Cube is bundled by default (see the `cube` section below). To use an external Cube cluster instead,
+  # set `cube.enabled: false` and provide CUBEJS_API_URL / CUBEJS_API_SECRET here via deployment.env or envFrom.
+  # When bundled Cube is enabled, CUBEJS_API_URL is rendered automatically unless set here.
+  # For self-hosted Qwen/vLLM AI, set only the OpenAI-compatible variables you need, for example:
+  # AI_PROVIDER: openai-compatible
+  # AI_MODEL: qwen3-14b-awq
+  # AI_OPENAI_COMPATIBLE_BASE_URL: http://vllm:8000/v1
+  # AI_OPENAI_COMPATIBLE_PROVIDER_NAME: vllm
+  # AI_OPENAI_COMPATIBLE_SUPPORTS_STRUCTURED_OUTPUTS: "1"
+  # Secret values can use valueFrom.secretKeyRef; omit unused provider variables.
+  env:
+    # The app sits behind exactly one reverse proxy (Traefik/Envoy) in this chart, so the client address
+    # is the last X-Forwarded-For entry. Pinned here rather than relying on the code default (also 1) so
+    # the assumption is visible next to the ingress it describes. Raise it if you put further proxies —
+    # a CDN, a corporate load balancer — in front of the ingress; setting it higher than the real chain
+    # lets callers spoof their address by prepending entries.
+    TRUSTED_PROXY_HOP_COUNT: "1"
+
+  # Additional pod volumes and app container mounts. These are useful for custom CA bundles and
+  # provider-specific runtime files without placing their contents directly in Helm values.
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  # Tolerations for scheduling pods on tainted nodes
+  tolerations: []
+
+  # Pod affinity and anti-affinity rules
+  affinity: {}
+
+  # Topology spread constraints for better scheduling
+  topologySpreadConstraints: []
+
+  # Number of previous ReplicaSet versions to retain
+  revisionHistoryLimit: 2
+
+  # Application container image
+  image:
+    repository: "ghcr.io/formbricks/formbricks"
+    tag: "" # Defaults to appVersion if not set
+    digest: "" # If set, digest takes precedence over the tag
+    pullPolicy: IfNotPresent
+
+  # Health probes configuration
+  probes:
+    startupProbe:
+      failureThreshold: 30
+      periodSeconds: 10
+      tcpSocket:
+        port: 3000
+
+    readinessProbe:
+      failureThreshold: 5
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+      initialDelaySeconds: 10
+      httpGet:
+        path: /health
+        port: 3000
+
+    livenessProbe:
+      failureThreshold: 5
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 5
+      initialDelaySeconds: 10
+      httpGet:
+        path: /health
+        port: 3000
+
+  # Resource requests and limits
+  resources:
+    limits:
+      memory: 2Gi
+    requests:
+      memory: 1Gi
+      cpu: "1"
+
+  # Container security context
+  containerSecurityContext:
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+
+  # Pod security context
+  securityContext: {}
+
+  # Command override
+  command: []
+
+  # Arguments override
+  args: []
+
+  # Container ports
+  ports:
+    http:
+      containerPort: 3000
+      protocol: TCP
+      exposed: true
+    metrics:
+      containerPort: 9464
+      protocol: TCP
+      exposed: true
+
+##########################################################
+# Optional bundled web LLM runtime
+##########################################################
+llm:
+  # Deploy Formbricks-provided Qwen through the vLLM OpenAI-compatible runtime.
+  # Disabled by default; keep using deployment.env for Google Vertex, Azure, Bedrock,
+  # or externally managed OpenAI-compatible providers.
+  enabled: false
+
+  # When enabled, automatically points the Formbricks app at the bundled vLLM router.
+  # Any AI_* value explicitly set in deployment.env takes precedence over these defaults.
+  autoConfigureApp: true
+
+  # Formbricks app-facing settings for the bundled runtime.
+  formbricks:
+    # Defaults to http://<release-name>-router-service:<llm.routerSpec.servicePort>/v1 when empty.
+    baseUrl: ""
+    model: qwen3-14b-awq
+    providerName: vllm
+    supportsStructuredOutputs: "1"
+
+  servingEngineSpec:
+    enableEngine: true
+    labels:
+      environment: llm
+      release: vllm
+    imagePullPolicy: IfNotPresent
+    servicePort: 8000
+    runtimeClassName: ""
+    strategy:
+      type: Recreate
+    modelSpec:
+      - name: qwen
+        enabled: true
+        repository: vllm/vllm-openai
+        tag: v0.14.0
+        modelURL: Qwen/Qwen3-14B-AWQ
+        replicaCount: 1
+        requestCPU: 4
+        requestMemory: 24Gi
+        limitCPU: 8
+        limitMemory: 32Gi
+        requestGPU: 1
+        requestGPUType: nvidia.com/gpu
+        pvcStorage: 100Gi
+        runtimeClassName: ""
+        shmSize: 8Gi
+        vllmConfig:
+          maxModelLen: 8192
+          dtype: float16
+          tensorParallelSize: 1
+          maxNumSeqs: 8
+          gpuMemoryUtilization: 0.9
+          extraArgs:
+            - --served-model-name
+            - qwen3-14b-awq
+            - --default-chat-template-kwargs
+            - '{"enable_thinking": false}'
+        lmcacheConfig:
+          enabled: false
+        keda:
+          enabled: false
+    startupProbe:
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 180
+      httpGet:
+        path: /health
+        port: 8000
+    livenessProbe:
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 6
+      httpGet:
+        path: /health
+        port: 8000
+    readinessProbe:
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      failureThreshold: 12
+      httpGet:
+        path: /health
+        port: 8000
+
+  routerSpec:
+    enableRouter: true
+    imagePullPolicy: IfNotPresent
+    serviceType: ClusterIP
+    servicePort: 8000
+    serviceDiscovery: k8s
+    k8sServiceDiscoveryType: service-name
+    resources:
+      requests:
+        cpu: 400m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+    startupProbe:
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      failureThreshold: 120
+      httpGet:
+        path: /health
+        port: router-port
+    livenessProbe:
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 6
+      httpGet:
+        path: /health
+        port: router-port
+    readinessProbe:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 30
+      httpGet:
+        path: /health
+        port: router-port
+
+##########################################################
+# Optional AI taxonomy service
+##########################################################
+taxonomy:
+  # Deploy the standalone taxonomy service. Disabled by default.
+  enabled: false
+  replicas: 1
+
+  # When enabled, automatically points Hub API at the in-cluster taxonomy service.
+  # Disable only when you want to wire Hub manually through hub.env.
+  autoConfigureHub: true
+
+  image:
+    repository: "ghcr.io/formbricks/taxonomy"
+    tag: "v0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  port: 8000
+
+  service:
+    type: ClusterIP
+    port: 8000
+    annotations: {}
+    additionalLabels: {}
+
+  auth:
+    # Existing secret must contain serviceTokenKey and hubInternalApiTokenKey.
+    existingSecret: ""
+    serviceTokenKey: TAXONOMY_SERVICE_TOKEN
+    hubInternalApiTokenKey: HUB_INTERNAL_API_TOKEN
+    serviceToken: ""
+    hubInternalApiToken: ""
+
+  llm:
+    # Select the taxonomy runtime adapter. The chart defaults to the provider-neutral
+    # OpenAI-compatible protocol; Vertex and Bedrock settings are rendered only when selected.
+    # Supported values: openai-compatible, bedrock, vertex-gemini.
+    provider: openai-compatible
+    # Provider/deployment-specific model identifier. Override this for the selected LLM.
+    model: qwen3-14b-awq
+    # Defaults to the bundled vLLM router URL when llm.enabled=true. Required otherwise.
+    baseUrl: ""
+    # Selects the enabled llm.servingEngineSpec.modelSpec entry used by taxonomy. It may
+    # remain empty only when exactly one bundled model is enabled.
+    bundledModelSpecName: ""
+    # Existing secret must contain apiKeySecretKey. When unset, the chart creates a non-empty dummy key.
+    existingSecret: ""
+    apiKeySecretKey: TAXONOMY_LLM_API_KEY
+    apiKey: ""
+    temperature: "0.1"
+    # auto delegates the output mode to the selected runtime adapter. Set json-schema
+    # explicitly only when the exact provider/model deployment passes preflight.
+    structuredOutputMode: auto
+    # Must match the exact configured provider/model deployment. Taxonomy validates its
+    # complete prompt/output budget during startup and readiness. It may remain empty while
+    # taxonomy is disabled, but is required when taxonomy.enabled=true.
+    contextWindowTokens: ""
+    labelMaxTokens: "4096"
+    treeMaxTokens: "16384"
+    promptTokenReserve: "4096"
+    providerMaxAttempts: "3"
+    # Semantic repair attempts across branch plans, assignments, and hierarchy plans.
+    maxAttempts: "4"
+    timeoutSeconds: "60"
+    bedrock:
+      region: ""
+    vertex:
+      project: ""
+      location: ""
+      thinkingBudget: "0"
+      # Existing secret must contain credentialsJsonSecretKey.
+      existingSecret: ""
+      credentialsJsonSecretKey: TAXONOMY_GOOGLE_CLOUD_CREDENTIALS_JSON
+      credentialsJson: ""
+
+  embeddingDimension: "768"
+  minEmbeddedRecords: "20"
+  maxRecords: "10000"
+  # Kept as a chart value for configuration compatibility. Production Taxonomy images
+  # enforce the 80-cluster quality invariant at startup.
+  maxClusters: "80"
+  randomSeed: "42"
+  hubClientTimeoutSeconds: "120"
+  hubClientMaxAttempts: "3"
+  # Set to 0 only when intentionally disabling Taxonomy heartbeats. Keep the default well
+  # below hubStaleRunTimeoutSeconds for normal production operation.
+  heartbeatIntervalSeconds: "30"
+  runDeadlineSeconds: "900"
+  # Keep this compatible with the default v0.1.0 image, which does not heartbeat through
+  # terminal Hub callbacks. It can be lowered after pinning a heartbeat-capable image.
+  hubStaleRunTimeoutSeconds: "1800"
+  hubReaperIntervalSeconds: "60"
+  terminationGracePeriodSeconds: 930
+
+  envFrom: []
+  env: {}
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+
+  autoscaling:
+    enabled: false
+    additionalLabels: {}
+    annotations: {}
+    minReplicas: 1
+    maxReplicas: 3
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: Resource
+        resource:
+          name: memory
+          target:
+            type: Utilization
+            averageUtilization: 80
+    behavior: {}
+
+  # Disabled by default because the default taxonomy replica count is 1.
+  pdb:
+    enabled: false
+    additionalLabels: {}
+    annotations: {}
+    minAvailable: 1
+    # maxUnavailable: 1
+    # unhealthyPodEvictionPolicy: AlwaysAllow
+
+  probes:
+    startupProbe:
+      failureThreshold: 30
+      periodSeconds: 10
+      httpGet:
+        path: /health
+        port: http
+    readinessProbe:
+      failureThreshold: 6
+      periodSeconds: 10
+      timeoutSeconds: 5
+      httpGet:
+        # The default v0.1.0 image exposes /health. Override this to /ready only
+        # when using a taxonomy image that implements the readiness contract.
+        path: /health
+        port: http
+    livenessProbe:
+      failureThreshold: 6
+      periodSeconds: 20
+      timeoutSeconds: 5
+      httpGet:
+        path: /health
+        port: http
+
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+##########################################################
+# Horizontal Pod Autoscaler (HPA)
+##########################################################
+autoscaling:
+  enabled: true # Enable/disable HPA
+  additionalLabels: {} # Additional labels for the HPA resource
+  annotations: {} # Annotations for HPA
+  minReplicas: 1 # Minimum number of replicas
+  maxReplicas: 10 # Maximum number of replicas
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # Wait 5 minutes before scaling down to prevent thrashing
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120 # Remove at most 1 pod every 2 minutes
+    scaleUp:
+      stabilizationWindowSeconds: 60 # Wait 1 minute before scaling up
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60 # Add at most 2 pods every minute
+
+##########################################################
+# Pod Disruption Budget (PDB)
+#
+# Ensures a minimum number of pods remain available during
+# voluntary disruptions (node drains, cluster upgrades, etc.).
+#
+# IMPORTANT:
+#   - minAvailable and maxUnavailable are MUTUALLY EXCLUSIVE.
+#     Setting both will cause a helm install/upgrade failure.
+#     To switch, set the unused one to null in your override file.
+#   - Accepts an integer (e.g., 1) or a percentage string (e.g., "25%").
+#   - For PDB to provide real HA protection, ensure
+#     autoscaling.minReplicas >= 2 (or deployment.replicas >= 2
+#     if HPA is disabled). With only 1 replica and minAvailable: 1,
+#     the PDB will block ALL node drains and cluster upgrades.
+##########################################################
+pdb:
+  enabled: true
+  additionalLabels: {}
+  annotations: {}
+
+  # Minimum pods that must remain available during disruptions.
+  # Set to null and configure maxUnavailable instead if preferred.
+  minAvailable: 1
+
+  # Maximum pods that can be unavailable during disruptions.
+  # Mutually exclusive with minAvailable — uncomment and set
+  # minAvailable to null to use this instead.
+  # maxUnavailable: 1
+
+  # Eviction policy for unhealthy pods (Kubernetes 1.27+).
+  # "IfHealthy"    — unhealthy pods count toward the budget (default).
+  # "AlwaysAllow"  — unhealthy pods can always be evicted,
+  #                  preventing them from blocking node drain.
+  # unhealthyPodEvictionPolicy: AlwaysAllow
+
+##########################################################
+# Service Configuration
+##########################################################
+service:
+  enabled: true # Enable/disable Kubernetes Service
+  additionalLabels: {} # Additional labels for Service
+  annotations: {} # Annotations for Service
+  type: ClusterIP # Service type (ClusterIP, NodePort, LoadBalancer)
+  ports: [] # Additional ports
+
+##########################################################
+# Role-Based Access Control (RBAC)
+##########################################################
+rbac:
+  enabled: false # Enable/disable RBAC
+  serviceAccount:
+    enabled: false # Enable/disable ServiceAccount
+    name: "" # Custom ServiceAccount name
+    additionalLabels: {} # Additional labels
+    annotations: {} # Annotations
+
+##########################################################
+# Kubernetes Secret Configuration (Quick Start)
+##########################################################
+secret:
+  enabled: true
+
+##########################################################
+# External Secrets Configuration
+##########################################################
+externalSecret:
+  enabled: false # Enable/disable ExternalSecrets
+  secretStore:
+    name: aws-secrets-manager # Secret store reference name
+    kind: ClusterSecretStore # Type of secret store
+  refreshInterval: "1h" # Frequency of secret sync
+  files: {}
+
+##########################################################
+# SpiceDB Authorization Configuration
+##########################################################
+authzed:
+  # Formbricks v6 uses SpiceDB as its sole authorization decision engine.
+  enabled: true
+
+  # Existing releases must complete the documented schema/backfill/audit preparation before their
+  # first v6 Helm upgrade. Fresh installs do not need to set this value.
+  migrationAcknowledged: false
+
+  initialization:
+    # Fresh self-hosted installs run the release-matched schema and relationship preparation Job.
+    # Set this to false only when an operator performs the same guarded cutover externally, and set
+    # migrationAcknowledged=true only after that preparation has completed successfully.
+    enabled: true
+
+  # selfHosted creates a SpiceDBCluster. external only configures the app client.
+  mode: selfHosted
+
+  # Stable identifier used by the Formbricks authorization model.
+  systemKey: formbricks
+
+  # grpc:// is intentionally omitted. AuthZed SDKs accept host:port endpoints.
+  # For selfHosted mode this defaults to formbricks-spicedb:50051.
+  endpoint: ""
+  # null selects the safe mode-specific default: plaintext for the internal
+  # selfHosted service and TLS for external endpoints. Set true explicitly only
+  # when an external endpoint intentionally accepts plaintext gRPC.
+  insecure: null
+  consistency: fully_consistent
+
+  auth:
+    # Secret must contain tokenKey. When empty in selfHosted mode, the chart
+    # creates a stable secret and reuses it across Helm upgrades.
+    existingSecret: ""
+    tokenKey: preshared_key
+
+  datastore:
+    # Production deployments should provision a dedicated database and role,
+    # then expose its URI through this secret. The secret may be the same as auth.existingSecret.
+    existingSecret: ""
+    uriKey: datastore_uri
+
+  cluster:
+    name: ""
+    version: v1.52.0
+    channel: stable
+    replicas: 2
+    config:
+      datastoreEngine: postgres
+      logLevel: info
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+    # Operator patches are applied after the generated resource patch and can
+    # override it when a deployment needs more specific container settings.
+    patches: []
+
+  # Creates the dedicated `spicedb` database and role only when the bundled
+  # PostgreSQL dependency is enabled and no datastore secret is supplied.
+  bundledPostgresqlBootstrap:
+    enabled: true
+    image: postgres:17-alpine
+    backoffLimit: 10
+    # The administrative role the bootstrap Job connects as to create the
+    # dedicated `spicedb` role and database. It needs CREATEROLE and CREATEDB,
+    # not necessarily superuser.
+    #
+    # CREATE DATABASE ... OWNER also requires being able to SET ROLE to the
+    # owner, which CREATEROLE alone does not give, so the Job grants itself the
+    # `spicedb` role first. From PostgreSQL 16 that works only for a role it
+    # holds ADMIN OPTION on — which creating the role confers, so the only
+    # unsupported case is a `spicedb` role someone else already created. See the
+    # chart README.
+    #
+    # Defaults to the `postgres` superuser the bundled subchart creates. An
+    # existing PostgreSQL that was installed without one (see
+    # postgresql.auth.enablePostgresUser) would otherwise fail this Job, so point
+    # these at whichever role does hold those privileges instead of disabling
+    # bootstrap wholesale.
+    adminUsername: postgres
+    adminDatabase: postgres
+    # Where that role's password lives. Both default to the bundled PostgreSQL
+    # admin credentials, so overriding adminUsername alone is not enough — set
+    # these too whenever the role is not the bundled `postgres` superuser.
+    # Setting the name without the key is refused as well: the key would
+    # otherwise fall back to the subchart's own key name and be looked up inside
+    # your Secret, which fails only once the Pod is created.
+    adminPasswordSecretName: ""
+    adminPasswordKey: ""
+
+  # Cloud installations can bootstrap a dedicated database on an existing
+  # PostgreSQL server. The admin Secret is read only by the short-lived Job.
+  # Its URL must explicitly set sslmode=require, verify-ca, or verify-full.
+  externalPostgresqlBootstrap:
+    enabled: false
+    image: postgres:17-alpine
+    backoffLimit: 10
+    adminSecretName: ""
+    adminUrlKey: DATABASE_URL
+    databaseNameKey: database_name
+    databaseUsernameKey: database_username
+    databasePasswordKey: database_password
+
+  # Install one operator per cluster. Disable this when a shared operator
+  # already watches the Formbricks namespace (the Formbricks Cloud topology).
+  operator:
+    # Breaking in v6: the default changed from false to true. Existing clusters with a compatible
+    # shared operator must keep this false to prevent two operators reconciling the same cluster.
+    # Set false when a compatible cluster-wide operator already watches this namespace.
+    install: true
+
+# Values passed to the bundled spicedb-operator dependency when
+# authzed.operator.install=true.
+spicedbOperator:
+  # The camelCase dependency alias is a values key, not a valid Kubernetes name.
+  nameOverride: spicedb-operator
+  watchNamespaces: []
+  serviceMonitor:
+    enabled: false
+
+##########################################################
+# Ingress Configuration
+##########################################################
+ingress:
+  enabled: false # Enable/disable Ingress
+  ingressClassName: alb # Specify the Ingress class
+  hosts:
+    - host: k8s.formbricks.com
+      paths:
+        - path: /
+          pathType: "Prefix"
+          serviceName: "formbricks"
+  annotations: {} # Ingress annotations
+
+##########################################################
+# Envoy Gateway Bundle
+##########################################################
+envoy:
+  # Enable app-bound Envoy resources (Gateway, HTTPRoutes, policies, ingress)
+  enabled: false
+
+  # Install the Envoy Gateway controller from this chart when true.
+  # Leave disabled when the cluster already provides a compatible controller.
+  controller:
+    enabled: false
+
+  # Install the Gateway API and Envoy Gateway CRDs bundled with the controller.
+  # Set this to false when the platform manages both CRD sets separately.
+  crds:
+    enabled: true
+    gatewayAPI:
+      # Cluster-wide policy that denies Gateway API CRD versions older than v1.5.0.
+      # Enable only after confirming that no other release reconciles an older bundle.
+      safeUpgradePolicy:
+        enabled: false
+
+  createNamespace: false
+
+  deployment:
+    replicas: 1
+    envoyGateway:
+      resources:
+        limits:
+          memory: 1024Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+    pod:
+      topologySpreadConstraints: []
+      tolerations: []
+      nodeSelector: {}
+
+  service:
+    type: ClusterIP
+    annotations: {}
+
+  config:
+    envoyGateway:
+      gateway:
+        controllerName: gateway.envoyproxy.io/formbricks-envoy-controller
+      provider:
+        type: Kubernetes
+        kubernetes:
+          deploy:
+            type: GatewayNamespace
+          rateLimitDeployment:
+            replicas: 1
+            container:
+              env:
+                - name: CACHE_KEY_PREFIX
+                  value: "formbricks:"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+      logging:
+        level:
+          default: info
+          global-ratelimit: info
+      rateLimit:
+        backend:
+          type: Redis
+          redis:
+            # Override this when enabling envoyRedis auth or changing envoyRedis.fullnameOverride.
+            url: "formbricks-envoy-redis-master:6379"
+        failClosed: false
+        telemetry:
+          metrics:
+            prometheus:
+              disable: false
+      envoyProxy:
+        logging:
+          level:
+            default: info
+        preserveRouteOrder: true
+
+  formbricks:
+    gatewayClass:
+      create: true
+      # Required when create=false so the Gateway can bind to an existing cluster-scoped GatewayClass.
+      name: ""
+    gateway:
+      name: ""
+      listenerName: http
+      port: 80
+    proxy:
+      name: ""
+      replicas: 1
+      service:
+        name: ""
+        type: ClusterIP
+        annotations: {}
+      logging:
+        defaultLevel: info
+      telemetry:
+        prometheus:
+          enabled: true
+        openTelemetry:
+          enabled: false
+          # Prefer host/port when the collector Service lives in another namespace.
+          host: ""
+          port: 4317
+          serviceName: ""
+          serviceNamespace: ""
+          deploymentEnvironment: ""
+          # Use backendRefs only when you intentionally want Service discovery through Gateway API refs.
+          backendRefs: []
+    clientTrafficPolicy:
+      enabled: true
+      numTrustedHops: 2
+    ingress:
+      enabled: false
+      ingressClassName: ""
+      # Set this explicitly when both the main app ingress and the Envoy API ingress are enabled.
+      host: ""
+      annotations: {}
+    routes:
+      authCallback: true
+      v1Client: true
+      v2Client: true
+      v1Management: true
+      v1Webhooks: true
+      feedbackRecords: false
+      storage: true
+    policies:
+      enabled: false
+      authCallback: true
+      v1Client: true
+      v2Client: true
+      v1Management: true
+      v1Webhooks: true
+      storage: true
+
+##########################################################
+# Dedicated Redis for Envoy Rate Limiting
+##########################################################
+envoyRedis:
+  enabled: false
+  fullnameOverride: "formbricks-envoy-redis"
+  # Only affects the bundled envoy Redis release.
+  # If you point Envoy rate limiting at an external Redis/Valkey instance instead,
+  # configure that deployment separately with `maxmemory-policy noeviction`.
+  architecture: replication
+  rbac:
+    create: true
+  serviceAccount:
+    create: true
+    automountServiceAccountToken: true
+  auth:
+    enabled: false
+  commonConfiguration: |-
+    appendonly yes
+    save ""
+  networkPolicy:
+    enabled: false
+  master:
+    resources: {}
+    podAntiAffinityPreset: soft
+    topologySpreadConstraints: []
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ""
+    pdb:
+      create: true
+      maxUnavailable: 1
+  replica:
+    replicaCount: 2
+    automountServiceAccountToken: true
+    resources: {}
+    podAntiAffinityPreset: soft
+    topologySpreadConstraints: []
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ""
+    pdb:
+      create: true
+      maxUnavailable: 1
+  sentinel:
+    enabled: true
+    quorum: 2
+    masterSet: formbricksenvoy
+    getMasterTimeout: 90
+    automateClusterRecovery: false
+    redisShutdownWaitFailover: true
+    resources: {}
+    persistence:
+      enabled: false
+    service:
+      type: ClusterIP
+    masterService:
+      enabled: true
+      type: ClusterIP
+  metrics:
+    enabled: false
+
+##########################################################
+# Valkey Configuration
+##########################################################
+redis:
+  enabled: true # Enable/disable bundled Valkey
+  # Use this to point Formbricks jobs and cache traffic at an existing Redis/Valkey deployment.
+  # External Redis instances must also be configured with `maxmemory-policy noeviction`
+  # in their redis.conf/valkey.conf (or equivalent managed-service setting) to avoid BullMQ job loss.
+  externalRedisUrl: ""
+  fullnameOverride: "formbricks-redis"
+  image:
+    repository: "valkey/valkey"
+    tag: ""
+    digest: "sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84"
+    pullPolicy: IfNotPresent
+  architecture: standalone
+  commonConfiguration: |-
+    appendonly yes
+    save ""
+    maxmemory-policy noeviction
+  auth:
+    enabled: true
+    existingSecret: "formbricks-app-secrets"
+    existingSecretPasswordKey: "REDIS_PASSWORD"
+  networkPolicy:
+    enabled: false
+  master:
+    resources:
+      limits:
+        cpu: 150m
+        memory: 192Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    podSecurityContext: {}
+    containerSecurityContext: {}
+    podAnnotations: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+    pdb:
+      enabled: true
+      minAvailable: ""
+      maxUnavailable: 0
+
+##########################################################
+# Service Monitor to collect Prometheus metrices
+##########################################################
+serviceMonitor:
+  enabled: true
+
+  # Additional labels
+  additionalLabels:
+  # key: value
+
+  # Additional annotations
+  annotations:
+  # key: value
+
+  # List of the endpoints of service from which prometheus will scrape data
+  endpoints:
+    - interval: 5s
+      path: /metrics
+      port: metrics
+
+##########################################################
+# Cube.js Analytics Configuration
+##########################################################
+cube:
+  # Cube semantic-layer service used by Formbricks analytics. Bundled by default.
+  # Set to false only if you want to point the app at an external Cube cluster
+  # via deployment.env.CUBEJS_API_URL (CUBEJS_API_SECRET must still be provided).
+  enabled: true
+  replicas: 1
+
+  image:
+    repository: "cubejs/cube"
+    tag: "v1.6.6"
+    pullPolicy: IfNotPresent
+
+  imagePullSecrets: []
+
+  port: 4000
+
+  service:
+    type: ClusterIP
+    port: 4000
+
+  # The generated app secret supplies CUBEJS_API_SECRET when secret.enabled=true.
+  # Secret values such as CUBEJS_DB_* should be supplied through envFrom or another secret-management
+  # flow.
+  envFrom: []
+
+  env:
+    # PORT is rendered from cube.port so app-level secret values cannot override
+    # the Cube listener port through envFrom.
+    CUBEJS_DB_TYPE: "postgres"
+    CUBEJS_DEFAULT_API_SCOPES: "meta,data"
+    # The bundled schema has no external pre-aggregations, so Cube Store is not required.
+    # Override this only after configuring Cube Store for custom external pre-aggregations.
+    CUBEJS_EXTERNAL_DEFAULT: "false"
+    # Keep the in-memory cache/queue driver at one Cube replica only. The chart
+    # fails rendering when this remains "memory" and cube.replicas is greater than 1.
+    CUBEJS_CACHE_AND_QUEUE_DRIVER: "memory"
+    CUBEJS_JWT_ISSUER: "formbricks-web"
+    CUBEJS_JWT_AUDIENCE: "formbricks-cube"
+
+  containerSecurityContext:
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    runAsUser: 1000
+
+  livenessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+  resources:
+    limits:
+      memory: 1Gi
+    requests:
+      memory: 512Mi
+      cpu: "250m"
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+##########################################################
+# Hub API Configuration
+# Formbricks Hub image: ghcr.io/formbricks/hub
+##########################################################
+hub:
+  # Hub is mandatory in Formbricks 5. Keep this enabled.
+  enabled: true
+  replicas: 1
+
+  image:
+    repository: "ghcr.io/formbricks/hub"
+    # Pinned by digest for immutable, reproducible deployments. When digest is set it takes
+    # precedence over tag, and deployment, init container, and migration job all resolve to the
+    # same immutable image. Update on each Hub release.
+    # Current digest corresponds to ghcr.io/formbricks/hub:0.8.5.
+    digest: "sha256:9f4c109e6589993ef15708f834d57241ed3a73e3246e3565620777a66a231b59"
+    # Tag is a fallback for dev/non-prod when digest is cleared; keep aligned with the digest above.
+    tag: "0.8.5"
+    pullPolicy: IfNotPresent
+
+  # Optional override for the secret Hub reads from.
+  # Defaults to the generated app secret (<release>-app-secrets), which contains DATABASE_URL and HUB_API_KEY.
+  # If you set this, the custom secret must provide DATABASE_URL and HUB_API_KEY.
+  # The app secret still needs HUB_API_KEY as well because the web app talks to Hub directly.
+  # When secret.enabled=true, the custom Hub secret must already exist at render time so Helm can copy HUB_API_KEY
+  # into the generated app secret and Envoy credential.
+  existingSecret: ""
+
+  # Provider-neutral pod extensions applied to both Hub API and hub-worker.
+  # Use these for credential files, custom CA bundles, or other provider-specific runtime
+  # requirements without placing secret values in Helm values.
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  # Optional env vars (non-secret). Use existingSecret for secret values such as DATABASE_URL and HUB_API_KEY.
+  # Applied to both the Hub API and hub-worker (the worker merges hub.env), so providers set here also
+  # reach the classify jobs. To enable sentiment/emotion/translation enrichment (Hub >= 0.7.1), set the
+  # provider + model here and supply the API key via existingSecret. Supported providers: openai,
+  # google (AI Studio, needs *_PROVIDER_API_KEY), google-gemini (Vertex, needs
+  # *_GOOGLE_CLOUD_PROJECT/LOCATION + Application Default Credentials instead of an API key).
+  # A provider set without its required credentials crash-loops both Hub pods on startup. See:
+  # https://hub.formbricks.com/reference/environment-variables
+  # env:
+  #   SENTIMENT_PROVIDER: google
+  #   SENTIMENT_MODEL: gemini-2.5-flash
+  #   EMOTIONS_PROVIDER: google
+  #   EMOTIONS_MODEL: gemini-2.5-flash
+  #   TRANSLATION_PROVIDER: google
+  #   TRANSLATION_MODEL: gemini-2.5-flash
+  #   TRANSLATION_DEFAULT_LANGUAGE: en-US
+  env: {}
+
+  # Scheduling constraints shared by the Hub API and its migration Job.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+  # Optional autoscaling for the Hub API deployment.
+  autoscaling:
+    enabled: false
+    additionalLabels: {}
+    annotations: {}
+    minReplicas: 1
+    maxReplicas: 3
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+      - type: Resource
+        resource:
+          name: memory
+          target:
+            type: Utilization
+            averageUtilization: 80
+    behavior: {}
+
+  # Optional PDB for the Hub API deployment. Disabled by default because a single
+  # Hub replica with minAvailable: 1 blocks voluntary node drains.
+  pdb:
+    enabled: false
+    additionalLabels: {}
+    annotations: {}
+    minAvailable: 1
+    # maxUnavailable: 1
+    # unhealthyPodEvictionPolicy: AlwaysAllow
+
+  worker:
+    # Hub async jobs (webhook dispatch, embeddings) run in hub-worker. Keep this
+    # enabled unless another worker deployment processes the same River queues.
+    enabled: true
+    replicas: 1
+
+    # Optional env vars (non-secret) added only to hub-worker.
+    env: {}
+
+    waitForApi:
+      # Avoid starting workers before the API service is healthy during installs/upgrades.
+      enabled: true
+      # Maximum failed checks before the init container exits. Each health request and the delay
+      # between failed checks are bounded to 5 seconds.
+      maxAttempts: 120
+
+    resources:
+      limits:
+        memory: 512Mi
+      requests:
+        memory: 256Mi
+        cpu: "100m"
+
+    autoscaling:
+      enabled: false
+      additionalLabels: {}
+      annotations: {}
+      minReplicas: 1
+      maxReplicas: 5
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+        - type: Resource
+          resource:
+            name: memory
+            target:
+              type: Utilization
+              averageUtilization: 80
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+
+    # Disabled by default because the default worker replica count is 1.
+    pdb:
+      enabled: false
+      additionalLabels: {}
+      annotations: {}
+      minAvailable: 1
+      # maxUnavailable: 1
+      # unhealthyPodEvictionPolicy: AlwaysAllow
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+
+  embeddings:
+    # Optional OpenAI-compatible embeddings integration for Hub.
+    enabled: false
+    # Deploy the bundled TEI workloads. Set false when baseUrl points to an
+    # externally managed runtime. Embedding env wiring remains enabled.
+    deployRuntime: true
+    runtime: tei
+    model: Alibaba-NLP/gte-multilingual-base
+    revision: ""
+    # Defaults to `model` when empty. Used by TEI OpenAI-compatible responses
+    # and as Hub's EMBEDDING_MODEL.
+    servedModelName: ""
+    # Defaults to http://<release>-hub-embeddings:<service.port>/v1 when empty.
+    baseUrl: ""
+    maxConcurrent: "5"
+    normalize: "false"
+    replicas: 1
+
+    # Optional worker-only TEI pool. Hub API keeps using the foreground runtime
+    # above, while hub-worker uses this endpoint and document micro-batching.
+    background:
+      enabled: false
+      baseUrl: ""
+      maxConcurrent: "5"
+      batchSize: "1"
+      batchMaxWaitMs: "25"
+      batchMaxInFlight: "1"
+      httpDisableKeepAlives: "false"
+      replicas: 1
+
+      service:
+        port: 8080
+        annotations: {}
+        additionalLabels: {}
+
+      persistence:
+        enabled: true
+        storageClass: ""
+        accessModes:
+          - ReadWriteOnce
+        size: 10Gi
+        mountPath: /data
+
+      resources:
+        requests:
+          cpu: "8"
+          memory: 8Gi
+        limits:
+          memory: 8Gi
+
+      autoscaling:
+        enabled: false
+        additionalLabels: {}
+        annotations: {}
+        minReplicas: 1
+        maxReplicas: 6
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              target:
+                type: Utilization
+                averageUtilization: 70
+        behavior:
+          scaleDown:
+            stabilizationWindowSeconds: 900
+            policies:
+              - type: Pods
+                value: 1
+                periodSeconds: 300
+          scaleUp:
+            stabilizationWindowSeconds: 0
+            policies:
+              - type: Pods
+                value: 2
+                periodSeconds: 60
+
+    image:
+      repository: "ghcr.io/huggingface/text-embeddings-inference"
+      tag: "cpu-1.9"
+      pullPolicy: IfNotPresent
+
+    command: []
+    # When empty, the chart renders TEI args from model, servedModelName, port,
+    # revision, and persistence.mountPath. Set this to fully override args.
+    args: []
+    # Keeps the default GTE CPU runtime within the default memory budget.
+    extraArgs:
+      - --dtype
+      - float16
+    # TEI 1.9 includes parsed arguments in INFO startup logs. Keep the secure
+    # default below so API_KEY is not copied into container logs. Override only
+    # when the selected runtime is known to redact credentials.
+    env:
+      RUST_LOG: warn
+
+    port: 8080
+    prometheusPort: 9000
+
+    service:
+      type: ClusterIP
+      port: 8080
+      annotations: {}
+      additionalLabels: {}
+
+    auth:
+      # TEI can enforce bearer-token auth with API_KEY. Hub always receives the
+      # same key as EMBEDDING_PROVIDER_API_KEY because the OpenAI-compatible Hub
+      # provider requires an API key.
+      enabled: true
+      existingSecret: ""
+      secretKey: EMBEDDING_PROVIDER_API_KEY
+      apiKey: ""
+
+    huggingFace:
+      # Required only for private/gated models unless the model is pre-cached.
+      existingSecret: ""
+      tokenKey: HF_TOKEN
+      token: ""
+
+    persistence:
+      enabled: true
+      existingClaim: ""
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 10Gi
+      mountPath: /data
+
+    resources:
+      requests:
+        cpu: "4"
+        memory: 8Gi
+      limits:
+        memory: 8Gi
+
+    autoscaling:
+      enabled: false
+      additionalLabels: {}
+      annotations: {}
+      minReplicas: 1
+      maxReplicas: 2
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+        - type: Resource
+          resource:
+            name: memory
+            target:
+              type: Utilization
+              averageUtilization: 80
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
+        scaleUp:
+          stabilizationWindowSeconds: 120
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120
+
+    # Disabled by default because the default embeddings replica count is 1.
+    pdb:
+      enabled: false
+      additionalLabels: {}
+      annotations: {}
+      minAvailable: 1
+      # maxUnavailable: 1
+      # unhealthyPodEvictionPolicy: AlwaysAllow
+
+    probes:
+      startupProbe:
+        failureThreshold: 60
+        periodSeconds: 10
+        tcpSocket:
+          port: http
+      readinessProbe:
+        failureThreshold: 6
+        periodSeconds: 10
+        timeoutSeconds: 5
+        tcpSocket:
+          port: http
+      livenessProbe:
+        failureThreshold: 6
+        periodSeconds: 20
+        timeoutSeconds: 5
+        tcpSocket:
+          port: http
+
+    podAnnotations: {}
+    podLabels: {}
+    podSecurityContext: {}
+    # Keep empty by default because upstream model-serving images may define
+    # their own user and need write access to the model cache path.
+    securityContext: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+
+  # Opt-in, deliberately named embedding backfill Job. A new runId is required
+  # for each preview or enqueue run so upgrades never execute it implicitly.
+  embeddingBackfill:
+    enabled: false
+    runId: ""
+    taxonomy: false
+    tenantId: ""
+    countOnly: true
+    maxRecords: 0
+    backoffLimit: 1
+    activeDeadlineSeconds: 900
+    resources:
+      requests:
+        cpu: "50m"
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+  # Upgrade migration job runs goose + river before Helm upgrades Hub resources.
+  # Fresh installs run the same migrations through the Hub deployment init container.
+  migration:
+    ttlSecondsAfterFinished: 300
+    backoffLimit: 3
+    activeDeadlineSeconds: 900
+    waitForFormbricksMigration:
+      enabled: true
+      maxAttempts: 180
+      # Consecutive missing Job reads before falling back to persisted Prisma/DataMigration markers.
+      missingJobMaxAttempts: 12
+      intervalSeconds: 5
+
+  resources:
+    limits:
+      memory: 512Mi
+    requests:
+      memory: 256Mi
+      cpu: "100m"
+
+##########################################################
+# PostgreSQL Configuration
+##########################################################
+postgresql:
+  enabled: true # Enable/disable PostgreSQL
+  externalDatabaseUrl: ""
+  # Argo CD waits for bundled PostgreSQL before running migration hooks in wave -1.
+  commonAnnotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  global:
+    security:
+      allowInsecureImages: true
+  fullnameOverride: "formbricks-postgresql"
+  image:
+    repository: pgvector/pgvector
+    tag: pg17
+  auth:
+    # The bundled AuthZed bootstrap creates a dedicated role and database and
+    # therefore requires the PostgreSQL administrator account.
+    enablePostgresUser: true
+    username: formbricks
+    database: formbricks
+    existingSecret: "formbricks-app-secrets"
+    secretKeys:
+      adminPasswordKey: "POSTGRES_ADMIN_PASSWORD"
+      userPasswordKey: "POSTGRES_USER_PASSWORD"
+  primary:
+    networkPolicy:
+      enabled: false
+    persistence:
+      enabled: true
+      size: 10Gi
+    # The upstream nano preset leaves too little memory headroom when the
+    # bundled database also serves SpiceDB. Helm cannot condition dependency
+    # values on authzed.enabled, so retain the live-validated safe baseline.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    podSecurityContext:
+      enabled: true
+      fsGroup: 1001
+      runAsUser: 1001
+    containerSecurityContext:
+      enabled: true
+      runAsUser: 1001
+      readOnlyRootFilesystem: false

@@ -1,0 +1,241 @@
+import { useEffect, useRef, useState } from "preact/hooks";
+import { useTranslation } from "react-i18next";
+import { TJsWorkspaceStateSurvey } from "@formbricks/types/js";
+import { type TSurveyLanguage } from "@formbricks/types/surveys/types";
+import { LanguageIcon } from "@/components/icons/language-icon";
+import { mixColor } from "@/lib/color";
+import { getI18nLanguage } from "@/lib/i18n-utils";
+import i18n, { loadLanguage, toI18nLanguage } from "@/lib/i18n.config";
+import { isPlainEscape } from "@/lib/keyboard";
+import { getLanguageDisplayName, getShortLanguageDisplayName } from "@/lib/language-display-name";
+import { getVisibleSurveyLanguages, isSameLanguageCode } from "@/lib/language-options";
+import { useClickOutside } from "@/lib/use-click-outside-hook";
+import { cn, getSurveyLanguageTag, isRTLLanguage, resolveSelectedLanguageCode } from "@/lib/utils";
+
+interface LanguageSwitchProps {
+  survey: TJsWorkspaceStateSurvey;
+  surveyLanguages: TSurveyLanguage[];
+  /** The survey's active language: a stored language code, or the `"default"` sentinel. */
+  selectedLanguageCode: string;
+  setSelectedLanguageCode: (languageCode: string) => void;
+  setFirstRender?: (firstRender: boolean) => void;
+  hoverColor?: string;
+  borderRadius?: number | string;
+  dir?: "ltr" | "rtl" | "auto";
+  setDir?: (dir: "ltr" | "rtl" | "auto") => void;
+}
+
+export function LanguageSwitch({
+  survey,
+  surveyLanguages,
+  selectedLanguageCode,
+  setSelectedLanguageCode,
+  setFirstRender,
+  hoverColor,
+  borderRadius,
+  dir = "auto",
+  setDir,
+}: Readonly<LanguageSwitchProps>) {
+  const { t } = useTranslation();
+  const hoverColorWithOpacity = hoverColor ?? mixColor("#000000", "#ffffff", 0.8);
+
+  const [isHovered, setIsHovered] = useState(false);
+
+  const [showLanguageDropdown, setShowLanguageDropdown] = useState(false);
+  const toggleDropdown = () => {
+    setShowLanguageDropdown((prev) => !prev);
+  };
+  const languageDropdownRef = useRef(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Sequence number of the most recent language selection — see `handleI18nLanguage`.
+  const latestLanguageRequest = useRef(0);
+  const defaultLanguageCode = surveyLanguages.find((surveyLanguage) => {
+    return surveyLanguage.default;
+  })?.language.code;
+
+  const visibleLanguages = getVisibleSurveyLanguages(surveyLanguages);
+
+  // The active language as a real code: `selectedLanguageCode` may be the "default" sentinel, and
+  // may also be a legacy alias ("hi") that was deduped away in favour of its canonical form
+  // ("hi-IN"), so it is matched the same way the option list is deduped.
+  const activeLanguageCode = getSurveyLanguageTag(survey, selectedLanguageCode);
+  const isActive = (code: string): boolean => isSameLanguageCode(code, activeLanguageCode);
+  const activeLanguage = visibleLanguages.find((surveyLanguage) => isActive(surveyLanguage.language.code));
+  // Endonym ("Deutsch", not "German") — both the a11y convention and better UX for a respondent
+  // hunting for their own language. The visible label drops the region, because the full name is
+  // long enough to be ellipsised in the chrome row ("Deutsch (Deutschland)", "American English")
+  // and the trigger only ever shows one language, so there is nothing to disambiguate against. The
+  // accessible name keeps the full name and still contains the visible text (WCAG 2.5.3).
+  const activeDisplayName = activeLanguage
+    ? getShortLanguageDisplayName(activeLanguage.language.code)
+    : undefined;
+  // The switcher used to be an unlabelled globe, so neither a sighted nor a screen-reader user
+  // could tell which language the survey was in (WCAG 3.1.1).
+  const triggerLabel = activeLanguage
+    ? t("common.language_switch_current", {
+        language: getLanguageDisplayName(activeLanguage.language.code),
+      })
+    : t("common.language_switch");
+
+  const handleI18nLanguage = (languageCode: string) => {
+    const calculatedLanguage = getI18nLanguage(languageCode, surveyLanguages);
+    // Fetch first, switch second, so the chrome flips straight from one language to the next instead of
+    // blinking through English while the new strings are in flight. Resolves immediately once loaded.
+    //
+    // Only the newest selection may apply. Two languages served by different bundles are two separate
+    // fetches, so picking a second before the first lands would otherwise let the slower request set the
+    // chrome back to a language the respondent has already moved off.
+    const requestId = ++latestLanguageRequest.current;
+    void loadLanguage(calculatedLanguage).then(() => {
+      if (requestId !== latestLanguageRequest.current) return;
+      const i18nLanguage = toI18nLanguage(calculatedLanguage);
+      if (i18n.language !== i18nLanguage) {
+        i18n.changeLanguage(i18nLanguage);
+      }
+    });
+  };
+
+  const changeLanguage = (languageCode: string) => {
+    const calculatedLanguageCode = resolveSelectedLanguageCode(languageCode, defaultLanguageCode);
+    setSelectedLanguageCode(calculatedLanguageCode);
+
+    handleI18nLanguage(calculatedLanguageCode);
+
+    if (setDir) {
+      const calculateDir = isRTLLanguage(survey, calculatedLanguageCode) ? "rtl" : "ltr";
+      setDir?.(calculateDir);
+    }
+
+    if (setFirstRender) {
+      //for lexical editor
+      setFirstRender(true);
+    }
+    closeDropdownAndRefocus();
+  };
+
+  // The popup unmounts on close, so whichever option held focus disappears with it and focus would
+  // fall back to <body>. Handing it back to the trigger keeps a keyboard user where they started.
+  const closeDropdownAndRefocus = () => {
+    setShowLanguageDropdown(false);
+    triggerRef.current?.focus();
+  };
+
+  // Escape closes the popup (WCAG 2.1.1). The listener sits on the switcher's own wrapper, so it
+  // only fires while focus is on the trigger or an option, and stops propagation so the same key
+  // does not also reach the survey container's Escape handling and close the whole modal survey.
+  // Imperative for the same reason as useNoOverlayModal: a keydown JSX prop on a plain div fails
+  // a11y linting.
+  //
+  // Tabbing past the last option moves focus out of the wrapper with the popup still open, and an
+  // Escape from there would reach the survey's handler and close the whole survey instead. So the
+  // popup also closes once focus lands outside the switcher — without refocusing the trigger, which
+  // would undo the Tab. A null relatedTarget (focus going to <body>, or Safari not focusing a
+  // clicked button) is left to useClickOutside, or a pointer tap on an option would close the
+  // popup before its click registers.
+  useEffect(() => {
+    if (!showLanguageDropdown) return;
+
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!isPlainEscape(event)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      setShowLanguageDropdown(false);
+      triggerRef.current?.focus();
+    };
+
+    const handleFocusOut = (event: FocusEvent) => {
+      const nextFocused = event.relatedTarget;
+      if (nextFocused instanceof Node && !container.contains(nextFocused)) {
+        setShowLanguageDropdown(false);
+      }
+    };
+
+    container.addEventListener("keydown", handleKeyDown);
+    container.addEventListener("focusout", handleFocusOut);
+    return () => {
+      container.removeEventListener("keydown", handleKeyDown);
+      container.removeEventListener("focusout", handleFocusOut);
+    };
+  }, [showLanguageDropdown]);
+
+  useClickOutside(languageDropdownRef, () => {
+    setShowLanguageDropdown(false);
+  });
+
+  return (
+    <div ref={containerRef} className="z-1001 flex w-fit items-center">
+      <button
+        ref={triggerRef}
+        // The language NAME, not the full label: aria-label already supplies the accessible name, and
+        // an identical title becomes the accessible description — screen readers then read the same
+        // sentence twice on every focus. The tooltip's only remaining job is showing the untruncated
+        // endonym, so that is all it carries.
+        title={activeLanguage ? getLanguageDisplayName(activeLanguage.language.code) : triggerLabel}
+        type="button"
+        className={cn(
+          "text-heading relative flex h-8 items-center justify-center gap-1.5 rounded-md",
+          activeDisplayName ? "w-auto px-2" : "w-8"
+        )}
+        style={{
+          backgroundColor: isHovered ? hoverColorWithOpacity : "transparent",
+          transition: "background-color 0.2s ease",
+          borderRadius: typeof borderRadius === "number" ? `${borderRadius}px` : borderRadius,
+        }}
+        onClick={toggleDropdown}
+        // No aria-haspopup: the popup is a plain group of buttons, not a menu with arrow-key
+        // navigation, and announcing a menu it does not implement is worse than announcing nothing.
+        aria-expanded={showLanguageDropdown}
+        aria-label={triggerLabel}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}>
+        <LanguageIcon />
+        {activeDisplayName ? (
+          // aria-hidden: the button's aria-label already states the language, and leaving this
+          // visible to AT would have it announced twice. `lang` still matters for a sighted user
+          // whose browser hyphenates or a translation tool that would otherwise mangle the endonym.
+          <span aria-hidden="true" lang={activeLanguage?.language.code} className="max-w-24 truncate text-xs">
+            {activeDisplayName}
+          </span>
+        ) : null}
+      </button>
+      {showLanguageDropdown ? (
+        <div
+          className={cn(
+            "bg-survey-bg text-heading border-border absolute top-10 max-h-64 space-y-2 overflow-auto rounded-md border p-2 text-xs shadow-lg",
+            dir === "rtl" ? "left-8" : "right-8"
+          )}
+          ref={languageDropdownRef}>
+          {visibleLanguages.map((surveyLanguage) => {
+            const isCurrent = isActive(surveyLanguage.language.code);
+            return (
+              <button
+                key={surveyLanguage.language.id}
+                type="button"
+                // Marks which option the survey is currently rendered in. `aria-current` rather than
+                // `aria-selected`, because these are buttons in a plain popup, not options in a
+                // listbox — `aria-selected` on a button role is ignored.
+                aria-current={isCurrent ? "true" : undefined}
+                // Each label is written in its own language, so without this a screen reader reads
+                // "Deutsch" and "日本語" with the page language's pronunciation rules.
+                lang={surveyLanguage.language.code}
+                className={cn(
+                  "hover:bg-brand hover:text-on-brand block w-full max-w-48 truncate rounded-md p-1.5 text-left",
+                  isCurrent && "font-semibold"
+                )}
+                onClick={() => {
+                  changeLanguage(surveyLanguage.language.code);
+                }}>
+                {getLanguageDisplayName(surveyLanguage.language.code)}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}

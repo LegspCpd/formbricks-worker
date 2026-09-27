@@ -1,0 +1,164 @@
+import { cache as reactCache } from "react";
+import { prisma } from "@formbricks/database";
+import { Prisma } from "@formbricks/database/prisma";
+import { ZId, ZString } from "@formbricks/types/common";
+import { TContactAttributes } from "@formbricks/types/contact-attribute";
+import { DatabaseError } from "@formbricks/types/errors";
+import { ZUserEmail } from "@formbricks/types/user";
+import { validateInputs } from "@/lib/utils/validate";
+import { readAttributeValue } from "./attribute-storage";
+
+const selectContactAttribute = {
+  value: true,
+  valueNumber: true,
+  valueDate: true,
+  attributeKey: {
+    select: {
+      key: true,
+      name: true,
+      type: true,
+      dataType: true,
+    },
+  },
+} satisfies Prisma.ContactAttributeSelect;
+
+export const getContactAttributes = reactCache(async (contactId: string) => {
+  validateInputs([contactId, ZId]);
+
+  try {
+    const prismaAttributes = await prisma.contactAttribute.findMany({
+      where: {
+        contactId,
+      },
+      select: selectContactAttribute,
+    });
+
+    return prismaAttributes.reduce<TContactAttributes>((acc, attr) => {
+      acc[attr.attributeKey.key] = readAttributeValue(attr, attr.attributeKey.dataType);
+      return acc;
+    }, {});
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+
+    throw error;
+  }
+});
+
+/**
+ * Scoped by workspace on purpose: this feeds the contact detail page, which is reached through a
+ * workspace id in the URL. `ContactAttribute` has no workspace column of its own, so the tenant
+ * check goes through the contact it hangs off.
+ */
+export const getContactAttributesWithKeyInfo = reactCache(async (contactId: string, workspaceId: string) => {
+  validateInputs([contactId, ZId], [workspaceId, ZId]);
+
+  try {
+    const prismaAttributes = await prisma.contactAttribute.findMany({
+      where: {
+        contactId,
+        contact: { workspaceId },
+      },
+      select: selectContactAttribute,
+    });
+
+    return prismaAttributes.map((attr) => ({
+      key: attr.attributeKey.key,
+      name: attr.attributeKey.name,
+      type: attr.attributeKey.type,
+      value: readAttributeValue(attr, attr.attributeKey.dataType),
+      dataType: attr.attributeKey.dataType,
+    }));
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+
+    throw error;
+  }
+});
+
+export const hasEmailAttribute = reactCache(
+  async (email: string, workspaceId: string, contactId: string): Promise<boolean> => {
+    validateInputs([email, ZUserEmail], [workspaceId, ZId], [contactId, ZId]);
+
+    const contactAttribute = await prisma.contactAttribute.findFirst({
+      where: {
+        AND: [
+          {
+            attributeKey: {
+              key: "email",
+              workspaceId,
+            },
+            value: email,
+          },
+          {
+            NOT: {
+              contactId,
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+
+    return !!contactAttribute;
+  }
+);
+
+export const hasUserIdAttribute = reactCache(
+  async (userId: string, workspaceId: string, contactId: string): Promise<boolean> => {
+    validateInputs([userId, ZString], [workspaceId, ZId], [contactId, ZId]);
+
+    const contactAttribute = await prisma.contactAttribute.findFirst({
+      where: {
+        AND: [
+          {
+            attributeKey: {
+              key: "userId",
+              workspaceId,
+            },
+            value: userId,
+          },
+          {
+            NOT: {
+              contactId,
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+
+    return !!contactAttribute;
+  }
+);
+
+export const getDistinctAttributeValues = reactCache(
+  async (attributeKeyId: string, limit: number = 50): Promise<string[]> => {
+    validateInputs([attributeKeyId, ZId]);
+
+    try {
+      const results = await prisma.contactAttribute.findMany({
+        where: {
+          attributeKeyId,
+          value: { not: "" },
+        },
+        select: {
+          value: true,
+        },
+        distinct: ["value"],
+        take: limit * 2, // Get more than needed to account for filtering
+        orderBy: { value: "asc" },
+      });
+
+      return results.map((r) => r.value);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        throw new DatabaseError(error.message);
+      }
+      throw error;
+    }
+  }
+);

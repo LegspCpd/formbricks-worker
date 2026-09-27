@@ -1,0 +1,187 @@
+"use client";
+
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { X } from "lucide-react";
+import * as React from "react";
+import { cn } from "@/lib/cn";
+
+const Dialog = DialogPrimitive.Root;
+
+const DialogTrigger = DialogPrimitive.Trigger;
+
+const DialogPortal = ({ children, ...props }: DialogPrimitive.DialogPortalProps) => (
+  <DialogPrimitive.Portal {...props}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">{children}</div>
+  </DialogPrimitive.Portal>
+);
+DialogPortal.displayName = DialogPrimitive.Portal.displayName;
+
+const DialogOverlay = React.forwardRef<
+  React.ComponentRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80 backdrop-blur-xs transition-all duration-100 data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=open]:fade-in",
+      className
+    )}
+    {...props}
+  />
+));
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
+
+interface DialogContentProps {
+  hideCloseButton?: boolean;
+  disableCloseOnOutsideClick?: boolean;
+  /** Keep Escape closing the dialog even when disableCloseOnOutsideClick is set. */
+  closeOnEscape?: boolean;
+  width?: "default" | "wide" | "full" | "narrow";
+  unconstrained?: boolean;
+}
+
+const getDialogWidthClass = (width: "default" | "wide" | "full" | "narrow"): string => {
+  switch (width) {
+    case "full":
+      return "w-[90dvw] max-w-[1400px]";
+    case "wide":
+      return "sm:w-[90dvw] md:w-[720px] lg:w-[960px]";
+    case "narrow":
+      return "sm:w-[512px]";
+    default:
+      return "sm:w-[90dvw] md:w-[720px]";
+  }
+};
+
+const DialogContent = React.forwardRef<
+  React.ComponentRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & DialogContentProps
+>(
+  (
+    {
+      className,
+      children,
+      hideCloseButton,
+      disableCloseOnOutsideClick,
+      closeOnEscape,
+      width = "default",
+      unconstrained = false,
+      ...props
+    },
+    ref
+  ) => {
+    const widthClass = getDialogWidthClass(width);
+
+    return (
+      <DialogPortal>
+        <DialogOverlay />
+        <DialogPrimitive.Content
+          ref={ref}
+          className={cn(
+            "fixed z-50 flex max-h-[90dvh] w-full flex-col gap-4 rounded-t-lg border bg-white p-4 shadow-lg animate-in data-[state=open]:fade-in-90 data-[state=open]:slide-in-from-bottom-10 sm:rounded-lg md:zoom-in-90 md:data-[state=open]:slide-in-from-bottom-0",
+            !unconstrained && "md:overflow-hidden",
+            widthClass,
+            className
+          )}
+          onPointerDownOutside={disableCloseOnOutsideClick ? (e) => e.preventDefault() : undefined}
+          onEscapeKeyDown={
+            disableCloseOnOutsideClick && !closeOnEscape ? (e) => e.preventDefault() : undefined
+          }
+          {...props}>
+          {children}
+          {!hideCloseButton && (
+            <DialogPrimitive.Close className="ring-offset-background focus:ring-ring absolute top-3 right-3 z-20 rounded-xs bg-transparent transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-slate-500">
+              <X className="size-4 text-slate-500" />
+              <span className="sr-only">Close</span>
+            </DialogPrimitive.Close>
+          )}
+        </DialogPrimitive.Content>
+      </DialogPortal>
+    );
+  }
+);
+DialogContent.displayName = DialogPrimitive.Content.displayName;
+
+type DialogHeaderProps = Omit<React.HTMLAttributes<HTMLDivElement>, "dangerouslySetInnerHTML"> & {
+  dangerouslySetInnerHTML?: {
+    __html: string;
+  };
+};
+
+const DialogHeader = ({ className, ...props }: DialogHeaderProps) => (
+  <div
+    className={cn(
+      "sticky top-[-32px] z-10 flex shrink-0 flex-col gap-y-1 bg-white text-left",
+      "[&>svg]:absolute [&>svg]:size-4 [&>svg]:text-primary [&>svg~*]:min-h-4 [&>svg~*]:items-center [&>svg~*]:pl-6 sm:[&>svg~*]:flex",
+      className
+    )}
+    {...props}
+  />
+);
+DialogHeader.displayName = "DialogHeader";
+
+type DialogFooterProps = Omit<React.HTMLAttributes<HTMLDivElement>, "dangerouslySetInnerHTML"> & {
+  dangerouslySetInnerHTML?: {
+    __html: string;
+  };
+};
+
+const DialogFooter = ({ className, ...props }: DialogFooterProps) => (
+  <div
+    className={cn(
+      "bottom-0 z-10 flex shrink-0 flex-col-reverse gap-2 bg-white sm:sticky sm:flex-row sm:justify-end",
+      className
+    )}
+    {...props}
+  />
+);
+
+DialogFooter.displayName = "DialogFooter";
+
+const DialogBody = ({
+  className,
+  unconstrained = false,
+  ...props
+}: React.HTMLAttributes<HTMLElement> & { unconstrained?: boolean }) => (
+  <section
+    className={cn("flex-1 text-sm", !unconstrained && "overflow-y-auto", className)}
+    aria-label="Dialog content"
+    {...props}
+  />
+);
+DialogBody.displayName = "DialogBody";
+
+const DialogTitle = React.forwardRef<
+  React.ComponentRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title
+    ref={ref}
+    className={cn("text-sm leading-none font-medium text-primary", className)}
+    {...props}
+  />
+));
+DialogTitle.displayName = DialogPrimitive.Title.displayName;
+
+const DialogDescription = React.forwardRef<
+  React.ComponentRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description
+    ref={ref}
+    className={cn("font-regular text-sm text-slate-500", className)}
+    {...props}
+  />
+));
+DialogDescription.displayName = DialogPrimitive.Description.displayName;
+
+export {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogBody,
+};

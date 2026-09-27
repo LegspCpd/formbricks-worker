@@ -1,0 +1,181 @@
+import { cleanup } from "@testing-library/react";
+import { afterEach, describe, expect, test } from "vitest";
+import { TActionClassPageUrlRule } from "@formbricks/types/action-classes";
+import { MAX_CALLBACK_URL_LENGTH, getValidatedCallbackUrl, isStringUrl, testURLmatch } from "./url";
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("testURLmatch", () => {
+  // Mock translation function
+  const mockT = (key: string): string => {
+    const translations: Record<string, string> = {
+      "workspace.actions.invalid_regex": "Please use a valid regular expression.",
+      "workspace.actions.invalid_match_type": "The option selected is not available.",
+    };
+    return translations[key] || key;
+  };
+
+  const testCases: [string, string, TActionClassPageUrlRule, boolean][] = [
+    ["https://example.com", "https://example.com", "exactMatch", true],
+    ["https://example.com", "https://different.com", "exactMatch", false],
+    ["https://example.com/page", "example.com", "contains", true],
+    ["https://example.com", "different.com", "contains", false],
+    ["https://example.com/page", "https://example.com", "startsWith", true],
+    ["https://example.com", "https://different.com", "startsWith", false],
+    ["https://example.com/page", "page", "endsWith", true],
+    ["https://example.com/page", "different", "endsWith", false],
+    ["https://example.com", "https://different.com", "notMatch", true],
+    ["https://example.com", "https://example.com", "notMatch", false],
+    ["https://example.com", "different", "notContains", true],
+    ["https://example.com", "example", "notContains", false],
+  ];
+
+  test.each(testCases)("returns %s for %s with rule %s", (testUrl, pageUrlValue, pageUrlRule, expected) => {
+    expect(testURLmatch(testUrl, pageUrlValue, pageUrlRule, mockT)).toBe(expected);
+  });
+
+  describe("matchesRegex rule", () => {
+    test("returns true when URL matches regex pattern", () => {
+      expect(testURLmatch("https://example.com/user/123", "user/\\d+", "matchesRegex", mockT)).toBe(true);
+      expect(testURLmatch("https://example.com/dashboard", "dashboard$", "matchesRegex", mockT)).toBe(true);
+      expect(testURLmatch("https://app.example.com", "^https://app", "matchesRegex", mockT)).toBe(true);
+    });
+
+    test("returns false when URL does not match regex pattern", () => {
+      expect(testURLmatch("https://example.com/user/abc", "user/\\d+", "matchesRegex", mockT)).toBe(false);
+      expect(testURLmatch("https://example.com/settings", "dashboard$", "matchesRegex", mockT)).toBe(false);
+      expect(testURLmatch("https://api.example.com", "^https://app", "matchesRegex", mockT)).toBe(false);
+    });
+
+    test("throws error for invalid regex pattern", () => {
+      expect(() => testURLmatch("https://example.com", "[invalid-regex", "matchesRegex", mockT)).toThrow(
+        "Please use a valid regular expression."
+      );
+
+      expect(() => testURLmatch("https://example.com", "*invalid", "matchesRegex", mockT)).toThrow(
+        "Please use a valid regular expression."
+      );
+    });
+  });
+
+  test("throws an error for invalid match type", () => {
+    expect(() =>
+      testURLmatch(
+        "https://example.com",
+        "https://example.com",
+        "invalidRule" as TActionClassPageUrlRule,
+        mockT
+      )
+    ).toThrow("The option selected is not available.");
+  });
+});
+
+describe("getValidatedCallbackUrl", () => {
+  const WEBAPP_URL = "https://webapp.example.com";
+
+  test("returns the normalized callback URL for a valid callback", () => {
+    expect(getValidatedCallbackUrl("https://webapp.example.com/callback", WEBAPP_URL)).toBe(
+      "https://webapp.example.com/callback"
+    );
+  });
+
+  test("returns null for invalid scheme", () => {
+    expect(getValidatedCallbackUrl("ftp://webapp.example.com/callback", WEBAPP_URL)).toBeNull();
+  });
+
+  test("returns null for invalid domain", () => {
+    expect(getValidatedCallbackUrl("https://malicious.com/callback", WEBAPP_URL)).toBeNull();
+  });
+
+  test("returns null for malformed URL", () => {
+    expect(getValidatedCallbackUrl("not-a-valid-url", WEBAPP_URL)).toBeNull();
+  });
+
+  test("rejects a same-origin URL with a scheme-relative (//) pathname", () => {
+    expect(
+      getValidatedCallbackUrl("https://webapp.example.com//evil.example/path?x=1#frag", WEBAPP_URL)
+    ).toBeNull();
+  });
+
+  test("rejects the dot-segment variant that normalizes to a // pathname", () => {
+    expect(getValidatedCallbackUrl("https://webapp.example.com/.//evil.example/path", WEBAPP_URL)).toBeNull();
+  });
+
+  test("rejects the backslash variant that normalizes to a // pathname", () => {
+    expect(getValidatedCallbackUrl("https://webapp.example.com/\\evil.example", WEBAPP_URL)).toBeNull();
+  });
+
+  test("still accepts a normal single-slash path", () => {
+    expect(getValidatedCallbackUrl("https://webapp.example.com/dashboard", WEBAPP_URL)).toBe(
+      "https://webapp.example.com/dashboard"
+    );
+  });
+
+  /**
+   * A callback rides in the request line, and nginx returns a bare 414 once that exceeds one 8K buffer.
+   * Rejecting it here gives every caller something to act on: `proxy.ts` answers 400, the auth flows
+   * fall back to WEBAPP_URL (ENG-2783).
+   */
+  test("rejects a callback URL longer than the cap", () => {
+    const tooLong = `https://webapp.example.com/x?padding=${"a".repeat(MAX_CALLBACK_URL_LENGTH)}`;
+
+    expect(tooLong.length).toBeGreaterThan(MAX_CALLBACK_URL_LENGTH);
+    expect(getValidatedCallbackUrl(tooLong, WEBAPP_URL)).toBeNull();
+  });
+
+  test("accepts a callback URL right at the cap", () => {
+    const prefix = "https://webapp.example.com/x?padding=";
+    const atCap = prefix + "a".repeat(MAX_CALLBACK_URL_LENGTH - prefix.length);
+
+    expect(atCap).toHaveLength(MAX_CALLBACK_URL_LENGTH);
+    expect(getValidatedCallbackUrl(atCap, WEBAPP_URL)).toBe(atCap);
+  });
+
+  /**
+   * `toString()` percent-encodes, up to ninefold for a 3-byte character, so a check on the input let
+   * through callbacks whose returned form was over the cap. Those then failed the re-validation in
+   * `completeSsoRecovery` and dropped the user on the app root instead of their destination — a
+   * legitimate long callback failing exactly like a malicious one, which is what hid it.
+   */
+  test("rejects a callback whose encoded form exceeds the cap, though its input does not", () => {
+    const input = `https://webapp.example.com/x?search=${"字".repeat(227)}`;
+
+    expect(input.length).toBeLessThan(MAX_CALLBACK_URL_LENGTH);
+    expect(encodeURI(input).length).toBeGreaterThan(MAX_CALLBACK_URL_LENGTH);
+    expect(getValidatedCallbackUrl(input, WEBAPP_URL)).toBeNull();
+  });
+
+  test.each([
+    ["a plain path", "https://webapp.example.com/dashboard"],
+    ["a query string", "https://webapp.example.com/x?a=1&b=2"],
+    ["multi-byte characters", `https://webapp.example.com/x?search=${"字".repeat(50)}`],
+    ["a root-relative path", "/invite?token=abc"],
+  ])("accepts its own output for %s, so a stored callback re-validates", (_label, input) => {
+    const once = getValidatedCallbackUrl(input, WEBAPP_URL);
+
+    expect(once).not.toBeNull();
+    // The property that matters: anything this function hands back, it will take back. Without it a
+    // value can be validated on the way in and rejected on the way out.
+    expect(getValidatedCallbackUrl(once, WEBAPP_URL)).toBe(once);
+  });
+
+  test("leaves room for the widest callback the app actually mints", () => {
+    // An invite link, `/invite?token=<jwt>`, is the longest legitimate callback in the app at roughly
+    // 640 characters with a long address. If that ever approaches the cap, this fails before users do.
+    const inviteCallbackUrl = `https://webapp.example.com/invite?token=${"t".repeat(600)}`;
+
+    expect(getValidatedCallbackUrl(inviteCallbackUrl, WEBAPP_URL)).toBe(inviteCallbackUrl);
+  });
+});
+
+describe("isStringUrl", () => {
+  test("returns true for valid URL", () => {
+    expect(isStringUrl("https://example.com")).toBe(true);
+  });
+
+  test("returns false for invalid URL", () => {
+    expect(isStringUrl("not-a-valid-url")).toBe(false);
+  });
+});

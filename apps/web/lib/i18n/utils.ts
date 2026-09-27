@@ -1,0 +1,279 @@
+import { LANGUAGE_CANONICAL_MAP } from "@formbricks/i18n-utils/canonical";
+import { iso639Languages } from "@formbricks/i18n-utils/utils";
+import { TI18nString } from "@formbricks/types/i18n";
+import { TSurveyLanguage } from "@formbricks/types/surveys/types";
+import { TLanguage } from "@formbricks/types/workspace";
+import { structuredClone } from "@/lib/pollyfills/structuredClone";
+
+// Helper function to create an i18nString from a regular string.
+export const createI18nString = (
+  text: string | TI18nString,
+  languages: string[],
+  targetLanguageCode?: string
+): TI18nString => {
+  if (typeof text === "object") {
+    // It's already an i18n object, so clone it
+    const i18nString: TI18nString = structuredClone(text);
+    // Add new language keys with empty strings if they don't exist
+    languages?.forEach((language) => {
+      if (!(language in i18nString)) {
+        i18nString[language] = "";
+      }
+    });
+
+    // Remove language keys that are not in the languages array
+    Object.keys(i18nString).forEach((key) => {
+      if (key !== (targetLanguageCode ?? "default") && languages && !languages.includes(key)) {
+        delete i18nString[key];
+      }
+    });
+
+    return i18nString;
+  } else {
+    // It's a regular string, so create a new i18n object
+    const i18nString = {
+      [targetLanguageCode ?? "default"]: text,
+    };
+
+    // Initialize all provided languages with empty strings
+    languages?.forEach((language) => {
+      if (language !== (targetLanguageCode ?? "default")) {
+        i18nString[language] = "";
+      }
+    });
+
+    return i18nString;
+  }
+};
+
+// Type guard to check if an object is an I18nString
+export const isI18nObject = (obj: unknown): obj is TI18nString => {
+  return typeof obj === "object" && obj !== null && Object.keys(obj).includes("default");
+};
+
+export const isLabelValidForAllLanguages = (label: TI18nString, languages: string[]): boolean => {
+  return languages.every((language) => label[language] && label[language].trim() !== "");
+};
+
+export const getLocalizedValue = (value: TI18nString | undefined, languageId: string): string => {
+  if (!value) {
+    return "";
+  }
+  if (isI18nObject(value)) {
+    if (value[languageId]) {
+      return value[languageId];
+    }
+    return "";
+  }
+  return "";
+};
+
+export const extractLanguageCodes = (surveyLanguages: TSurveyLanguage[]): string[] => {
+  if (!surveyLanguages) return [];
+  return surveyLanguages.map((surveyLanguage) =>
+    surveyLanguage.default ? "default" : surveyLanguage.language.code
+  );
+};
+
+export const getEnabledLanguages = (surveyLanguages: TSurveyLanguage[]) => {
+  return surveyLanguages.filter((surveyLanguage) => surveyLanguage.enabled);
+};
+
+export const extractLanguageIds = (languages: TLanguage[]): string[] => {
+  return languages.map((language) => language.code);
+};
+
+export const getLanguageCode = (surveyLanguages: TSurveyLanguage[], languageCode: string | null) => {
+  if (!surveyLanguages?.length || !languageCode) return "default";
+  const language = surveyLanguages.find(
+    (surveyLanguage) => surveyLanguage.language.code.toLowerCase() === languageCode.toLowerCase()
+  );
+  return language?.default ? "default" : language?.language.code || "default";
+};
+
+export const iso639Identifiers = iso639Languages.map((language) => language.code);
+
+// Helper function to add language keys to a multi-language object (e.g. survey or question)
+// Iterates over the object recursively and adds empty strings for new language keys
+export const addMultiLanguageLabels = (object: unknown, languageSymbols: string[]): any => {
+  // Helper function to add language keys to a multi-language object
+  function addLanguageKeys(obj: { default: string; [key: string]: string }) {
+    languageSymbols.forEach((lang) => {
+      if (!obj.hasOwnProperty(lang)) {
+        obj[lang] = ""; // Add empty string for new language keys
+      }
+    });
+  }
+
+  // Recursive function to process an object or array
+  function processObject(obj: unknown) {
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => processObject(item));
+    } else if (obj && typeof obj === "object") {
+      const record = obj as Record<string, unknown>;
+      for (const key in record) {
+        if (record.hasOwnProperty(key)) {
+          if (key === "default" && typeof record[key] === "string") {
+            addLanguageKeys(record as unknown as { default: string; [key: string]: string });
+          } else {
+            processObject(record[key]);
+          }
+        }
+      }
+    }
+  }
+
+  // Start processing the question object
+  processObject(object);
+
+  return object;
+};
+
+export const appLanguages = [
+  {
+    code: "de-DE",
+    label: {
+      "en-US": "German",
+      native: "Deutsch",
+    },
+  },
+  {
+    code: "en-US",
+    label: {
+      "en-US": "English (US)",
+      native: "English (US)",
+    },
+  },
+  {
+    code: "es-ES",
+    label: {
+      "en-US": "Spanish",
+      native: "Español",
+    },
+  },
+  {
+    code: "fr-FR",
+    label: {
+      "en-US": "French",
+      native: "Français",
+    },
+  },
+  {
+    code: "hu-HU",
+    label: {
+      "en-US": "Hungarian",
+      native: "Magyar",
+    },
+  },
+  {
+    code: "ja-JP",
+    label: {
+      "en-US": "Japanese",
+      native: "日本語",
+    },
+  },
+  {
+    code: "nl-NL",
+    label: {
+      "en-US": "Dutch",
+      native: "Nederlands",
+    },
+  },
+  {
+    code: "pt-BR",
+    label: {
+      "en-US": "Portuguese (Brazil)",
+      native: "Português (Brasil)",
+    },
+  },
+  {
+    code: "pt-PT",
+    label: {
+      "en-US": "Portuguese (Portugal)",
+      native: "Português (Portugal)",
+    },
+  },
+  {
+    code: "ro-RO",
+    label: {
+      "en-US": "Romanian",
+      native: "Română",
+    },
+  },
+  {
+    code: "ru-RU",
+    label: {
+      "en-US": "Russian",
+      native: "Русский",
+    },
+  },
+  {
+    code: "sv-SE",
+    label: {
+      "en-US": "Swedish",
+      native: "Svenska",
+    },
+  },
+  {
+    code: "tr-TR",
+    label: {
+      "en-US": "Turkish",
+      native: "Türkçe",
+    },
+  },
+  {
+    code: "zh-Hans-CN",
+    label: {
+      "en-US": "Chinese (Simplified)",
+      native: "简体中文",
+    },
+  },
+  {
+    code: "zh-Hant-TW",
+    label: {
+      "en-US": "Chinese (Traditional)",
+      native: "繁體中文",
+    },
+  },
+];
+
+export const sortedAppLanguages = [...appLanguages].sort((a, b) =>
+  a.label["en-US"].localeCompare(b.label["en-US"])
+);
+
+// Reverse of the canonical map: canonical code → the legacy codes that canonicalize to it (excluding
+// the identity). Using the real map (not a mechanical region-strip) is what surfaces alias codes a
+// strip would miss — e.g. `fil-PH` → `tl`, `ak-GH` → `ak`/`tw`, `zh-Hant-TW` → `zh-Hant`/`zh-TW`.
+const LEGACY_CODES_BY_CANONICAL: Readonly<Record<string, string[]>> = Object.entries(
+  LANGUAGE_CANONICAL_MAP
+).reduce<Record<string, string[]>>((reverse, [legacy, canonical]) => {
+  if (legacy !== canonical) {
+    (reverse[canonical] ??= []).push(legacy);
+  }
+  return reverse;
+}, {});
+
+/**
+ * Transitional SDK back-compat (ENG-1067).
+ *
+ * Language codes were canonicalized to region-tagged BCP-47 (`de` → `de-DE`). SDK clients pick a
+ * survey's display language by matching the user's language against the survey languages by *exact*
+ * code — they don't canonicalize. So while older clients are still in the wild, the SDK-facing surface
+ * keeps speaking the legacy code(s) on both sides:
+ *   - the client environment serializer exposes a duplicate entry for each legacy alias next to the
+ *     canonical language, and
+ *   - the user-state response de-canonicalizes the contact's language to a legacy form,
+ * so the two line up and exact matching still works. The DB stays canonical throughout; the renderer
+ * canonicalizes whatever it receives, so content lookup is unaffected.
+ *
+ * Both call sites MUST use this single helper so the codes they emit stay aligned.
+ *
+ * Remove once SDK clients holding pre-canonicalization codes have drained.
+ *
+ * @returns the known legacy codes that canonicalize to `canonicalCode` (`fil-PH` → `["tl"]`,
+ *   `ak-GH` → `["ak","tw"]`); empty when the code has no legacy aliases.
+ */
+export const toLegacyLanguageCodes = (canonicalCode: string): string[] =>
+  // Return a fresh copy, never the cached array by reference, so a caller mutating the result
+  // (sort/push/etc.) can't corrupt LEGACY_CODES_BY_CANONICAL and poison every later lookup.
+  [...(LEGACY_CODES_BY_CANONICAL[canonicalCode] ?? [])];

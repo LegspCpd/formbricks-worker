@@ -1,0 +1,212 @@
+import * as React from "react";
+import { ElementError, getElementErrorAria } from "@/components/general/element-error";
+import { ElementHeader } from "@/components/general/element-header";
+import { Label } from "@/components/general/label";
+import { useRovingRadioGroup } from "@/lib/use-roving-radio-group";
+import { cn, getRTLScaleOptionClasses } from "@/lib/utils";
+
+interface NPSProps {
+  /** Unique identifier for the element container */
+  elementId: string;
+  /** The main element or prompt text displayed as the headline */
+  headline: string;
+  /** Optional descriptive text displayed below the headline */
+  description?: string;
+  /** Unique identifier for the NPS group */
+  inputId: string;
+  /** Currently selected NPS value (0 to 10) */
+  value?: number;
+  /** Callback function called when NPS value changes */
+  onChange: (value: number) => void;
+  /** Optional label for the lower end of the scale */
+  lowerLabel?: string;
+  /** Optional label for the upper end of the scale */
+  upperLabel?: string;
+  /** Whether color coding is enabled */
+  colorCoding?: boolean;
+  /** Whether the field is required (shows asterisk indicator) */
+  required?: boolean;
+  /** Custom label for the required indicator */
+  requiredLabel?: string;
+  /** Error message to display */
+  errorMessage?: string;
+  /** Text direction: 'ltr' (left-to-right), 'rtl' (right-to-left), or 'auto' (auto-detect from content) */
+  dir?: "ltr" | "rtl" | "auto";
+  /** Whether the controls are disabled */
+  disabled?: boolean;
+  /** Image URL to display above the headline */
+  imageUrl?: string;
+  /** Video URL to display above the headline */
+  videoUrl?: string;
+}
+
+function NPS({
+  elementId,
+  headline,
+  description,
+  inputId,
+  value,
+  onChange,
+  lowerLabel,
+  upperLabel,
+  colorCoding = false,
+  required = false,
+  requiredLabel,
+  errorMessage,
+  dir = "auto",
+  disabled = false,
+  imageUrl,
+  videoUrl,
+}: Readonly<NPSProps>): React.JSX.Element {
+  const errorAria = getElementErrorAria(inputId, errorMessage);
+
+  const [hoveredValue, setHoveredValue] = React.useState<number | null>(null);
+
+  // Ensure value is within valid range (0-10)
+  const currentValue = value !== undefined && value >= 0 && value <= 10 ? value : undefined;
+
+  // Handle NPS selection
+  const handleSelect = (npsValue: number): void => {
+    if (!disabled) {
+      onChange(npsValue);
+    }
+  };
+
+  // Keyboard interaction lives on the native radio inputs; selection is
+  // decoupled from arrow-key focus moves because selecting can trigger
+  // auto-progress (see useRovingRadioGroup).
+  const npsValues = Array.from({ length: 11 }, (_, i) => String(i));
+  const { getRadioProps, keyboardValue } = useRovingRadioGroup({
+    values: npsValues,
+    selectedValue: currentValue === undefined ? undefined : String(currentValue),
+    onSelect: (v) => {
+      handleSelect(Number(v));
+    },
+  });
+
+  // Pointer hover, or the cell the respondent arrowed to — but never the card's mount autofocus,
+  // which painted 0 with the grey hover fill before the respondent had touched anything (ENG-2288).
+  // See `keyboardValue` in useRovingRadioGroup, and the same comment in rating.tsx.
+  const previewValue = hoveredValue ?? (keyboardValue === null ? null : Number(keyboardValue));
+
+  // Get NPS option color for color coding
+  const getNPSOptionColor = (idx: number): string => {
+    if (idx > 8) return "bg-emerald-100"; // 9-10: Promoters (green)
+    if (idx > 6) return "bg-orange-100"; // 7-8: Passives (orange)
+    return "bg-rose-100"; // 0-6: Detractors (red)
+  };
+
+  // Render NPS option (0-10)
+  const renderNPSOption = (number: number): React.JSX.Element => {
+    const isSelected = currentValue === number;
+    const isHovered = previewValue === number;
+    const isLast = number === 10; // Last option is 10
+    const isFirst = number === 0; // First option is 0
+
+    // Use CSS logical properties for RTL-aware borders and border radius
+    // The fieldset's dir attribute automatically handles direction
+    const { borderRadiusClasses, borderClasses } = getRTLScaleOptionClasses(isFirst, isLast);
+
+    return (
+      <label
+        key={number}
+        data-fb-scale-cell
+        className={cn(
+          "text-input-text font-input font-input-weight relative flex w-full cursor-pointer items-center justify-center overflow-hidden transition-colors",
+          borderClasses,
+          isSelected
+            ? "bg-brand-20 border-brand z-10 -ml-[1px] border-2 first:ml-0"
+            : "border-input-border bg-input-bg",
+          borderRadiusClasses,
+          isHovered && !isSelected && "bg-input-selected-bg",
+          colorCoding ? "min-h-[47px]" : "min-h-[41px]",
+          disabled && "cursor-not-allowed opacity-50"
+        )}
+        onMouseEnter={() => {
+          if (!disabled) {
+            setHoveredValue(number);
+          }
+        }}
+        onMouseLeave={() => {
+          setHoveredValue(null);
+        }}>
+        {colorCoding ? (
+          <div className={cn("absolute top-0 left-0 h-[6px] w-full", getNPSOptionColor(number))} />
+        ) : null}
+        <input
+          type="radio"
+          name={inputId}
+          value={number}
+          checked={isSelected}
+          onChange={() => {
+            handleSelect(number);
+          }}
+          disabled={disabled}
+          className="sr-only"
+          aria-label={`Rate ${String(number)} out of 10`}
+          {...getRadioProps(String(number))}
+        />
+        <span className="text-sm">{number}</span>
+      </label>
+    );
+  };
+
+  // Generate NPS options (0-10)
+  const npsOptions = Array.from({ length: 11 }, (_, i) => i);
+
+  return (
+    <div className="w-full space-y-4" id={elementId} dir={dir}>
+      {/* Headline */}
+      <ElementHeader
+        headlineId={`${inputId}-headline`}
+        headline={headline}
+        description={description}
+        required={required}
+        requiredLabel={requiredLabel}
+        imageUrl={imageUrl}
+        videoUrl={videoUrl}
+      />
+
+      {/* NPS Options */}
+      <div className="relative" data-element-input>
+        <ElementError errorMessage={errorMessage} dir={dir} id={errorAria.errorId} />
+        {/* The options are native radios sharing one `name`, so role="radiogroup" is accurate and
+            makes aria-required/aria-invalid valid on the group — ARIA 1.2 dropped aria-invalid from
+            the global attributes, and a bare <fieldset> (role="group") supports neither. A composite
+            role makes the accessible name load-bearing (screen readers announce it on entry), so the
+            group is named by the headline like every other grouping element here, rather than by an
+            untranslated <legend> that omitted the question. The roving-tabindex model lives on the
+            inputs, so the container role does not touch it. */}
+        <fieldset
+          className="w-full px-[2px]"
+          dir={dir}
+          role="radiogroup"
+          aria-labelledby={`${inputId}-headline`}
+          aria-required={required}
+          aria-invalid={errorAria.ariaInvalid}
+          aria-describedby={errorAria.ariaDescribedBy}>
+          <div className="flex w-full">{npsOptions.map((number) => renderNPSOption(number))}</div>
+
+          {/* Labels */}
+          {(lowerLabel ?? upperLabel) ? (
+            <div className="mt-2 flex justify-between gap-8 px-1.5">
+              {lowerLabel ? (
+                <Label variant="card" className="max-w-[50%] leading-6" dir={dir}>
+                  {lowerLabel}
+                </Label>
+              ) : null}
+              {upperLabel ? (
+                <Label variant="card" className="max-w-[50%] text-right leading-6" dir={dir}>
+                  {upperLabel}
+                </Label>
+              ) : null}
+            </div>
+          ) : null}
+        </fieldset>
+      </div>
+    </div>
+  );
+}
+
+export { NPS };
+export type { NPSProps };

@@ -1,0 +1,413 @@
+import { z } from "zod";
+import { ZStorageUrl, isSafeLinkUrl } from "../common";
+import { ZI18nString } from "../i18n";
+import { ZAllowedFileExtension } from "../storage";
+import { TSurveyElementTypeEnum } from "./constants";
+import { FORBIDDEN_IDS } from "./validation";
+import { ZValidationRules } from "./validation-rules";
+
+/**
+ * RE-EXPORTING FOR BACKWARDS COMPATIBILITY AND CONVENIENCE
+ *
+ * TSurveyElementTypeEnum is defined in `constants.ts` to avoid circular dependencies
+ * and ensure that the Zod library is not included in bundles that only need the Enum value.
+ *
+ * However, we re-export it here so that most consumers (who also need the Zod schemas)
+ * can import everything from a single file (`elements.ts`).
+ */
+export { TSurveyElementTypeEnum } from "./constants";
+
+// Element ID validation (same rules as questions - USER EDITABLE)
+export const ZSurveyElementId = z.string().superRefine((id, ctx) => {
+  if (FORBIDDEN_IDS.includes(id)) {
+    ctx.addIssue({
+      code: "custom",
+      message: `Element id is not allowed`,
+    });
+  }
+
+  if (id.includes(" ")) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Element id not allowed, avoid using spaces.",
+    });
+  }
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Element id not allowed, use only alphanumeric characters, hyphens, or underscores.",
+    });
+  }
+});
+
+export type TSurveyElementId = z.infer<typeof ZSurveyElementId>;
+
+// Validation logic operator - determines how multiple validation rules are combined
+export const ZValidationLogic = z.enum(["and", "or"]);
+export type TValidationLogic = z.infer<typeof ZValidationLogic>;
+
+// Combined validation object that includes both rules and logic
+// Uses general TValidationRule[] type instead of element-specific narrowed types
+export const ZValidation = z.object({
+  rules: ZValidationRules,
+  logic: ZValidationLogic.prefault("and"),
+});
+
+// Base element (like ZSurveyQuestionBase but WITHOUT logic, buttonLabel, backButtonLabel)
+// Note: validation is not included in base - each element type will add its own narrowed schema
+export const ZSurveyElementBase = z.object({
+  id: ZSurveyElementId,
+  type: z.enum(TSurveyElementTypeEnum),
+  headline: ZI18nString,
+  subheader: ZI18nString.optional(),
+  imageUrl: ZStorageUrl.optional(),
+  videoUrl: ZStorageUrl.optional(),
+  required: z.boolean(),
+  scale: z.enum(["number", "smiley", "star"]).optional(),
+  range: z.union([z.literal(5), z.literal(3), z.literal(4), z.literal(7), z.literal(10)]).optional(),
+  isDraft: z.boolean().optional(),
+});
+
+// OpenText Element
+export const ZSurveyOpenTextElementInputType = z.enum(["text", "email", "url", "number", "phone"]);
+export type TSurveyOpenTextElementInputType = z.infer<typeof ZSurveyOpenTextElementInputType>;
+
+export const ZSurveyOpenTextElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.OpenText),
+  placeholder: ZI18nString.optional(),
+  longAnswer: z.boolean().optional(),
+  inputType: ZSurveyOpenTextElementInputType.optional().prefault("text"),
+  insightsEnabled: z.boolean().prefault(false).optional(),
+  charLimit: z
+    .object({
+      enabled: z.boolean().prefault(false).optional(),
+      min: z.number().optional(),
+      max: z.number().optional(),
+    })
+    .prefault({ enabled: false }),
+  validation: ZValidation.optional(),
+}).superRefine((data, ctx) => {
+  if (data.charLimit.enabled && data.charLimit.min === undefined && data.charLimit.max === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Enter the values for either minimum or maximum field",
+    });
+  }
+
+  if (
+    (data.charLimit.min !== undefined && data.charLimit.min < 0) ||
+    (data.charLimit.max !== undefined && data.charLimit.max < 0)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      message: "The character limit values should be positive",
+    });
+  }
+
+  if (
+    data.charLimit.min !== undefined &&
+    data.charLimit.max !== undefined &&
+    data.charLimit.min > data.charLimit.max
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      message: "Minimum value cannot be greater than the maximum value",
+    });
+  }
+});
+
+export type TSurveyOpenTextElement = z.infer<typeof ZSurveyOpenTextElement>;
+
+// Consent Element
+export const ZSurveyConsentElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Consent),
+  label: ZI18nString,
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyConsentElement = z.infer<typeof ZSurveyConsentElement>;
+
+// Multiple Choice Elements
+export const ZSurveyElementChoice = z.object({
+  id: z.string(),
+  label: ZI18nString,
+});
+
+export type TSurveyElementChoice = z.infer<typeof ZSurveyElementChoice>;
+
+export const ZShuffleOption = z.enum([
+  "none",
+  "all",
+  "exceptLast",
+  "reverseOrderOccasionally",
+  "reverseOrderExceptLast",
+]);
+export type TShuffleOption = z.infer<typeof ZShuffleOption>;
+
+export const ZMultipleChoiceOptionDisplayType = z.enum(["list", "dropdown"]);
+export type TMultipleChoiceOptionDisplayType = z.infer<typeof ZMultipleChoiceOptionDisplayType>;
+
+// Multiple Choice Single Element
+export const ZSurveyMultipleChoiceSingleElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.MultipleChoiceSingle),
+  choices: z.array(ZSurveyElementChoice).min(2, {
+    error: "Multiple Choice Element must have at least two choices",
+  }),
+  shuffleOption: ZShuffleOption.optional(),
+  otherOptionPlaceholder: ZI18nString.optional(),
+  displayType: ZMultipleChoiceOptionDisplayType.optional(),
+});
+
+// Multiple Choice Multi Element
+export const ZSurveyMultipleChoiceMultiElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.MultipleChoiceMulti),
+  choices: z.array(ZSurveyElementChoice).min(2, {
+    error: "Multiple Choice Element must have at least two choices",
+  }),
+  shuffleOption: ZShuffleOption.optional(),
+  otherOptionPlaceholder: ZI18nString.optional(),
+  validation: ZValidation.optional(),
+  displayType: ZMultipleChoiceOptionDisplayType.optional(),
+});
+
+// Union type for Multiple Choice Elements
+export const ZSurveyMultipleChoiceElement = z.union([
+  ZSurveyMultipleChoiceSingleElement,
+  ZSurveyMultipleChoiceMultiElement,
+]);
+
+export type TSurveyMultipleChoiceElement = z.infer<typeof ZSurveyMultipleChoiceElement>;
+
+// NPS Element
+export const ZSurveyNPSElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.NPS),
+  lowerLabel: ZI18nString.optional(),
+  upperLabel: ZI18nString.optional(),
+  isColorCodingEnabled: z.boolean().optional().prefault(false),
+});
+
+export type TSurveyNPSElement = z.infer<typeof ZSurveyNPSElement>;
+
+// CTA Element
+export const ZSurveyCTAElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.CTA),
+  buttonExternal: z.boolean().optional().prefault(false),
+  buttonUrl: z.string().optional(),
+  ctaButtonLabel: ZI18nString.optional(),
+}).superRefine((data, ctx) => {
+  // When buttonExternal is true, buttonUrl and ctaButtonLabel are required
+  if (data.buttonExternal) {
+    if (!data.buttonUrl || data.buttonUrl.trim() === "") {
+      ctx.addIssue({
+        code: "custom",
+        message: "Button URL is required when external button is enabled",
+        path: ["buttonUrl"],
+      });
+    } else if (!isSafeLinkUrl(data.buttonUrl)) {
+      // Validate URL format only when buttonExternal is true and URL is provided. The scheme has to be
+      // constrained, not just parseable: the renderer hands this value to `window.open()`, so accepting
+      // any `z.url()`-parseable value (which includes `javascript:`) made an editable survey field
+      // stored XSS — on a link survey that executes on the Formbricks origin.
+      ctx.addIssue({
+        code: "custom",
+        message: "Please enter a valid http(s), mailto: or tel: URL",
+        path: ["buttonUrl"],
+      });
+    }
+
+    if (!data.ctaButtonLabel?.default || data.ctaButtonLabel.default.trim() === "") {
+      ctx.addIssue({
+        code: "custom",
+        message: "Button label is required when external button is enabled",
+        path: ["ctaButtonLabel"],
+      });
+    }
+  }
+});
+
+export type TSurveyCTAElement = z.infer<typeof ZSurveyCTAElement>;
+
+// Rating Element
+export const ZSurveyRatingElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Rating),
+  scale: z.enum(["number", "smiley", "star"]),
+  range: z.union([z.literal(5), z.literal(3), z.literal(4), z.literal(6), z.literal(7), z.literal(10)]),
+  lowerLabel: ZI18nString.optional(),
+  upperLabel: ZI18nString.optional(),
+  isColorCodingEnabled: z.boolean().optional().prefault(false),
+});
+
+export type TSurveyRatingElement = z.infer<typeof ZSurveyRatingElement>;
+
+// Picture Selection Element
+export const ZSurveyPictureChoice = z.object({
+  id: z.string(),
+  imageUrl: ZStorageUrl,
+});
+
+export type TSurveyPictureChoice = z.infer<typeof ZSurveyPictureChoice>;
+
+export const ZSurveyPictureSelectionElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.PictureSelection),
+  allowMulti: z.boolean().optional().prefault(false),
+  choices: z.array(ZSurveyPictureChoice).min(2, {
+    error: "Picture Selection element must have a minimum of 2 choices",
+  }),
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyPictureSelectionElement = z.infer<typeof ZSurveyPictureSelectionElement>;
+
+// Date Element
+export const ZSurveyDateElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Date),
+  html: ZI18nString.optional(),
+  format: z.enum(["M-d-y", "d-M-y", "y-M-d"]),
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyDateElement = z.infer<typeof ZSurveyDateElement>;
+
+// File Upload Element
+export const ZSurveyFileUploadElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.FileUpload),
+  allowMultipleFiles: z.boolean(),
+  maxSizeInMB: z.number().optional(),
+  allowedFileExtensions: z.array(ZAllowedFileExtension).optional(),
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyFileUploadElement = z.infer<typeof ZSurveyFileUploadElement>;
+
+// Cal Element
+export const ZSurveyCalElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Cal),
+  calUserName: z.string().min(1, {
+    error: "Cal user name is required",
+  }),
+  calHost: z.string().optional(),
+});
+
+export type TSurveyCalElement = z.infer<typeof ZSurveyCalElement>;
+
+// Matrix Element
+export const ZSurveyMatrixElementChoice = z.object({
+  id: z.string(),
+  label: ZI18nString,
+});
+
+export type TSurveyMatrixElementChoice = z.infer<typeof ZSurveyMatrixElementChoice>;
+
+export const ZSurveyMatrixElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Matrix),
+  rows: z.array(ZSurveyMatrixElementChoice),
+  columns: z.array(ZSurveyMatrixElementChoice),
+  shuffleOption: ZShuffleOption.optional().prefault("none"),
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyMatrixElement = z.infer<typeof ZSurveyMatrixElement>;
+
+// Address Element
+const ZToggleInputConfig = z.object({
+  show: z.boolean(),
+  required: z.boolean(),
+  placeholder: ZI18nString,
+});
+
+export type TInputFieldConfig = z.infer<typeof ZToggleInputConfig>;
+
+export const ZSurveyAddressElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Address),
+  addressLine1: ZToggleInputConfig,
+  addressLine2: ZToggleInputConfig,
+  city: ZToggleInputConfig,
+  state: ZToggleInputConfig,
+  zip: ZToggleInputConfig,
+  country: ZToggleInputConfig,
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyAddressElement = z.infer<typeof ZSurveyAddressElement>;
+
+// Ranking Element
+export const ZSurveyRankingElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.Ranking),
+  choices: z
+    .array(ZSurveyElementChoice)
+    .min(2, {
+      error: "Ranking Element must have at least two options",
+    })
+    .max(25, {
+      error: "Ranking Element can have at most 25 options",
+    }),
+  otherOptionPlaceholder: ZI18nString.optional(),
+  shuffleOption: ZShuffleOption.optional(),
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyRankingElement = z.infer<typeof ZSurveyRankingElement>;
+
+// Contact Info Element
+export const ZSurveyContactInfoElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.ContactInfo),
+  firstName: ZToggleInputConfig,
+  lastName: ZToggleInputConfig,
+  email: ZToggleInputConfig,
+  phone: ZToggleInputConfig,
+  company: ZToggleInputConfig,
+  validation: ZValidation.optional(),
+});
+
+export type TSurveyContactInfoElement = z.infer<typeof ZSurveyContactInfoElement>;
+
+// CSAT Element
+export const ZSurveyCsatElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.CSAT),
+  scale: z.enum(["number", "smiley", "star"]),
+  range: z.literal(5),
+  lowerLabel: ZI18nString.optional(),
+  upperLabel: ZI18nString.optional(),
+  isColorCodingEnabled: z.boolean().optional().prefault(false),
+});
+
+export type TSurveyCsatElement = z.infer<typeof ZSurveyCsatElement>;
+
+// CES Element
+export const ZSurveyCesElement = ZSurveyElementBase.extend({
+  type: z.literal(TSurveyElementTypeEnum.CES),
+  scale: z.enum(["number", "smiley", "star"]),
+  range: z.union([z.literal(5), z.literal(7)]),
+  lowerLabel: ZI18nString.optional(),
+  upperLabel: ZI18nString.optional(),
+  isColorCodingEnabled: z.boolean().optional().prefault(false),
+});
+
+export type TSurveyCesElement = z.infer<typeof ZSurveyCesElement>;
+
+// Union of all element types
+export const ZSurveyElement = z.union([
+  ZSurveyOpenTextElement,
+  ZSurveyConsentElement,
+  ZSurveyMultipleChoiceSingleElement,
+  ZSurveyMultipleChoiceMultiElement,
+  ZSurveyNPSElement,
+  ZSurveyCTAElement,
+  ZSurveyRatingElement,
+  ZSurveyPictureSelectionElement,
+  ZSurveyDateElement,
+  ZSurveyFileUploadElement,
+  ZSurveyCalElement,
+  ZSurveyMatrixElement,
+  ZSurveyAddressElement,
+  ZSurveyRankingElement,
+  ZSurveyContactInfoElement,
+  ZSurveyCsatElement,
+  ZSurveyCesElement,
+]);
+
+export type TSurveyElement = z.infer<typeof ZSurveyElement>;
+
+export const ZSurveyElements = z.array(ZSurveyElement);
+export type TSurveyElements = z.infer<typeof ZSurveyElements>;

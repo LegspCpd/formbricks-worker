@@ -1,0 +1,368 @@
+import { CommandQueue, CommandType } from "@/lib/common/command-queue";
+import { Config } from "@/lib/common/config";
+import { Logger } from "@/lib/common/logger";
+import { TimeoutStack } from "@/lib/common/timeout-stack";
+import { evaluateNoCodeConfigClick, handleUrlFilters } from "@/lib/common/utils";
+import { trackNoCodeAction } from "@/lib/survey/action";
+import { setIsSurveyRunning } from "@/lib/survey/widget";
+import { type TWorkspaceStateActionClass } from "@/types/config";
+import { type Result } from "@/types/error";
+
+// Factory for creating context-specific tracking handlers
+export const createTrackNoCodeActionWithContext = (context: string) => {
+  return async (actionName: string): Promise<Result<void, unknown>> => {
+    const result = await trackNoCodeAction(actionName);
+    if (!result.ok) {
+      const errorToLog = result.error as { message?: string };
+      const errorMessageText = errorToLog.message ?? "An unknown error occurred.";
+      console.error(
+        `🧱 Formbricks - Error in no-code ${context} action '${actionName}': ${errorMessageText}`,
+        errorToLog
+      );
+    }
+    return result;
+  };
+};
+
+const trackNoCodePageViewActionHandler = createTrackNoCodeActionWithContext("page view");
+const trackNoCodeClickActionHandler = createTrackNoCodeActionWithContext("click");
+const trackNoCodeExitIntentActionHandler = createTrackNoCodeActionWithContext("exit intent");
+const trackNoCodeScrollActionHandler = createTrackNoCodeActionWithContext("scroll");
+const trackNoCodeTimeOnPageActionHandler = createTrackNoCodeActionWithContext("time on page");
+
+// Time on Page timer state per action name
+interface TimeOnPageRunning {
+  status: "running";
+  pageKey: string;
+  timerId: ReturnType<typeof setTimeout>;
+}
+
+interface TimeOnPageFired {
+  status: "fired";
+  pageKey: string;
+}
+
+type TimeOnPageState = TimeOnPageRunning | TimeOnPageFired;
+const timeOnPageTimers = new Map<string, TimeOnPageState>();
+
+// Event types for various listeners
+const events = ["hashchange", "popstate", "pushstate", "replacestate", "load"];
+
+/**
+ * Drops an action's scheduled survey and reports whether there was really one to cancel.
+ *
+ * Navigating away from an action's URL should call off a survey that is still waiting out its
+ * `delay`, and release the `isSurveyRunning` guard so a later legitimate trigger can still show
+ * something. A survey that already rendered is the opposite case: it is on screen, and releasing the
+ * guard for it lets the next trigger stack a second survey on top of the first (ENG-2849). Its entry
+ * is still dropped — it is spent either way — but `false` keeps the guard held.
+ */
+const cancelScheduledSurvey = (actionName: string): boolean => {
+  const timeoutStack = TimeoutStack.getInstance();
+
+  const scheduled = timeoutStack.getTimeouts().find((timeout) => timeout.event === actionName);
+  if (!scheduled) return false;
+
+  timeoutStack.remove(scheduled.timeoutId);
+  return !scheduled.fired;
+};
+
+// Page URL Event Handlers
+let arePageUrlEventListenersAdded = false;
+let isHistoryPatched = false;
+export const setIsHistoryPatched = (value: boolean): void => {
+  isHistoryPatched = value;
+};
+
+const checkTimeOnPage = (actionClasses: TWorkspaceStateActionClass[]): void => {
+  const queue = CommandQueue.getInstance();
+  const logger = Logger.getInstance();
+
+  const noCodeTimeOnPageActionClasses = actionClasses.filter(
+    (action) => action.type === "noCode" && action.noCodeConfig?.type === "pageDwell"
+  );
+
+  const currentPageKey = window.location.href;
+  const matchingTimeOnPageActionNames = new Set<string>();
+
+  for (const event of noCodeTimeOnPageActionClasses) {
+    const config = event.noCodeConfig as Extract<typeof event.noCodeConfig, { type: "pageDwell" }>;
+
+    const { urlFilters, urlFiltersConnector: connector } = config;
+    const isValidUrl = handleUrlFilters(urlFilters, connector ?? "or");
+
+    if (!isValidUrl) continue;
+
+    matchingTimeOnPageActionNames.add(event.name);
+
+    const existing = timeOnPageTimers.get(event.name);
+    if (existing?.pageKey === currentPageKey) continue;
+
+    if (existing?.status === "running") {
+      logger.debug(`Time on page timer for "${event.name}" restarting — page changed to ${currentPageKey}`);
+      clearTimeout(existing.timerId);
+    }
+
+    const { timeInSeconds } = config;
+    const actionName = event.name;
+
+    logger.debug(`Starting time on page timer for "${actionName}" (${timeInSeconds.toString()}s)`);
+    const timerId = globalThis.setTimeout(() => {
+      logger.debug(
+        `Time on page timer for "${actionName}" completed after ${timeInSeconds.toString()}s — firing action`
+      );
+      timeOnPageTimers.set(actionName, { status: "fired", pageKey: currentPageKey });
+      void queue.add(trackNoCodeTimeOnPageActionHandler, CommandType.GeneralAction, true, actionName);
+    }, timeInSeconds * 1000);
+    timeOnPageTimers.set(actionName, { status: "running", pageKey: currentPageKey, timerId });
+  }
+
+  for (const [actionName, entry] of timeOnPageTimers) {
+    if (matchingTimeOnPageActionNames.has(actionName)) continue;
+
+    if (entry.status === "running") {
+      logger.debug(
+        `Time on page timer for "${actionName}" interrupted — user navigated away before completion`
+      );
+      clearTimeout(entry.timerId);
+    }
+    timeOnPageTimers.delete(actionName);
+
+    if (cancelScheduledSurvey(actionName)) {
+      setIsSurveyRunning(false);
+    }
+  }
+};
+
+export const checkPageUrl = async (): Promise<Result<void, unknown>> => {
+  const queue = CommandQueue.getInstance();
+  const appConfig = Config.getInstance();
+  const logger = Logger.getInstance();
+
+  logger.debug(`Checking page url: ${window.location.href}`);
+  const actionClasses = appConfig.get().workspace.data.actionClasses;
+
+  const noCodePageViewActionClasses = actionClasses.filter(
+    (action) => action.type === "noCode" && action.noCodeConfig?.type === "pageView"
+  );
+
+  for (const event of noCodePageViewActionClasses) {
+    const urlFilters = event.noCodeConfig?.urlFilters ?? [];
+    const connector = event.noCodeConfig?.urlFiltersConnector ?? "or";
+    const isValidUrl = handleUrlFilters(urlFilters, connector);
+
+    if (isValidUrl) {
+      await queue.add(trackNoCodePageViewActionHandler, CommandType.GeneralAction, true, event.name);
+    } else if (cancelScheduledSurvey(event.name)) {
+      // If invalid, call off a survey that has not rendered yet
+      setIsSurveyRunning(false);
+    }
+  }
+
+  checkTimeOnPage(actionClasses);
+
+  return { ok: true, data: undefined };
+};
+
+const checkPageUrlWrapper = (): void => {
+  void checkPageUrl();
+};
+
+export const addPageUrlEventListeners = (): void => {
+  if (typeof window === "undefined" || arePageUrlEventListenersAdded) return;
+
+  // Monkey patch history methods if not already done
+  if (!isHistoryPatched) {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- deliberate monkey-patch; the original is re-invoked via .apply(this, args)
+    const originalPushState = history.pushState;
+
+    history.pushState = function (...args) {
+      originalPushState.apply(this, args);
+      const event = new Event("pushstate");
+      window.dispatchEvent(event);
+    };
+
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- deliberate monkey-patch; the original is re-invoked via .apply(this, args)
+    const originalReplaceState = history.replaceState;
+
+    history.replaceState = function (...args) {
+      originalReplaceState.apply(this, args);
+      const event = new Event("replacestate");
+      window.dispatchEvent(event);
+    };
+
+    isHistoryPatched = true;
+  }
+
+  events.forEach((event) => {
+    window.addEventListener(event, checkPageUrlWrapper);
+  });
+  arePageUrlEventListenersAdded = true;
+};
+
+export const removePageUrlEventListeners = (): void => {
+  if (typeof window === "undefined" || !arePageUrlEventListenersAdded) return;
+  events.forEach((event) => {
+    window.removeEventListener(event, checkPageUrlWrapper);
+  });
+  arePageUrlEventListenersAdded = false;
+};
+
+// Click Event Handlers
+let isClickEventListenerAdded = false;
+
+const checkClickMatch = async (event: MouseEvent): Promise<void> => {
+  const queue = CommandQueue.getInstance();
+  const appConfig = Config.getInstance();
+
+  const { workspace } = appConfig.get();
+
+  const { actionClasses = [] } = workspace.data;
+
+  const noCodeClickActionClasses = actionClasses.filter(
+    (action) => action.type === "noCode" && action.noCodeConfig?.type === "click"
+  );
+
+  const targetElement = event.target as HTMLElement;
+
+  for (const action of noCodeClickActionClasses) {
+    if (evaluateNoCodeConfigClick(targetElement, action)) {
+      await queue.add(trackNoCodeClickActionHandler, CommandType.GeneralAction, true, action.name);
+    }
+  }
+};
+
+const checkClickMatchWrapper = (e: MouseEvent): void => {
+  void checkClickMatch(e);
+};
+
+export const addClickEventListener = (): void => {
+  if (typeof window === "undefined" || isClickEventListenerAdded) return;
+  document.addEventListener("click", checkClickMatchWrapper);
+  isClickEventListenerAdded = true;
+};
+
+export const removeClickEventListener = (): void => {
+  if (!isClickEventListenerAdded) return;
+  document.removeEventListener("click", checkClickMatchWrapper);
+  isClickEventListenerAdded = false;
+};
+
+// Exit Intent Handlers
+let isExitIntentListenerAdded = false;
+
+const checkExitIntent = async (e: MouseEvent): Promise<void> => {
+  const queue = CommandQueue.getInstance();
+  const appConfig = Config.getInstance();
+
+  const { workspace } = appConfig.get();
+  const { actionClasses = [] } = workspace.data;
+
+  const noCodeExitIntentActionClasses = actionClasses.filter(
+    (action) => action.type === "noCode" && action.noCodeConfig?.type === "exitIntent"
+  );
+
+  if (e.clientY <= 0 && noCodeExitIntentActionClasses.length > 0) {
+    for (const event of noCodeExitIntentActionClasses) {
+      const urlFilters = event.noCodeConfig?.urlFilters ?? [];
+      const connector = event.noCodeConfig?.urlFiltersConnector ?? "or";
+      const isValidUrl = handleUrlFilters(urlFilters, connector);
+
+      if (!isValidUrl) continue;
+
+      await queue.add(trackNoCodeExitIntentActionHandler, CommandType.GeneralAction, true, event.name);
+    }
+  }
+};
+
+const checkExitIntentWrapper = (e: MouseEvent): void => {
+  void checkExitIntent(e);
+};
+
+export const addExitIntentListener = (): void => {
+  if (typeof document !== "undefined" && !isExitIntentListenerAdded) {
+    document
+      .querySelector("body")
+      ?.addEventListener("mouseleave", checkExitIntentWrapper as unknown as EventListener);
+    isExitIntentListenerAdded = true;
+  }
+};
+
+export const removeExitIntentListener = (): void => {
+  if (isExitIntentListenerAdded) {
+    document.removeEventListener("mouseleave", checkExitIntentWrapper as unknown as EventListener);
+    isExitIntentListenerAdded = false;
+  }
+};
+
+// Scroll Depth Handlers
+let scrollDepthListenerAdded = false;
+let scrollDepthTriggered = false;
+
+const checkScrollDepth = async (): Promise<void> => {
+  const queue = CommandQueue.getInstance();
+  const appConfig = Config.getInstance();
+
+  const scrollPosition = window.scrollY;
+  const windowSize = window.innerHeight;
+  const bodyHeight = document.documentElement.scrollHeight;
+
+  if (scrollPosition === 0) {
+    scrollDepthTriggered = false;
+  }
+
+  if (!scrollDepthTriggered && scrollPosition / (bodyHeight - windowSize) >= 0.5) {
+    scrollDepthTriggered = true;
+
+    const { workspace } = appConfig.get();
+    const { actionClasses = [] } = workspace.data;
+
+    const noCodefiftyPercentScrollActionClasses = actionClasses.filter(
+      (action) => action.type === "noCode" && action.noCodeConfig?.type === "fiftyPercentScroll"
+    );
+
+    for (const event of noCodefiftyPercentScrollActionClasses) {
+      const urlFilters = event.noCodeConfig?.urlFilters ?? [];
+      const connector = event.noCodeConfig?.urlFiltersConnector ?? "or";
+      const isValidUrl = handleUrlFilters(urlFilters, connector);
+
+      if (!isValidUrl) continue;
+
+      await queue.add(trackNoCodeScrollActionHandler, CommandType.GeneralAction, true, event.name);
+    }
+  }
+};
+
+const checkScrollDepthWrapper = (): void => {
+  void checkScrollDepth();
+};
+
+export const addScrollDepthListener = (): void => {
+  if (typeof window !== "undefined" && !scrollDepthListenerAdded) {
+    if (document.readyState === "complete") {
+      window.addEventListener("scroll", checkScrollDepthWrapper as EventListener);
+    } else {
+      window.addEventListener("load", () => {
+        window.addEventListener("scroll", checkScrollDepthWrapper as EventListener);
+      });
+    }
+    scrollDepthListenerAdded = true;
+  }
+};
+
+export const removeScrollDepthListener = (): void => {
+  if (scrollDepthListenerAdded) {
+    window.removeEventListener("scroll", checkScrollDepthWrapper as EventListener);
+    scrollDepthListenerAdded = false;
+  }
+};
+
+// Time on Page Cleanup
+export const clearTimeOnPageTimers = (): void => {
+  for (const [, entry] of timeOnPageTimers) {
+    if (entry.status === "running") {
+      clearTimeout(entry.timerId);
+    }
+  }
+  timeOnPageTimers.clear();
+};

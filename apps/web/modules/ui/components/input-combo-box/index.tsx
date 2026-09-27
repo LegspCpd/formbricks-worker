@@ -1,0 +1,543 @@
+"use client";
+
+import { CheckIcon, ChevronDownIcon, LucideProps, XIcon } from "lucide-react";
+import Image from "next/image";
+import React, {
+  ForwardRefExoticComponent,
+  Fragment,
+  RefAttributes,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useTranslation } from "react-i18next";
+import { cn } from "@/lib/cn";
+import { isExternalImageSrc } from "@/lib/image-hosts";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+} from "@/modules/ui/components/command";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/modules/ui/components/dropdown-menu";
+import { Input } from "@/modules/ui/components/input";
+import { filterComboboxOption } from "./lib/search";
+
+/**
+ * The height `DropdownMenuContent` caps itself at — mirrors the `max-h` on that component, which
+ * is what keeps a long menu inside the viewport.
+ */
+const POPOVER_MAX_HEIGHT = "min(20rem, var(--radix-dropdown-menu-content-available-height, 20rem))";
+/** The popover's own `p-1`, top and bottom. */
+const POPOVER_PADDING = "0.5rem";
+
+/**
+ * Cap the option list at the popover's height minus its chrome, so the list is the only thing that
+ * can scroll. Sized any taller — it used to be a flat `400px` against a 320px popover — the list
+ * scrolls internally *and* overflows the popover, which then scrolls too, and the dropdown renders
+ * two nested scrollbars. The search row is `h-8` plus its 1px bottom border.
+ */
+const getOptionListMaxHeight = (showSearch: boolean): string =>
+  showSearch
+    ? `calc(${POPOVER_MAX_HEIGHT} - ${POPOVER_PADDING} - 2rem - 1px)`
+    : `calc(${POPOVER_MAX_HEIGHT} - ${POPOVER_PADDING})`;
+
+export interface TComboboxOption {
+  icon?: ForwardRefExoticComponent<Omit<LucideProps, "ref"> & RefAttributes<SVGSVGElement>>;
+  imgSrc?: string;
+  label: string;
+  value: string | number;
+  meta?: Record<string, string>;
+  children?: TComboboxOption[];
+}
+
+export interface TComboboxGroupedOption {
+  label: string;
+  value: string | number;
+  options: TComboboxOption[];
+}
+
+export interface InputComboboxProps {
+  id: string;
+  showSearch?: boolean;
+  searchPlaceholder?: string;
+  placeholder?: string;
+  options?: TComboboxOption[];
+  groupedOptions?: TComboboxGroupedOption[];
+  value?: string | number | string[] | null;
+  onChangeValue: (value: string | number | string[], option?: TComboboxOption, fromInput?: boolean) => void;
+  inputProps?: Omit<React.ComponentProps<typeof Input>, "value" | "onChange">;
+  clearable?: boolean;
+  withInput?: boolean;
+  allowMultiSelect?: boolean;
+  showCheckIcon?: boolean;
+  comboboxClasses?: string;
+  emptyDropdownText?: string;
+  iconClassName?: string;
+  disabled?: boolean;
+  // The interactive trigger renders as a div[role="combobox"], which is not a labelable element,
+  // so a paired <label htmlFor> gives it no accessible name. Callers pass one of these instead.
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
+}
+
+// Helper to flatten all options and their children
+function flattenOptions(options?: TComboboxOption[]): TComboboxOption[] {
+  if (!options) return [];
+  return options.flatMap((option) => [option, ...(option.children ? flattenOptions(option.children) : [])]);
+}
+
+// The search terms for an option. `filterComboboxOption` scores these instead of the item's
+// `value`, which is an opaque id the user never sees.
+function getOptionKeywords(option: TComboboxOption): string[] {
+  return [option.label];
+}
+
+function hasOptionDetails(option: TComboboxOption): boolean {
+  return Boolean(option.meta?.hint || option.meta?.badge);
+}
+
+function getOptionItemClassName(option: TComboboxOption): string {
+  return cn("px-2", hasOptionDetails(option) ? "py-2" : "truncate");
+}
+
+interface ComboboxOptionLabelProps {
+  option: TComboboxOption;
+  iconClassName: string;
+  showCheckIcon: boolean;
+  selected: boolean;
+}
+
+function ComboboxOptionLabel({
+  option,
+  iconClassName,
+  showCheckIcon,
+  selected,
+}: Readonly<ComboboxOptionLabelProps>) {
+  return (
+    <>
+      {showCheckIcon && selected && (
+        <CheckIcon className="size-4 shrink-0 text-slate-300 hover:text-slate-400" />
+      )}
+      {option.icon && <option.icon className={iconClassName} />}
+      {option.imgSrc && (
+        <Image
+          src={option.imgSrc}
+          alt={option.label}
+          width={24}
+          height={24}
+          className="shrink-0"
+          unoptimized={isExternalImageSrc(option.imgSrc)}
+        />
+      )}
+      {hasOptionDetails(option) ? (
+        <span className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-slate-900">{option.label}</span>
+            {option.meta?.badge && (
+              <span className="shrink-0 rounded-sm bg-slate-100 px-1.5 py-0.5 text-xs font-normal text-slate-500">
+                {option.meta.badge}
+              </span>
+            )}
+          </span>
+          {option.meta?.hint && (
+            <span className="mt-0.5 truncate text-xs font-normal text-slate-400">{option.meta.hint}</span>
+          )}
+        </span>
+      ) : (
+        <span className="truncate text-slate-900">{option.label}</span>
+      )}
+    </>
+  );
+}
+
+export const InputCombobox: React.FC<InputComboboxProps> = ({
+  id = "temp",
+  showSearch = true,
+  searchPlaceholder,
+  placeholder,
+  options,
+  groupedOptions,
+  value,
+  onChangeValue,
+  inputProps,
+  clearable = false,
+  withInput = false,
+  allowMultiSelect = false,
+  showCheckIcon = false,
+  comboboxClasses,
+  emptyDropdownText,
+  iconClassName = "h-5 w-5 text-slate-400",
+  disabled = false,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
+}) => {
+  const { t } = useTranslation();
+  const resolvedSearchPlaceholder = searchPlaceholder ?? t("common.search");
+  const [isClearing, setIsClearing] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [inputType, setInputType] = useState<"dropdown" | "input" | null>(null);
+  const [localValue, setLocalValue] = useState<string | number | string[] | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const resetListScroll = () => {
+    requestAnimationFrame(() => {
+      listRef.current?.scrollTo({ top: 0 });
+      requestAnimationFrame(() => {
+        listRef.current?.scrollTo({ top: 0 });
+      });
+    });
+  };
+
+  const validOptions = useMemo(() => {
+    if (options?.length) return flattenOptions(options);
+    if (groupedOptions?.length) return flattenOptions(groupedOptions.flatMap((group) => group.options));
+    return [];
+  }, [options, groupedOptions]);
+
+  useEffect(() => {
+    if (value === null || value === undefined) {
+      setLocalValue(null);
+      setInputType(null);
+    } else if (Array.isArray(value)) {
+      if (value.length) {
+        setLocalValue(value);
+        setInputType("dropdown");
+      }
+    } else {
+      const opt = validOptions?.find((o) => o.value === value);
+      if (opt) {
+        setLocalValue(opt.value);
+        setInputType("dropdown");
+      } else if (withInput) {
+        setLocalValue(value);
+        setInputType("input");
+      } else {
+        setLocalValue(null);
+        setInputType(null);
+      }
+    }
+  }, [value, validOptions, withInput]);
+
+  const handleMultiSelect = (option: TComboboxOption) => {
+    const arr = Array.isArray(localValue) ? [...localValue] : [];
+    const exists = arr.includes(option.value as string);
+    const newArr = exists ? arr.filter((v) => v !== option.value) : [...arr, option.value];
+    if (!newArr.length) {
+      onChangeValue([], option);
+      setInputType(null);
+    } else {
+      onChangeValue(newArr as string[], option);
+    }
+    setLocalValue(newArr as string[]);
+  };
+
+  const handleSelect = (option: TComboboxOption) => {
+    setInputType("dropdown");
+    if (allowMultiSelect) {
+      handleMultiSelect(option);
+    } else {
+      onChangeValue(option.value, option);
+      setLocalValue(option.value);
+      setOpen(false);
+    }
+  };
+
+  const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.type === "number" ? +e.target.value : e.target.value;
+    if (val === "") onChangeValue("", undefined, true);
+    setInputType("input");
+    setLocalValue(val);
+    onChangeValue(val, undefined, true);
+  };
+
+  // Renders the selected option(s) inside the trigger. Not memoized: it builds a handful of
+  // elements from an already-narrow option list, and the compiler would not memoize a JSX-returning
+  // value anyway, so the manual memo only made the two disagree (ENG-2366).
+  const renderDisplayValue = () => {
+    if (Array.isArray(localValue)) {
+      return localValue.map((v, i) => {
+        const opt = validOptions?.find((o) => o.value === v);
+        if (!opt) return null;
+        return (
+          <Fragment key={i}>
+            {i > 0 && <span>, </span>}
+            <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+              {opt.icon && <opt.icon className={cn("shrink-0", iconClassName)} />}
+              {opt.imgSrc && (
+                <Image
+                  src={opt.imgSrc}
+                  alt={opt.label}
+                  width={24}
+                  height={24}
+                  unoptimized={isExternalImageSrc(opt.imgSrc)}
+                />
+              )}
+              <span className="truncate" title={opt.label}>
+                {opt.label}
+              </span>
+            </div>
+          </Fragment>
+        );
+      });
+    }
+
+    const opt = validOptions?.find((o) => o.value === localValue);
+    if (!opt) return null;
+    return (
+      <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+        {opt.icon && <opt.icon className={cn("shrink-0", iconClassName)} />}
+        {opt.imgSrc && (
+          <Image
+            src={opt.imgSrc}
+            alt={opt.label}
+            width={24}
+            height={24}
+            unoptimized={isExternalImageSrc(opt.imgSrc)}
+          />
+        )}
+        <span className="truncate" title={opt.label}>
+          {opt.label}
+        </span>
+      </div>
+    );
+  };
+
+  const handleClear = () => {
+    setInputType(null);
+    onChangeValue("");
+    setLocalValue(null);
+    setIsClearing(false);
+  };
+
+  const isSelected = (option: TComboboxOption) =>
+    Array.isArray(localValue) ? localValue.includes(option.value as string) : localValue === option.value;
+
+  return (
+    // The height lives on this wrapper rather than on the trigger below: the wrapper clips its children
+    // (overflow-hidden), so a fixed-height trigger inside a shorter wrapper (comboboxClasses="h-9") gets
+    // cropped and its centered content sits low next to same-height controls in a filter row.
+    <div
+      className={cn(
+        "group/icon flex h-10 max-w-[440px] min-w-0 overflow-hidden rounded-md border border-slate-300 hover:border-slate-400",
+        disabled && "cursor-not-allowed border-slate-200 bg-slate-100 opacity-60 hover:border-slate-200",
+        comboboxClasses
+      )}>
+      {withInput && inputType !== "dropdown" && (
+        <Input
+          id={`${id}-input`}
+          {...inputProps}
+          disabled={disabled || inputProps?.disabled}
+          className={cn(
+            "min-w-0 rounded-none border-0 border-r border-slate-300 bg-white focus:border-r-slate-400 focus-visible:ring-0 focus-visible:ring-offset-0",
+            inputProps?.className
+          )}
+          value={localValue ?? ""}
+          onChange={onInputChange}
+        />
+      )}
+
+      <DropdownMenu open={disabled ? false : open} onOpenChange={disabled ? undefined : setOpen}>
+        <DropdownMenuTrigger asChild className="z-10 min-w-0 flex-1">
+          <div
+            id={id}
+            role="combobox"
+            tabIndex={disabled ? -1 : 0}
+            aria-label={ariaLabel}
+            aria-labelledby={ariaLabelledBy}
+            aria-controls="options"
+            aria-expanded={open}
+            aria-disabled={disabled || undefined}
+            className={cn(
+              "flex h-full w-full min-w-0 cursor-pointer items-center overflow-hidden bg-white pr-2 text-sm",
+              {
+                "w-10 shrink-0 justify-center pr-0": withInput && inputType !== "dropdown",
+                "pointer-events-none": isClearing || disabled,
+                "cursor-not-allowed bg-transparent": disabled,
+              }
+            )}>
+            {inputType === "dropdown" ? (
+              <div className="min-w-0 flex-1 truncate px-2 text-sm">{renderDisplayValue()}</div>
+            ) : (
+              placeholder && (
+                <span className="min-w-0 flex-1 truncate px-2 text-sm text-slate-400">{placeholder}</span>
+              )
+            )}
+            {clearable && inputType === "dropdown" ? (
+              <XIcon
+                className={cn("size-5 shrink-0 text-slate-300 hover:text-slate-400", {
+                  "pointer-events-auto": isClearing,
+                })}
+                onMouseEnter={() => setIsClearing(true)}
+                onMouseLeave={() => setIsClearing(false)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleClear();
+                }}
+              />
+            ) : (
+              <ChevronDownIcon
+                className={cn(
+                  "size-5 shrink-0 text-slate-300 group-hover/icon:text-slate-400",
+                  // Pin the chevron to the right even when there's no value/placeholder to render a
+                  // leading flex-1 element — otherwise it collapses to the left and looks broken.
+                  // Skip in the centered icon-only (withInput) variant so it stays centered.
+                  !(withInput && inputType !== "dropdown") && "ml-auto"
+                )}
+              />
+            )}
+          </div>
+        </DropdownMenuTrigger>
+
+        <DropdownMenuContent
+          side="bottom"
+          align="start"
+          className="w-(--radix-dropdown-menu-trigger-width) min-w-52 overflow-y-hidden"
+          data-testid="dropdown-menu-content">
+          <Command className="flex h-full w-full flex-col overflow-hidden" filter={filterComboboxOption}>
+            {showSearch ? (
+              <div className="border-b border-slate-100">
+                <CommandInput
+                  placeholder={resolvedSearchPlaceholder}
+                  className="h-8 border-none placeholder-slate-300 outline-hidden"
+                  autoFocus
+                  ref={searchRef}
+                  onValueChange={resetListScroll}
+                />
+              </div>
+            ) : (
+              <button autoFocus className="sr-only" aria-hidden type="button" />
+            )}
+
+            <CommandList
+              ref={listRef}
+              className="max-h-none overflow-y-auto border-0 p-1"
+              style={{ maxHeight: getOptionListMaxHeight(showSearch) }}>
+              <CommandEmpty className="mx-2 my-0 text-xs font-semibold text-slate-500">
+                {emptyDropdownText ?? t("workspace.surveys.edit.no_option_found")}
+              </CommandEmpty>
+
+              {options && options.length > 0 && (
+                <CommandGroup className="p-0">
+                  {options.map((opt) => (
+                    <CommandItem
+                      key={opt.value}
+                      value={String(opt.value)}
+                      keywords={getOptionKeywords(opt)}
+                      onSelect={() => handleSelect(opt)}
+                      className={getOptionItemClassName(opt)}>
+                      <ComboboxOptionLabel
+                        option={opt}
+                        iconClassName={iconClassName}
+                        showCheckIcon={showCheckIcon}
+                        selected={isSelected(opt)}
+                      />
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
+
+              {groupedOptions?.map((group, gi) => (
+                <Fragment key={gi}>
+                  {gi > 0 && <CommandSeparator className="my-1 bg-slate-200" />}
+                  <CommandGroup className="p-0" tabIndex={0}>
+                    <div className="px-2 pb-2 text-xs font-medium text-slate-500">{group.label}</div>
+                    {group.options.map((opt) =>
+                      opt.children ? (
+                        <CommandItem
+                          key={opt.value}
+                          value={String(opt.value)}
+                          keywords={getOptionKeywords(opt)}
+                          className="flex w-full items-center justify-center p-0">
+                          <DropdownMenuSub key={opt.value}>
+                            <DropdownMenuSubTrigger
+                              className="w-full"
+                              onFocus={(e) => {
+                                if (e.relatedTarget === searchRef.current) {
+                                  searchRef.current?.focus();
+                                }
+                              }}>
+                              <div className="flex w-full items-center gap-2 truncate">
+                                {showCheckIcon && isSelected(opt) && (
+                                  <CheckIcon className="mr-2 size-4 text-slate-300 hover:text-slate-400" />
+                                )}
+                                {opt.icon && <opt.icon className={iconClassName} />}
+                                {opt.imgSrc && (
+                                  <Image
+                                    src={opt.imgSrc}
+                                    alt={opt.label}
+                                    width={24}
+                                    height={24}
+                                    className="shrink-0"
+                                    unoptimized={isExternalImageSrc(opt.imgSrc)}
+                                  />
+                                )}
+                                <span className="flex-1 truncate text-slate-900">{opt.label}</span>
+                              </div>
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent alignOffset={4} className="w-48 p-1">
+                              {opt.children.map((child) => (
+                                <div className="flex flex-col" key={child.value}>
+                                  {child.children && child.children.length > 0 ? (
+                                    <p className="mb-2 px-2 text-sm font-medium text-slate-500">
+                                      {child.label}
+                                    </p>
+                                  ) : (
+                                    <DropdownMenuItem key={child.value} onSelect={() => handleSelect(child)}>
+                                      {child.label}
+                                    </DropdownMenuItem>
+                                  )}
+                                  {child.children?.map((subChild) => (
+                                    <DropdownMenuItem
+                                      key={subChild.value}
+                                      onSelect={() => handleSelect(subChild)}>
+                                      {subChild.label}
+                                    </DropdownMenuItem>
+                                  ))}
+
+                                  {child.children && child.children.length > 0 && <DropdownMenuSeparator />}
+                                </div>
+                              ))}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                        </CommandItem>
+                      ) : (
+                        <CommandItem
+                          key={opt.value}
+                          value={String(opt.value)}
+                          keywords={getOptionKeywords(opt)}
+                          onSelect={() => handleSelect(opt)}
+                          className={getOptionItemClassName(opt)}>
+                          <ComboboxOptionLabel
+                            option={opt}
+                            iconClassName={iconClassName}
+                            showCheckIcon={showCheckIcon}
+                            selected={isSelected(opt)}
+                          />
+                        </CommandItem>
+                      )
+                    )}
+                  </CommandGroup>
+                </Fragment>
+              ))}
+            </CommandList>
+          </Command>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+};

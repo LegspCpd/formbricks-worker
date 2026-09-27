@@ -1,0 +1,426 @@
+import "server-only";
+import { oauthProvider } from "@better-auth/oauth-provider";
+import { createId } from "@paralleldrive/cuid2";
+import { betterAuth } from "better-auth";
+import { prismaAdapter } from "better-auth/adapters/prisma";
+import { createAuthMiddleware } from "better-auth/api";
+import { nextCookies } from "better-auth/next-js";
+import { genericOAuth, jwt, twoFactor } from "better-auth/plugins";
+import { prisma } from "@formbricks/database";
+import { logger } from "@formbricks/logger";
+import type { TUserLocale } from "@formbricks/types/user";
+import {
+  AUTH_SECRET,
+  AUTH_TRUSTED_ORIGINS,
+  AUTH_URL,
+  EMAIL_AUTH_ENABLED,
+  EMAIL_VERIFICATION_DISABLED,
+  PASSWORD_RESET_DISABLED,
+  PASSWORD_RESET_TOKEN_LIFETIME_MINUTES,
+  RATE_LIMITING_DISABLED,
+  SESSION_MAX_AGE,
+} from "@/lib/constants";
+import { hashSecret, verifySecret } from "@/lib/crypto";
+import { BETTER_AUTH_IP_ADDRESS_CONFIG } from "@/lib/utils/client-ip";
+import {
+  accountDeletionConfig,
+  requireDeletionConfirmationBeforeHandler,
+} from "@/modules/account/lib/better-auth-account-deletion";
+import { ssoDatabaseHooks, ssoLicenseGateBeforeHandler } from "@/modules/ee/sso/lib/better-auth-hooks";
+import { ssoGenericOAuthConfig, ssoSocialProviders } from "@/modules/ee/sso/lib/better-auth-providers";
+import { ssoRecoverySignInPlugin } from "@/modules/ee/sso/lib/better-auth-recovery-signin";
+import { runAfterAuthHooks } from "./after-auth-hooks";
+import { EMAIL_VERIFICATION_TTL_SECONDS, USE_SECURE_COOKIES } from "./auth-cookies";
+import { rejectInactiveUserOnSessionCreate } from "./better-auth-active-user-gate";
+import { runAfterEmailVerificationHooks } from "./better-auth-email-verification";
+import { hibpBreachCheckBeforeHandler } from "./better-auth-hibp";
+import { auditPasswordReset, betterAuthLogger, signInAuditDatabaseHook } from "./better-auth-observability";
+import { requirePasswordResetEnabledBeforeHandler } from "./better-auth-password-reset-gate";
+import { healCredentialAccountIssuerBeforeHandler } from "./credential-issuer-heal";
+import { getMcpOauthProviderOptions } from "./mcp-oauth-provider-options";
+import { getAuthIssuerUrl, getMcpResourceUrl } from "./oauth-urls";
+import { redisSecondaryStorage } from "./secondary-storage";
+import { signupPolicyBeforeHandler } from "./signup-policy";
+
+const DAY_IN_SECONDS = 60 * 60 * 24;
+
+// `USE_SECURE_COOKIES` and `EMAIL_VERIFICATION_TTL_SECONDS` live in auth-cookies.ts — the sign-up
+// intent cookie (ENG-2562) needs both, and it is reached FROM this module, so keeping them here and
+// exporting them would close an import cycle. Their derivation is documented there.
+
+/** Resolve a user's locale for transactional emails (Better Auth's callback user omits it). */
+export const getUserLocale = async (userId: string): Promise<TUserLocale> => {
+  const dbUser = await prisma.user.findUnique({ where: { id: userId }, select: { locale: true } });
+  return (dbUser?.locale ?? "en-US") as TUserLocale;
+};
+
+/**
+ * Better Auth server instance (ENG-1054 — NextAuth → Better Auth migration).
+ *
+ * CUTOVER (the ENG-1054 flip): Better Auth owns sessions. Its HTTP handler is mounted at
+ * /api/auth/[...all] (wrapped in `runWithSsoRequestContext`), the NextAuth [...nextauth] route is
+ * removed, and the session DAL (`session.ts`) reads Better Auth only — no dual-read, so the flip is
+ * a one-time forced re-login.
+ *
+ * Field mappings target the EXISTING Prisma columns (packages/database/schema.prisma), verified
+ * against better-auth@1.6.18 `getAuthTables` (design doc §11). With Redis `secondaryStorage`
+ * configured, BA skips the DB session/verification tables unless told otherwise — so
+ * `session.storeSessionInDatabase` is set (the forward-auth proxies need DB sessions); verification
+ * stays Redis-only (ephemeral; no Verification Prisma model needed).
+ *
+ * Known deferral (not blocking): the 2FA-challenge failure audit (`/two-factor/verify-*`) — the user
+ * identity lives in the two-factor cookie, not the request body, so it is tracked separately. The
+ * credential sign-in + sole-owner-deletion failure audits and the signedIn-success / lastLoginAt /
+ * analytics / Sentry / logger wiring are all live in better-auth-observability.ts.
+ */
+export const auth = betterAuth({
+  appName: "Formbricks",
+  // Resolved in lib/constants.ts, which documents the BETTER_AUTH_* / NEXTAUTH_* alias. Passing it
+  // explicitly is what keeps BA's cookie signing on the same secret the forward-auth proxy verifies with
+  // (session-cookie.ts) and lib/jwt.ts signs app JWTs with; a divergence between any two of them is an
+  // outage. Note a falsy value here does NOT stop BA falling through to its own hardcoded default
+  // secret — `assertAuthRuntimeConfiguration` in lib/env.ts is what prevents that, by refusing to boot.
+  secret: AUTH_SECRET,
+  baseURL: AUTH_URL,
+  // `/update-user` is served over HTTP for nobody (ENG-3189). Better Auth mounts it beside our own
+  // profile surface, and every field it can reach is one Formbricks does not let a client write there:
+  //
+  //  - `name` is the identity provider's for an SSO user — re-read on every sign-in
+  //    (`overrideUserInfo`) and locked in `updateUserAction` — yet a raw POST landed the write anyway,
+  //    unaudited, until the next sign-in silently reverted it.
+  //  - `image` has no `User` column at all, so the write reached Prisma and threw an unhandled 500 —
+  //    the same hazard `ssoProfileSyncUpdateBefore` and `user.create.before` strip on the SSO paths.
+  //  - `email` the endpoint refuses itself, and our two `additionalFields` are `input: false`.
+  //
+  // So there is nothing left for it to legitimately do, and a 404 at the router is a smaller, more
+  // complete answer than a `hooks.before` gate: profile writes go through `updateUserAction`, which
+  // owns the SSO name lock, the verified email-change flow, rate limiting, and the audit entry. The
+  // path is HTTP-only — `auth.api.updateUser` stays available to server code (`api/index.mjs` applies
+  // `disabledPaths` in the router alone), which is what the SSO hooks and the service layer use.
+  disabledPaths: ["/token", "/update-user"],
+  trustedOrigins: AUTH_TRUSTED_ORIGINS,
+  telemetry: { enabled: false },
+
+  database: prismaAdapter(prisma, { provider: "postgresql" }),
+
+  // Sessions, verification records, and rate-limit counters in Redis (existing infra), shared
+  // across instances. Sessions also persist to the DB via session.storeSessionInDatabase below.
+  secondaryStorage: redisSecondaryStorage,
+
+  // SSO providers (Google/GitHub social + Azure/OIDC/SAML genericOAuth) live in
+  // modules/ee/sso/lib/better-auth-providers.ts. The account-linking / verify-before-link flow is
+  // the security-sensitive Phase 5 work, re-expressed via hooks separately (pending review, D7).
+  socialProviders: ssoSocialProviders,
+
+  emailAndPassword: {
+    // EMAIL_AUTH_DISABLED=1 has to switch the credential endpoints off here, not just hide the form on
+    // the login/signup pages (its only other use). Hardcoding `true` left
+    // POST /api/auth/sign-in/email live on an instance the operator had configured as SSO-only, so any
+    // account that still carried a password could sign in around the IdP — and around whatever the IdP
+    // enforces, such as MFA, conditional access, or deprovisioning.
+    enabled: EMAIL_AUTH_ENABLED,
+    // Matches ZUserPassword (min 8 / max 128); the upper+digit composition rule stays enforced
+    // by ZUserPassword at the app layer (deferred policy modernization → design doc §10.6).
+    minPasswordLength: 8,
+    maxPasswordLength: 128,
+    requireEmailVerification: !EMAIL_VERIFICATION_DISABLED, // match current behavior (same gating flag)
+    autoSignIn: false, // match current (no auto-login before verification); also enumeration-safe
+    resetPasswordTokenExpiresIn: PASSWORD_RESET_TOKEN_LIFETIME_MINUTES * 60, // seconds
+    revokeSessionsOnPasswordReset: true, // BA default is false; today we delete all sessions on reset (§10.1)
+    // Keep existing bcrypt (cost 12) so current hashes verify without forcing a reset (design doc D4).
+    password: {
+      hash: (password) => hashSecret(password),
+      verify: ({ password, hash }) => verifySecret(password, hash),
+    },
+    // Reuse Formbricks' mailer. Dynamic import keeps the heavy email/nodemailer graph out of auth.ts's
+    // app-wide static import chain (only loaded when a reset is actually sent).
+    sendResetPassword: async ({ user, url }) => {
+      const { sendPasswordResetLinkEmail } = await import("@/modules/email");
+      // Same falsy-return trap as sendVerificationEmail below (ENG-2091): `sendEmail` returns false
+      // without throwing when SMTP isn't configured, and Better Auth ignores the return value — so a
+      // reset that never went out would leave no trace at all. Throwing makes it attributable; the
+      // caller (forgot-password/actions.ts) already catches and still answers generically, so the
+      // enumeration-safe response is unchanged.
+      const sent = await sendPasswordResetLinkEmail({
+        email: user.email,
+        locale: await getUserLocale(user.id),
+        verifyLink: url,
+        linkValidityInMinutes: PASSWORD_RESET_TOKEN_LIFETIME_MINUTES,
+      });
+      if (!sent) {
+        throw new Error("Password reset email was not sent (mailer reported no delivery)");
+      }
+    },
+    // After a successful reset, send the security notification (parity with the retired
+    // completePasswordReset) and audit it. Better Auth already revoked sessions
+    // (revokeSessionsOnPasswordReset above). Both are best-effort — never fail the completed reset.
+    onPasswordReset: async ({ user }) => {
+      try {
+        const { sendPasswordResetNotifyEmail } = await import("@/modules/email");
+        await sendPasswordResetNotifyEmail({ email: user.email, locale: await getUserLocale(user.id) });
+      } catch (error) {
+        logger.error({ error, userId: user.id }, "Failed to send password-reset notification email");
+      }
+      await auditPasswordReset(user.id);
+    },
+  },
+
+  emailVerification: {
+    // BA sends the verification email on signup (used by the createUserAction signup flow). When
+    // EMAIL_VERIFICATION_DISABLED the user still receives it but isn't blocked from signing in —
+    // requireEmailVerification (above) gates that.
+    sendOnSignUp: true,
+    // Resend a fresh verification link when an unverified user tries to sign in (the original sign-up
+    // link may have expired). The login form surfaces this as a "check your inbox" message — without
+    // this flag BA would throw EMAIL_NOT_VERIFIED without sending anything, leaving no recovery path
+    // and making that message untrue. (ENG-1054)
+    sendOnSignIn: true,
+    // OFF since ENG-2562, and the reason is worth keeping: this used to be `true` "because clicking the
+    // signed link proves email ownership". It does — but it does not prove the clicker chose the
+    // account's PASSWORD, and conflating the two is account pre-hijacking. An attacker registers an
+    // address that has no account yet with a password they pick, Formbricks mails the victim a
+    // verification link, and the victim's click signs the victim into the attacker's account.
+    //
+    // The ENG-1746 UX it existed for (land in the app, not on /auth/login) is preserved for the case it
+    // was actually meant to serve — the same browser that signed up — by
+    // `verificationAutoSignInAfterHandler` in the `hooks.after` chain, which mints the session only
+    // against a sign-up intent cookie. Leaving this `false` is what makes that fail-closed.
+    autoSignInAfterVerification: false,
+    // Shared with the sign-up intent cookie: the cookie has to outlive the link it is paired with, or a
+    // legitimate same-browser sign-up silently loses its session. See auth-cookies.ts.
+    expiresIn: EMAIL_VERIFICATION_TTL_SECONDS,
+    // ENG-2091: a failed send must never present as a successful one. Two ways it can hide:
+    //  1. a THROW — on the sign-up path Better Auth calls this through `runInBackgroundOrAwait`, whose
+    //     catch only logs, so sign-up still resolves 200. (The resend endpoint awaits it directly and
+    //     does propagate, which is why rethrowing below is what makes THAT path truthful.)
+    //  2. a FALSY RETURN — `sendEmail` returns false without throwing when SMTP isn't configured, and
+    //     Better Auth ignores the return value entirely. Silent on every path.
+    // So: treat both as failures and make them attributable — log with the user id, and rethrow so the
+    // paths that DO propagate (resend, sign-in resend) fail loudly instead of claiming success.
+    // Deliberately NOT surfaced in the sign-up response: that response must not vary by what happened to
+    // one address, or it becomes an account-existence oracle (ENG-2099). The verification-requested
+    // screen derives its "nothing was sent" state from IS_SMTP_CONFIGURED instead.
+    sendVerificationEmail: async ({ user, url }) => {
+      const { sendVerificationLinkEmail } = await import("@/modules/email");
+      try {
+        const sent = await sendVerificationLinkEmail({
+          email: user.email,
+          locale: await getUserLocale(user.id),
+          verifyLink: url,
+        });
+        if (!sent) {
+          throw new Error("Verification email was not sent (mailer reported no delivery)");
+        }
+      } catch (error) {
+        // Domain only — never the address, the token, or the verify URL (all three are sensitive and
+        // the URL grants account access).
+        logger.error(
+          { error, userId: user.id, emailDomain: user.email.split("@")[1] },
+          "Failed to send verification email"
+        );
+        throw error;
+      }
+    },
+    // Composed: records the ENG-2562 "this request just verified someone" marker for the auto-sign-in
+    // after-hook, then re-homes the "token" provider's Brevo-on-first-verification side effect. See
+    // better-auth-email-verification.ts for why the marker goes first.
+    afterEmailVerification: runAfterEmailVerificationHooks,
+  },
+
+  // Hash verification/reset token identifiers at rest (BA default is plaintext) — matches the
+  // SHA-256-at-rest behavior of the current PasswordResetToken flow (design doc §10.1).
+  verification: {
+    storeIdentifier: { default: "hashed" },
+  },
+
+  session: {
+    expiresIn: SESSION_MAX_AGE, // keep the current 1-day session TTL (parity with the legacy SESSION_MAX_AGE)
+    updateAge: DAY_IN_SECONDS,
+    freshAge: DAY_IN_SECONDS, // require recent auth for sensitive ops; never 0
+    // REQUIRED with secondaryStorage — otherwise no `session` DB rows, which the forward-auth
+    // proxies (getProxySession) depend on (design doc §11).
+    storeSessionInDatabase: true,
+    cookieCache: { enabled: true, maxAge: 5 * 60 },
+    // Map BA's logical fields onto the existing Prisma columns.
+    fields: {
+      token: "sessionToken",
+      expiresAt: "expires",
+    },
+  },
+
+  account: {
+    // No automatic linking — Formbricks keeps its hardened verify-before-link (SSO recovery) flow,
+    // re-expressed via hooks in Phase 5 (design doc D7). BA's defaults are more permissive.
+    accountLinking: {
+      enabled: false,
+      allowDifferentEmails: false,
+    },
+    // Map BA's logical fields onto the existing Prisma columns; new columns (password,
+    // accessTokenExpiresAt, refreshTokenExpiresAt, scope, userId, createdAt, updatedAt) keep BA's names.
+    fields: {
+      providerId: "provider",
+      accountId: "providerAccountId",
+      accessToken: "access_token",
+      refreshToken: "refresh_token",
+      idToken: "id_token",
+    },
+  },
+
+  // Existing Prisma columns that Better Auth doesn't know about; declared so the `user.create.before`
+  // hooks can write them. The declaration is not optional paperwork: the adapter's `transformInput`
+  // copies only fields present in the schema, so an undeclared key is dropped from the insert without
+  // a word. `input: false` keeps them server-set only (never settable via the client API).
+  user: {
+    additionalFields: {
+      identityProvider: { type: "string", required: false, input: false },
+      identityProviderAccountId: { type: "string", required: false, input: false },
+      // ENG-2247: the fresh-instance bootstrap marker, a one-variant enum column (Better Auth has no
+      // enum field type, and the adapter hands the string straight to Prisma, which validates it).
+      // `returned: false` because it is an internal serialization marker rather than profile data —
+      // nothing outside the sign-up path reads it, so it has no business in a user response body.
+      isBootstrapAdmin: { type: "string", required: false, input: false, returned: false },
+    },
+    // Account deletion (design doc §14): native Better Auth deleteUser with Formbricks' pre/post
+    // cleanup (sole-owner-org guard + org/invite removal, then Brevo + audit). Confirmation friction
+    // is asymmetric and wired at the edges in Phase 6 — password for credential users, email-link for
+    // SSO — so `sendDeleteAccountVerification` is intentionally NOT set here (it would email everyone).
+    deleteUser: accountDeletionConfig,
+  },
+
+  // SSO sign-up flow — email-verification, identity denormalization, and JIT provisioning
+  // (gate + writes) re-expressed as Better Auth database hooks (design doc §13). Verify-before-link
+  // recovery is the remaining Phase 5c work. The session hook composes the isActive gate (reject
+  // deactivated users before a session is created — parity with authOptions, covers every sign-in
+  // path) with the Phase 7 `signedIn` success audit.
+  databaseHooks: {
+    ...ssoDatabaseHooks,
+    session: {
+      create: {
+        before: rejectInactiveUserOnSessionCreate,
+        after: signInAuditDatabaseHook.create?.after,
+      },
+    },
+  },
+
+  // Request hooks (parity with handleSsoCallback). Each slot is a single middleware, so related
+  // concerns are composed as plain handlers (calling a wrapped middleware would re-run the per-request
+  // context setup). `before`: re-check the SSO/SAML license on every SSO callback (covers existing-user
+  // sign-ins that skip user.create), then require an explicit confirmation factor on POST /delete-user
+  // (closes Better Auth's freshAge password bypass). `after`: turn an SSO "account not linked"
+  // collision into the verify-before-link recovery flow, then emit the failed-login audit (parity with
+  // NextAuth's `logAuthAttempt`). Recovery runs first; if it redirects (throws), the request is an SSO
+  // recovery rather than a credential failure, so skipping the audit is correct.
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      await ssoLicenseGateBeforeHandler(ctx);
+      await requireDeletionConfirmationBeforeHandler(ctx);
+      // ENG-2105: reject password-reset requests at the native Better Auth layer when the operator
+      // has disabled password resets (PASSWORD_RESET_DISABLED=1). See better-auth-password-reset-gate.ts.
+      await requirePasswordResetEnabledBeforeHandler(ctx, PASSWORD_RESET_DISABLED);
+      // ENG-2293: enforce the closed-sign-up policy on Better Auth's native /sign-up/email, which is
+      // served beside createUserAction and used to bypass it entirely. Runs BEFORE the endpoint so the
+      // rejection can't double as an account-existence oracle (the handler looks the address up first,
+      // and an address that already has one never reaches a create hook). See signup-policy.ts.
+      // Ordered ahead of the breach check so a sign-up on a closed instance costs no outbound HIBP call.
+      // Path-disjoint from the reset gate above, so their relative order is not load-bearing.
+      await signupPolicyBeforeHandler(ctx);
+      // ENG-1587: reject known-breached passwords on set (signup / reset) BEFORE the endpoint runs, so
+      // the reset token isn't consumed on a rejection. Fails open when api.pwnedpasswords.com is
+      // unreachable and honors PASSWORD_HIBP_CHECK_DISABLED. See better-auth-hibp.ts.
+      await hibpBreachCheckBeforeHandler(ctx);
+      // ENG-3258: repair a NULL-issuer credential row before sign-in / reset-request looks it up. Last,
+      // so only a request every gate above let through can write. See credential-issuer-heal.ts.
+      await healCredentialAccountIssuerBeforeHandler(ctx);
+    }),
+    after: createAuthMiddleware(runAfterAuthHooks),
+  },
+
+  rateLimit: {
+    // Enable explicitly rather than relying on Better Auth's NODE_ENV==="production" default, so the
+    // brute-force limits also apply in staging / self-host. Respects the operator's RATE_LIMITING_DISABLED
+    // (the same app-level toggle the legacy limiter used); the integration harness sets it to skip limits.
+    enabled: !RATE_LIMITING_DISABLED,
+    // Redis-backed so counters are shared across instances (the in-memory default is per-instance
+    // and resets on deploy — unsuitable for multi-instance prod).
+    storage: "secondary-storage",
+    customRules: {
+      "/sign-in/email": { window: 60, max: 5 },
+      "/sign-up/email": { window: 60, max: 3 },
+      "/request-password-reset": { window: 60, max: 3 },
+      "/reset-password": { window: 60, max: 5 },
+      // ENG-2562: the two verification endpoints, deliberately asymmetric because their risk is.
+      //
+      // Sending is the amplification vector — unauthenticated, attacker-triggerable, and it puts mail in
+      // someone else's inbox. Without a cap the 1-hour link expiry is not a real constraint on
+      // pre-hijacking either, since fresh links can be re-issued until the victim clicks. Same budget as
+      // the sibling reset request.
+      "/send-verification-email": { window: 60, max: 3 },
+      // Verifying is the opposite case and must stay generous. It is a top-level GET clicked out of a
+      // mail client — frequently behind a corporate NAT shared by many users, and often prefetched by a
+      // mail-security scanner before the human clicks. It also already requires a signed, expiring
+      // token, so a tight per-IP cap buys very little and risks locking a legitimate user out of
+      // verifying at all. This is a flood guard, not an authorization control.
+      "/verify-email": { window: 60, max: 30 },
+      "/oauth2/register": { window: 60, max: 5 },
+      "/oauth2/token": { window: 60, max: 20 },
+      "/oauth2/introspect": { window: 60, max: 60 },
+      "/oauth2/revoke": { window: 60, max: 30 },
+      "/two-factor/*": { window: 60, max: 5 },
+      "/sso-recovery/*": { window: 60, max: 5 }, // brute-force defense on the recovery magic-link sign-in
+      // Account deletion: re-auths the password (credential) / consumes the email token (SSO). Restore
+      // the legacy 5/hour so a stolen session can't brute-force the password against delete-user (BA's
+      // default global limit, ~100/10s, is only a flood guard). The callback gets a modest defensive cap.
+      "/delete-user": { window: 3600, max: 5 },
+      "/delete-user/callback": { window: 60, max: 5 },
+    },
+  },
+
+  advanced: {
+    useSecureCookies: USE_SECURE_COOKIES, // "__Secure-" prefix on HTTPS; relaxed on http (local/dev)
+    cookiePrefix: "formbricks",
+    // Formbricks ids are cuid2 (Prisma `@default(cuid())` + the `ZId = z.cuid2()` validators in the
+    // service layer). Better Auth's default id format is NOT cuid2, so without this every Formbricks
+    // service that validates a user id via ZId (e.g. updateUser, called from the SSO provisioning
+    // write path) would reject BA-created users at cutover — caught by the SSO-provisioning test.
+    database: { generateId: () => createId() },
+    defaultCookieAttributes: { sameSite: "lax", httpOnly: true, secure: USE_SECURE_COOKIES, path: "/" },
+    // Proxy has already selected the configured trusted hop. Do not re-parse forwarding chains or add
+    // Better Auth trustedProxies here; the private single-value header is the canonical identity.
+    ipAddress: BETTER_AUTH_IP_ADDRESS_CONFIG,
+  },
+
+  // Route Better Auth's logs to @formbricks/logger and capture errors to Sentry (Phase 7 parity).
+  logger: betterAuthLogger,
+
+  plugins: [
+    jwt({
+      disableSettingJwtHeader: true,
+      jwt: {
+        issuer: getAuthIssuerUrl(),
+        audience: getMcpResourceUrl(),
+      },
+    }),
+    // Options extracted to mcp-oauth-provider-options.ts so the DCR/authorize scope semantics are
+    // integration-testable against a throwaway Better Auth instance.
+    oauthProvider(getMcpOauthProviderOptions()),
+    // TOTP + backup codes, matched to the current otplib setup (6 digits / 30s) and 10 encrypted
+    // backup codes. Trusted-device is left off (never passed client-side) so 2FA is required every
+    // login — strict parity. Cutover work (Phase 7): migrate secrets/backup codes out of
+    // User.twoFactorSecret|backupCodes into the twoFactor table, and move the login-time TOTP/
+    // backup challenge out of the credentials authorize into Better Auth's flow.
+    twoFactor({
+      issuer: "Formbricks",
+      skipVerificationOnEnable: false, // require a valid TOTP before 2FA is enabled
+      totpOptions: { digits: 6, period: 30 },
+      backupCodeOptions: { amount: 10, length: 10, storeBackupCodes: "encrypted" },
+    }),
+    // SSO via generic OAuth (Azure/OIDC + the BoxyHQ SAML bridge); empty config when no license or
+    // providers are configured. The account-linking/provisioning hooks are a separate reviewed pass.
+    genericOAuth({ config: ssoGenericOAuthConfig }),
+    // SSO-recovery magic-link sign-in — the BA replacement for the "token" provider's sso_recovery
+    // path (recovery-scoped, not a general magic-link). See better-auth-recovery-signin.ts.
+    ssoRecoverySignInPlugin,
+    // nextCookies MUST remain the last plugin so server-action sign-in/out can set cookies.
+    nextCookies(),
+  ],
+});

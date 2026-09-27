@@ -1,0 +1,116 @@
+import { TActionClassPageUrlRule } from "@formbricks/types/action-classes";
+
+export const testURLmatch = (
+  testUrl: string,
+  pageUrlValue: string,
+  pageUrlRule: TActionClassPageUrlRule,
+  t: (key: string) => string
+): boolean => {
+  let regex: RegExp;
+
+  switch (pageUrlRule) {
+    case "exactMatch":
+      return testUrl === pageUrlValue;
+    case "contains":
+      return testUrl.includes(pageUrlValue);
+    case "startsWith":
+      return testUrl.startsWith(pageUrlValue);
+    case "endsWith":
+      return testUrl.endsWith(pageUrlValue);
+    case "notMatch":
+      return testUrl !== pageUrlValue;
+    case "notContains":
+      return !testUrl.includes(pageUrlValue);
+    case "matchesRegex":
+      try {
+        regex = new RegExp(pageUrlValue);
+      } catch {
+        throw new Error(t("workspace.actions.invalid_regex"));
+      }
+
+      return regex.test(testUrl);
+    default:
+      throw new Error(t("workspace.actions.invalid_match_type"));
+  }
+};
+
+/**
+ * Upper bound on a callback URL, in characters (ENG-2783).
+ *
+ * A callback rides in a request line, and nginx's `large_client_header_buffers` defaults to `4 8k` with
+ * the rule that a request line must fit inside ONE buffer — so an over-long callback comes back as a
+ * bare `414 Request-URI Too Large`, a blank page with nothing to act on. Rejecting it here turns that
+ * into something diagnosable instead: `proxy.ts` answers `400 {"error":"Invalid callback URL"}`, and
+ * the auth flows fall back to `WEBAPP_URL` the same way they do for any other invalid callback.
+ *
+ * 2048 is the conventional safe maximum, and it is not a new constraint on this codebase:
+ * `resendVerificationEmailAction` has capped its callback at 2000 since it was written. The widest
+ * legitimate callback in the app is an invite link, `/invite?token=<jwt>`, which measures ~640
+ * characters with a long address — so this leaves roughly threefold headroom.
+ */
+export const MAX_CALLBACK_URL_LENGTH = 2048;
+
+// Helper function to validate callback URLs
+export const getValidatedCallbackUrl = (
+  url: string | null | undefined,
+  WEBAPP_URL: string
+): string | null => {
+  if (!url) {
+    return null;
+  }
+
+  try {
+    const parsedWebAppUrl = new URL(WEBAPP_URL);
+    const isAbsoluteUrl = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(url);
+    const isRootRelativePath = url.startsWith("/");
+
+    // Reject ambiguous non-URL values like "foo" while still allowing safe root-relative paths.
+    if (!isAbsoluteUrl && !isRootRelativePath) {
+      return null;
+    }
+
+    const parsedUrl = isAbsoluteUrl ? new URL(url) : new URL(url, parsedWebAppUrl.origin);
+    const allowedSchemes = ["https:", "http:"];
+    const allowedOrigins = new Set([parsedWebAppUrl.origin]);
+
+    if (!allowedSchemes.includes(parsedUrl.protocol)) {
+      return null;
+    }
+
+    if (!allowedOrigins.has(parsedUrl.origin)) {
+      return null;
+    }
+
+    if (parsedUrl.username || parsedUrl.password) {
+      return null;
+    }
+
+    // A same-origin absolute URL can still carry a scheme-relative pathname ("//evil.example").
+    // Consumers that reduce the URL to pathname+search+hash (login's router.push) would then
+    // navigate off-origin. Reject it here so every consumer is protected. Backslash and
+    // dot-segment variants normalize to a "//" pathname before this check. (ENG-1636)
+    if (parsedUrl.pathname.startsWith("//")) {
+      return null;
+    }
+
+    const validatedCallbackUrl = parsedUrl.toString();
+
+    // Measured on what we RETURN, not on what came in. `toString()` percent-encodes, up to ninefold
+    // for a 3-byte character, so an input under the cap can leave it: 258 characters ending in 227 CJK
+    // characters comes back as 2074. Checking the input instead made the function reject its own
+    // output, so a callback accepted here failed the re-validation in `completeSsoRecovery` and the
+    // user landed on the app root rather than where they were going.
+    return validatedCallbackUrl.length > MAX_CALLBACK_URL_LENGTH ? null : validatedCallbackUrl;
+  } catch {
+    return null;
+  }
+};
+
+export const isStringUrl = (url: string): boolean => {
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+};

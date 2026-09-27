@@ -1,0 +1,539 @@
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { prisma } from "@formbricks/database";
+import { Prisma, Response } from "@formbricks/database/prisma";
+import { logger } from "@formbricks/logger";
+import { TSurveyQuota } from "@formbricks/types/quota";
+import { TResponseData, TResponseVariables } from "@formbricks/types/responses";
+import { TSurveyQuestionTypeEnum } from "@formbricks/types/surveys/types";
+import { TSurvey } from "@formbricks/types/surveys/types";
+import { getSurvey } from "@/lib/survey/service";
+import { QuotaEvaluationInput, evaluateResponseQuotas } from "./evaluation-service";
+import { getQuotas } from "./quotas";
+import { evaluateQuotas, handleQuotas } from "./utils";
+
+// Mock dependencies
+vi.mock("@/lib/survey/service", () => ({
+  getSurvey: vi.fn(),
+}));
+
+vi.mock("@formbricks/database", () => ({
+  prisma: {
+    $transaction: vi.fn(),
+    response: {
+      findUnique: vi.fn(),
+    },
+  },
+}));
+
+vi.mock("@formbricks/logger", () => ({
+  logger: {
+    error: vi.fn(),
+  },
+}));
+
+vi.mock("./quotas", () => ({
+  getQuotas: vi.fn(),
+}));
+
+vi.mock("./utils", () => ({
+  evaluateQuotas: vi.fn(),
+  handleQuotas: vi.fn(),
+}));
+
+type MockTx = {
+  $transaction: ReturnType<typeof vi.fn>;
+  response: {
+    findUnique: ReturnType<typeof vi.fn>;
+  };
+};
+let mockTx: MockTx;
+const asTx = (tx: MockTx) => tx as unknown as Prisma.TransactionClient;
+
+describe("Quota Evaluation Service", () => {
+  const mockSurveyId = "survey123";
+  const mockResponseId = "response123";
+  const mockQuotaId = "quota123";
+  const mockEndingCardId = "ending123";
+
+  const mockSurvey: TSurvey = {
+    id: mockSurveyId,
+    name: "Test Survey",
+    type: "link",
+    status: "inProgress",
+    welcomeCard: {
+      enabled: false,
+      headline: { default: "Welcome!" },
+      buttonLabel: { default: "Next" },
+      timeToFinish: false,
+      showResponseCount: false,
+    },
+    questions: [
+      {
+        id: "q1",
+        type: TSurveyQuestionTypeEnum.OpenText,
+        headline: { default: "What's your age?" },
+        required: true,
+        charLimit: {},
+        inputType: "number",
+        longAnswer: false,
+        buttonLabel: { default: "Next" },
+        placeholder: { default: "Enter age" },
+      },
+    ],
+    endings: [
+      {
+        id: mockEndingCardId,
+        type: "endScreen",
+        headline: { default: "Thank you!" },
+        subheader: { default: "Survey completed" },
+        buttonLink: "https://example.com",
+        buttonLabel: { default: "Done" },
+      },
+    ],
+    hiddenFields: { enabled: true, fieldIds: [] },
+    variables: [],
+    displayOption: "displayOnce",
+    recontactDays: null,
+    displayLimit: null,
+    autoClose: null,
+    delay: 0,
+    displayPercentage: null,
+    isBackButtonHidden: false,
+    isAutoProgressingEnabled: false,
+    publishOn: null,
+    closeOn: null,
+    workspaceOverwrites: null,
+    styling: null,
+    showLanguageSwitch: null,
+    languages: [],
+    triggers: [],
+    segment: null,
+    recaptcha: null,
+    createdAt: new Date("2024-01-01"),
+    autoComplete: null,
+    createdBy: null,
+    followUps: [],
+    isVerifyEmailEnabled: false,
+    surveyClosedMessage: null,
+    singleUse: null,
+    pin: null,
+    workspaceId: "workspace123",
+    metadata: {},
+    updatedAt: new Date("2024-01-01"),
+    blocks: [],
+    isCaptureIpEnabled: false,
+    isAnonymizeResponsesEnabled: false,
+    slug: null,
+  };
+
+  const mockQuota: TSurveyQuota = {
+    id: mockQuotaId,
+    createdAt: new Date("2024-01-01"),
+    updatedAt: new Date("2024-01-01"),
+    surveyId: mockSurveyId,
+    name: "Age 18-25 Quota",
+    limit: 50,
+    logic: {
+      connector: "and",
+      conditions: [
+        {
+          id: "c1",
+          leftOperand: { type: "element", value: "q1" },
+          operator: "isGreaterThanOrEqual",
+          rightOperand: { type: "static", value: 18 },
+        },
+      ],
+    },
+    action: "endSurvey",
+    endingCardId: mockEndingCardId,
+    countPartialSubmissions: false,
+  };
+
+  const mockResponseData: TResponseData = {
+    q1: "22",
+  };
+
+  const mockVariablesData: TResponseVariables = {};
+
+  const mockResponse: Response = {
+    id: mockResponseId,
+    createdAt: new Date("2024-01-01"),
+    updatedAt: new Date("2024-01-01"),
+    surveyId: mockSurveyId,
+    finished: false,
+    data: mockResponseData,
+    ttc: null,
+    contactAttributes: {},
+    ingestFlags: null,
+    variables: mockVariablesData,
+    meta: {},
+    contactId: null,
+    singleUseId: null,
+    language: "default",
+    endingId: null,
+    displayId: null,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mockTx = {
+      $transaction: vi.fn(),
+      response: {
+        findUnique: vi.fn(),
+      },
+    };
+    prisma.$transaction = vi.fn(async (cb: any) => cb(mockTx));
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe("evaluateResponseQuotas", () => {
+    test("should return shouldEndSurvey false when no quotas exist", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        responseFinished: true,
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([]);
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        shouldEndSurvey: false,
+      });
+      expect(getQuotas).toHaveBeenCalledWith(mockSurveyId);
+      expect(getSurvey).not.toHaveBeenCalled();
+    });
+
+    test("should return shouldEndSurvey false when survey not found", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        responseFinished: true,
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(null);
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        shouldEndSurvey: false,
+      });
+      expect(getQuotas).toHaveBeenCalledWith(mockSurveyId);
+      expect(getSurvey).toHaveBeenCalledWith(mockSurveyId);
+    });
+
+    test("should process quotas successfully and return shouldEndSurvey false when quota action is not endSurvey", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        variables: mockVariablesData,
+        language: "en",
+        responseFinished: true,
+        tx: asTx(mockTx),
+      };
+
+      const continueSurveyQuota: TSurveyQuota = {
+        ...mockQuota,
+        action: "continueSurvey",
+      };
+
+      const evaluateResult = {
+        passedQuotas: [continueSurveyQuota],
+        failedQuotas: [],
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([continueSurveyQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(mockSurvey);
+      vi.mocked(evaluateQuotas).mockReturnValue(evaluateResult);
+      vi.mocked(handleQuotas).mockResolvedValue(continueSurveyQuota);
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        quotaFull: continueSurveyQuota,
+        shouldEndSurvey: false,
+      });
+
+      expect(getQuotas).toHaveBeenCalledWith(mockSurveyId);
+      expect(getSurvey).toHaveBeenCalledWith(mockSurveyId);
+      expect(evaluateQuotas).toHaveBeenCalledWith(
+        mockSurvey,
+        mockResponseData,
+        mockVariablesData,
+        [continueSurveyQuota],
+        "en",
+        {}
+      );
+      expect(handleQuotas).toHaveBeenCalledWith(mockSurveyId, mockResponseId, evaluateResult, true, mockTx);
+    });
+
+    test("should process quotas successfully and return shouldEndSurvey true when quota action is endSurvey", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        variables: mockVariablesData,
+        language: "en",
+        responseFinished: true,
+        tx: asTx(mockTx),
+      };
+
+      const evaluateResult = {
+        passedQuotas: [mockQuota],
+        failedQuotas: [],
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(mockSurvey);
+      vi.mocked(evaluateQuotas).mockReturnValue(evaluateResult);
+      vi.mocked(handleQuotas).mockResolvedValue(mockQuota);
+      vi.mocked(mockTx.response.findUnique).mockResolvedValue(mockResponse);
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        quotaFull: mockQuota,
+        shouldEndSurvey: true,
+        refreshedResponse: mockResponse,
+      });
+
+      expect(getQuotas).toHaveBeenCalledWith(mockSurveyId);
+      expect(getSurvey).toHaveBeenCalledWith(mockSurveyId);
+      expect(evaluateQuotas).toHaveBeenCalledWith(
+        mockSurvey,
+        mockResponseData,
+        mockVariablesData,
+        [mockQuota],
+        "en",
+        {}
+      );
+      expect(handleQuotas).toHaveBeenCalledWith(mockSurveyId, mockResponseId, evaluateResult, true, mockTx);
+      expect(mockTx.response.findUnique).toHaveBeenCalledWith({
+        where: { id: mockResponseId },
+      });
+    });
+
+    test("should process quotas successfully and return shouldEndSurvey true when quota action is endSurvey and responseFinished is false", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        variables: mockVariablesData,
+        responseFinished: false,
+        tx: asTx(mockTx),
+      };
+
+      const mockPartialSubmissionQuota = {
+        ...mockQuota,
+        countPartialSubmissions: true,
+      };
+
+      const evaluateResult = {
+        passedQuotas: [mockPartialSubmissionQuota],
+        failedQuotas: [],
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockPartialSubmissionQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(mockSurvey);
+      vi.mocked(evaluateQuotas).mockReturnValue(evaluateResult);
+      vi.mocked(handleQuotas).mockResolvedValue(mockPartialSubmissionQuota);
+      vi.mocked(mockTx.response.findUnique).mockResolvedValue(mockResponse);
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        quotaFull: mockPartialSubmissionQuota,
+        shouldEndSurvey: true,
+        refreshedResponse: mockResponse,
+      });
+
+      expect(getQuotas).toHaveBeenCalledWith(mockSurveyId);
+      expect(getSurvey).toHaveBeenCalledWith(mockSurveyId);
+      expect(evaluateQuotas).toHaveBeenCalledWith(
+        mockSurvey,
+        mockResponseData,
+        mockVariablesData,
+        [mockPartialSubmissionQuota],
+        "default",
+        {}
+      );
+      expect(handleQuotas).toHaveBeenCalledWith(mockSurveyId, mockResponseId, evaluateResult, false, mockTx);
+      expect(mockTx.response.findUnique).toHaveBeenCalledWith({ where: { id: mockResponseId } });
+    });
+
+    test("should return shouldEndSurvey false when handleQuotas returns null", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        variables: mockVariablesData,
+        language: "en",
+        responseFinished: true,
+      };
+
+      const evaluateResult = {
+        passedQuotas: [mockQuota],
+        failedQuotas: [],
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(mockSurvey);
+      vi.mocked(evaluateQuotas).mockReturnValue(evaluateResult);
+      vi.mocked(handleQuotas).mockResolvedValue(null);
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        quotaFull: null,
+        shouldEndSurvey: false,
+      });
+    });
+
+    test("should handle getSurvey error gracefully", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        responseFinished: true,
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockRejectedValue(new Error("Survey service error"));
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        shouldEndSurvey: false,
+      });
+
+      expect(logger.error).toHaveBeenCalledWith(
+        { error: expect.any(Error), responseId: mockResponseId },
+        "Error evaluating quotas for response"
+      );
+    });
+
+    test("should handle evaluateQuotas error gracefully", async () => {
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        responseFinished: true,
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(mockSurvey);
+      vi.mocked(evaluateQuotas).mockImplementation(() => {
+        throw new Error("Evaluation error");
+      });
+
+      const result = await evaluateResponseQuotas(input);
+
+      expect(result).toEqual({
+        shouldEndSurvey: false,
+      });
+
+      expect(logger.error).toHaveBeenCalledWith(
+        { error: expect.any(Error), responseId: mockResponseId },
+        "Error evaluating quotas for response"
+      );
+    });
+
+    test("resolves reserved-field values from the response so a reserved quota condition can match", async () => {
+      // The real `buildServerEmbeddedValues` runs here (only ./utils and the data loaders are mocked),
+      // so this asserts the actual catalog projection reaches `evaluateQuotas` — the wiring that was
+      // missing when the helper had no production caller.
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        variables: mockVariablesData,
+        language: "en",
+        responseFinished: true,
+        response: {
+          id: mockResponseId,
+          surveyId: mockSurveyId,
+          createdAt: new Date("2026-08-01T09:00:00.000Z"),
+          updatedAt: new Date("2026-08-01T09:02:00.000Z"),
+          finished: true,
+          language: "en",
+          data: mockResponseData,
+          variables: mockVariablesData,
+          ttc: { _total: 120_000 },
+          meta: { country: "DE", userAgent: { browser: "Chrome" } },
+        },
+        tx: asTx(mockTx),
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(mockSurvey);
+      vi.mocked(evaluateQuotas).mockReturnValue({ passedQuotas: [mockQuota], failedQuotas: [] });
+      vi.mocked(handleQuotas).mockResolvedValue(null);
+
+      await evaluateResponseQuotas(input);
+
+      expect(evaluateQuotas).toHaveBeenCalledWith(
+        mockSurvey,
+        mockResponseData,
+        mockVariablesData,
+        [mockQuota],
+        "en",
+        expect.objectContaining({
+          country: "DE",
+          browser: "Chrome",
+          finished: "true",
+          durationSeconds: 120,
+        })
+      );
+    });
+
+    test("should use 'default' language when provided language matches default language", async () => {
+      const surveyWithLanguages = {
+        ...mockSurvey,
+        languages: [
+          { default: true, language: { code: "en", flag: "🇺🇸" } },
+          { default: false, language: { code: "fr", flag: "🇫🇷" } },
+        ],
+      };
+
+      const input: QuotaEvaluationInput = {
+        surveyId: mockSurveyId,
+        responseId: mockResponseId,
+        data: mockResponseData,
+        variables: mockVariablesData,
+        language: "en",
+        responseFinished: true,
+        tx: asTx(mockTx),
+      };
+
+      const evaluateResult = {
+        passedQuotas: [mockQuota],
+        failedQuotas: [],
+      };
+
+      vi.mocked(getQuotas).mockResolvedValue([mockQuota]);
+      vi.mocked(getSurvey).mockResolvedValue(surveyWithLanguages as unknown as TSurvey);
+      vi.mocked(evaluateQuotas).mockReturnValue(evaluateResult);
+      vi.mocked(handleQuotas).mockResolvedValue(null);
+
+      await evaluateResponseQuotas(input);
+
+      expect(evaluateQuotas).toHaveBeenCalledWith(
+        surveyWithLanguages,
+        mockResponseData,
+        mockVariablesData,
+        [mockQuota],
+        "default",
+        {}
+      );
+    });
+  });
+});

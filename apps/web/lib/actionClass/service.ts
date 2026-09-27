@@ -1,0 +1,188 @@
+"use server";
+
+import "server-only";
+import { cache as reactCache } from "react";
+import { prisma } from "@formbricks/database";
+import { ActionClass, Prisma } from "@formbricks/database/prisma";
+import { TActionClass, TActionClassInput, ZActionClassInput } from "@formbricks/types/action-classes";
+import { ZId, ZOptionalNumber, ZString } from "@formbricks/types/common";
+import { DatabaseError, ResourceNotFoundError, UniqueConstraintError } from "@formbricks/types/errors";
+import { ITEMS_PER_PAGE } from "../constants";
+import { getUniqueConstraintFields, isUniqueConstraintError } from "../utils/prisma-constraint";
+import { validateInputs } from "../utils/validate";
+
+const selectActionClass = {
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  name: true,
+  description: true,
+  type: true,
+  key: true,
+  noCodeConfig: true,
+  workspaceId: true,
+} satisfies Prisma.ActionClassSelect;
+
+export const getActionClasses = reactCache(
+  async (workspaceId: string, page?: number): Promise<TActionClass[]> => {
+    validateInputs([workspaceId, ZId], [page, ZOptionalNumber]);
+
+    try {
+      return await prisma.actionClass.findMany({
+        where: {
+          workspaceId,
+        },
+        select: selectActionClass,
+        take: page ? ITEMS_PER_PAGE : undefined,
+        skip: page ? ITEMS_PER_PAGE * (page - 1) : undefined,
+        orderBy: {
+          createdAt: "asc",
+        },
+      });
+    } catch (error) {
+      throw new DatabaseError(`Database error when fetching actions for workspace ${workspaceId}`);
+    }
+  }
+);
+
+// This function is used to get an action by its name and workspaceId(it can return private actions as well)
+export const getActionClassByWorkspaceIdAndName = reactCache(
+  async (workspaceId: string, name: string): Promise<TActionClass | null> => {
+    validateInputs([workspaceId, ZId], [name, ZString]);
+
+    try {
+      const actionClass = await prisma.actionClass.findFirst({
+        where: {
+          name,
+          workspaceId,
+        },
+        select: selectActionClass,
+      });
+
+      return actionClass;
+    } catch (error) {
+      throw new DatabaseError(`Database error when fetching action`);
+    }
+  }
+);
+
+export const getActionClass = reactCache(async (actionClassId: string): Promise<TActionClass | null> => {
+  validateInputs([actionClassId, ZId]);
+
+  try {
+    const actionClass = await prisma.actionClass.findUnique({
+      where: {
+        id: actionClassId,
+      },
+      select: selectActionClass,
+    });
+
+    return actionClass;
+  } catch (error) {
+    throw new DatabaseError(`Database error when fetching action`);
+  }
+});
+
+export const deleteActionClass = async (actionClassId: string): Promise<TActionClass> => {
+  validateInputs([actionClassId, ZId]);
+
+  try {
+    const actionClass = await prisma.actionClass.delete({
+      where: {
+        id: actionClassId,
+      },
+      select: selectActionClass,
+    });
+    if (actionClass === null) throw new ResourceNotFoundError("Action", actionClassId);
+
+    return actionClass;
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+    throw error;
+  }
+};
+
+export const createActionClass = async (actionClass: TActionClassInput): Promise<ActionClass> => {
+  validateInputs([actionClass, ZActionClassInput]);
+
+  const { workspaceId, ...actionClassInput } = actionClass;
+
+  try {
+    const actionClassPrisma = await prisma.actionClass.create({
+      data: {
+        ...actionClassInput,
+        workspace: { connect: { id: workspaceId } },
+        key: actionClassInput.type === "code" ? actionClassInput.key : undefined,
+        noCodeConfig:
+          actionClassInput.type === "noCode"
+            ? actionClassInput.noCodeConfig === null
+              ? undefined
+              : actionClassInput.noCodeConfig
+            : undefined,
+      },
+      select: selectActionClass,
+    });
+
+    return actionClassPrisma;
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const targetField = getUniqueConstraintFields(error)[0];
+      throw new UniqueConstraintError(
+        `Action with ${targetField} ${targetField ? (actionClass as Record<string, unknown>)[targetField] : ""} already exists`
+      );
+    }
+
+    throw new DatabaseError(`Database error when creating an action for workspace ${workspaceId}`);
+  }
+};
+
+export const updateActionClass = async (
+  workspaceId: string,
+  actionClassId: string,
+  inputActionClass: TActionClassInput
+): Promise<TActionClass> => {
+  validateInputs([workspaceId, ZId], [actionClassId, ZId], [inputActionClass, ZActionClassInput]);
+
+  const { workspaceId: __, ...actionClassInput } = inputActionClass;
+  try {
+    const result = await prisma.actionClass.update({
+      where: {
+        id: actionClassId,
+      },
+      data: {
+        ...actionClassInput,
+        key: actionClassInput.type === "code" ? actionClassInput.key : undefined,
+        noCodeConfig:
+          actionClassInput.type === "noCode"
+            ? actionClassInput.noCodeConfig === null
+              ? undefined
+              : actionClassInput.noCodeConfig
+            : undefined,
+      },
+      select: {
+        ...selectActionClass,
+        surveyTriggers: {
+          select: {
+            surveyId: true,
+          },
+        },
+      },
+    });
+
+    return result;
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const targetField = getUniqueConstraintFields(error)[0];
+      throw new UniqueConstraintError(
+        `Action with ${targetField} ${targetField ? (inputActionClass as Record<string, unknown>)[targetField] : ""} already exists`
+      );
+    }
+
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+    throw error;
+  }
+};

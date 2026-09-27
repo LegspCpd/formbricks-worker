@@ -1,0 +1,125 @@
+---
+title: Audit Logging
+sidebarTitle: Audit Logging
+description: Enable comprehensive audit logs for your Formbricks instance.
+icon: file-shield
+---
+
+Audit logs record **who** did **what**, **when**, **from where**, and **with what outcome** across your Formbricks instance.
+
+<Note>
+  Audit logging is an Enterprise feature. Configure your
+  [Enterprise license](/self-hosting/advanced/license) before enabling it.
+</Note>
+
+## Benefits Of Audit Logging
+
+- **Compliance evidence** — Exported audit events can support the controls and evidence required by your compliance program.
+- **Security investigation support** — Audit logs provide visibility into covered user and system actions during an incident.
+- **Operational accountability** — Track covered changes to answer questions such as "_who modified this?_" or "_when was this deleted?_".
+
+## Enabling Audit Logging
+
+1. Set the following environment variables in your deployment (Docker Compose, Kubernetes, etc.):
+
+```bash title=".env"
+# --- Audit logging ---
+AUDIT_LOG_ENABLED=1
+AUDIT_LOG_GET_USER_IP=1
+
+# Set this to the exact number of trusted proxies in front of Formbricks.
+TRUSTED_PROXY_HOP_COUNT=1
+```
+
+2. Redeploy your containers.
+3. Confirm you can see audit logs in the output of your containers.
+
+Audit logs are written to **stdout** as JSON Lines. Configure your container platform or logging agent to forward
+records with `level: "audit"` to your central logging destination.
+
+### Configure Trusted Proxy Hops
+
+`AUDIT_LOG_GET_USER_IP=1` uses Formbricks' shared client-IP resolver. `TRUSTED_PROXY_HOP_COUNT` must equal the
+number of trusted CDN, WAF, load-balancer, ingress, and Envoy hops that append to `X-Forwarded-For` before the
+request reaches Formbricks. The application and Helm chart default to `1`, which assumes one trusted reverse
+proxy.
+
+Examples:
+
+| Request Path | `TRUSTED_PROXY_HOP_COUNT` |
+| --- | ---: |
+| Client → ingress → Formbricks | `1` |
+| Client → load balancer → Envoy → Formbricks | `2` |
+| Client → CDN/WAF → load balancer → Envoy → Formbricks | `3` |
+
+<Warning>
+  Count the hops in your real deployment; do not copy an example blindly. A value higher than the real chain can
+  let a client prepend and spoof the selected address. A value lower than the real chain selects an intermediate
+  proxy instead of the client. A missing, malformed, or shorter-than-configured chain fails closed to
+  `untrusted-client-ip`. This setting also affects IP-based rate limits and captured response IP metadata.
+</Warning>
+
+With the Helm chart, configure the values under `deployment.env`:
+
+```yaml
+deployment:
+  env:
+    AUDIT_LOG_ENABLED: "1"
+    AUDIT_LOG_GET_USER_IP: "1"
+    TRUSTED_PROXY_HOP_COUNT: "2"
+```
+
+## Understanding The Log Format
+
+Audit logs are **JSON Lines** (one JSON object per line). A typical entry looks like this:
+
+```json
+{"level":"audit","time":1749207302158,"pid":20023,"hostname":"formbricks-node-1","name":"formbricks","actor":{"id":"cm90t4t7l0000vrws5hpo5ta5","type":"api"},"action":"created","target":{"id":"cmbkov4dn0000vrg72i7oznqv","type":"webhook"},"timestamp":"2025-06-06T10:55:02.145Z","organizationId":"cm8zovtbm0001vr3efa4n03ms","status":"success","ipAddress":"unknown","apiUrl":"http://localhost:3000/api/v1/webhooks","changes":{"id":"cmbkov4dn0000vrg72i7oznqv","name":"********","createdAt":"2025-06-06T10:55:02.123Z","updatedAt":"2025-06-06T10:55:02.123Z","url":"https://eoy8o887lmsqmhz.m.pipedream.net","source":"user","workspaceId":"cm8zowv0b0009vr3ec56w2qf3","environmentId":"cm8zowv0b0009vr3ec56w2qf3","triggers":["responseCreated","responseUpdated","responseFinished"],"surveyIds":[]}}
+```
+
+Key fields:
+
+| Field | Description |
+|-------|-------------|
+| `level` | Log level, always `"audit"` for audit events |
+| `time` | Unix timestamp in milliseconds |
+| `pid` | Process ID of the logging instance |
+| `hostname` | Hostname of the server generating the log |
+| `name` | Application name, typically `"formbricks"` |
+| `timestamp` | ISO‑8601 time of the action |
+| `actor` | User or API key responsible (object with `id` and `type`) |
+| `action` | Action value such as `created`, `updated`, `authenticationAttempted`, or `signedIn` |
+| `target` | The resource affected (object with `id` and `type`) |
+| `status` | `success` or `failure` |
+| `organizationId` | Organization identifier where the action occurred |
+| `ipAddress` | Resolved client IP when capture is enabled; otherwise `"unknown"`. An untrusted forwarding chain produces `"untrusted-client-ip"` |
+| `apiUrl` | (Optional) API endpoint URL when the event was generated through an API call |
+| `eventId` | (Optional) Available on failure events for correlation with the application log |
+| `changes` | (Optional) Only the fields that actually changed (sensitive values redacted) |
+
+## Centralized Logging And Compliance
+
+Formbricks emits audit events to the application logger. The container's stdout stream is not, by itself, a
+durable or immutable audit store. Your deployment must forward the events to a logging platform and configure the
+controls required by your organization, including:
+
+- retention and archival periods;
+- write-once or immutability controls;
+- access controls and separation of duties;
+- deletion protection and tamper detection; and
+- monitoring for delivery failures.
+
+Audit logging can support a SOC 2 or other compliance program, but enabling this feature does not make a
+deployment compliant. Suitability depends on the coverage, forwarding, storage, and operational controls in your
+environment.
+
+## Additional Details
+
+- **Redacted values:** Sensitive fields covered by the audit redaction helpers are replaced with `"********"`
+  before the event is written.
+- **Success and failure:** Covered operations can emit both `success` and `failure` events.
+- **Delivery model:** Formbricks writes events through the application logger; query APIs, long-term retention,
+  and exports belong to your logging platform.
+- **Scope limitation:** For now, **only events triggered inside the `Formbricks` application** are audited. This means:
+  - **Embed and Link Surveys** are **not** included in the audit logs.
+  - **Survey responses** created via the client API or client-side SDKs are **not** audited.

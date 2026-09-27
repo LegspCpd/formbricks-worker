@@ -1,0 +1,309 @@
+import type {
+  TSurveyStyling,
+  TUserState,
+  TWorkspaceState,
+  TWorkspaceStateActionClass,
+  TWorkspaceStateSettings,
+  TWorkspaceStateSurvey,
+  TWorkspaceStyling,
+} from "@/types/config";
+import type { Result } from "@/types/error";
+import { type TActionClassNoCodeConfig, type TActionClassPageUrlRule } from "@/types/survey";
+
+// Helper function to calculate difference in days between two dates
+export const diffInDays = (date1: Date, date2: Date): number => {
+  const diffTime = Math.abs(date2.getTime() - date1.getTime());
+  return Math.floor(diffTime / (1000 * 60 * 60 * 24));
+};
+
+export const wrapThrows =
+  <T, A extends unknown[]>(fn: (...args: A) => T): ((...args: A) => Result<T>) =>
+  (...args: A): Result<T> => {
+    try {
+      return {
+        ok: true,
+        data: fn(...args),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error as Error,
+      };
+    }
+  };
+
+export const wrapThrowsAsync =
+  <T, A extends unknown[]>(fn: (...args: A) => Promise<T>) =>
+  async (...args: A): Promise<Result<T>> => {
+    try {
+      return {
+        ok: true,
+        data: await fn(...args),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error as Error,
+      };
+    }
+  };
+
+/**
+ * Detect whether a survey's segment has filters. Handles both the current
+ * minimal shape (`{ id, hasFilters }`) and the legacy shape with a `filters`
+ * array — older SDKs cached the full segment in localStorage and may still be
+ * read back here within the cache window after an SDK upgrade.
+ */
+export const surveyHasSegmentFilters = (survey: TWorkspaceStateSurvey): boolean => {
+  const segment = survey.segment as { hasFilters?: boolean; filters?: unknown[] } | null | undefined;
+  if (!segment) return false;
+  if (typeof segment.hasFilters === "boolean") return segment.hasFilters;
+  return Array.isArray(segment.filters) && segment.filters.length > 0;
+};
+
+/**
+ * Filters surveys based on the displayOption, recontactDays, and segments
+ * @param workspace -  The workspace state
+ * @param userState - The user state
+ * @returns The filtered surveys
+ */
+
+// takes the workspace and user state and returns the filtered surveys
+export const filterSurveys = (workspace: TWorkspaceState, userState: TUserState): TWorkspaceStateSurvey[] => {
+  const { settings, surveys } = workspace.data;
+  const { displays, responses, lastDisplayAt, segments, userId } = userState.data;
+
+  // Function to filter surveys based on displayOption criteria
+  let filteredSurveys = surveys.filter((survey: TWorkspaceStateSurvey) => {
+    switch (survey.displayOption) {
+      case "respondMultiple":
+        return true;
+      case "displayOnce":
+        return displays.filter((display) => display.surveyId === survey.id).length === 0;
+      case "displayMultiple":
+        return responses.filter((surveyId) => surveyId === survey.id).length === 0;
+
+      case "displaySome":
+        if (survey.displayLimit === null) {
+          return true;
+        }
+
+        // Check if survey response exists, if so, stop here
+        if (responses.filter((surveyId) => surveyId === survey.id).length) {
+          return false;
+        }
+
+        // Otherwise, check if displays length is less than displayLimit
+        return displays.filter((display) => display.surveyId === survey.id).length < survey.displayLimit;
+
+      default:
+        throw Error("Invalid displayOption");
+    }
+  });
+
+  // filter surveys that meet the recontactDays criteria
+  filteredSurveys = filteredSurveys.filter((survey) => {
+    // if no survey was displayed yet, show the survey
+    if (!lastDisplayAt) {
+      return true;
+    }
+
+    // if survey has recontactDays, check if the last display was more than recontactDays ago
+    // The previous approach checked the last display for each survey which is why we still have a surveyId in the displays array.
+    // TODO: Remove the surveyId from the displays array
+    if (survey.recontactDays !== null) {
+      return diffInDays(new Date(), new Date(lastDisplayAt)) >= survey.recontactDays;
+    }
+
+    // use recontactDays of the workspace if survey does not have recontactDays
+    if (settings.recontactDays) {
+      return diffInDays(new Date(), new Date(lastDisplayAt)) >= settings.recontactDays;
+    }
+
+    // if no recontactDays is set, show the survey
+
+    return true;
+  });
+
+  if (!userId) {
+    // exclude surveys that have a segment with filters
+    return filteredSurveys.filter((survey) => {
+      return !surveyHasSegmentFilters(survey);
+    });
+  }
+
+  if (!segments.length) {
+    return [];
+  }
+
+  // filter surveys based on segments
+  return filteredSurveys.filter((survey) => {
+    return survey.segment?.id && segments.includes(survey.segment.id);
+  });
+};
+
+export const getStyling = (
+  settings: TWorkspaceStateSettings,
+  survey: TWorkspaceStateSurvey
+): TWorkspaceStyling | TSurveyStyling => {
+  // allow style overwrite is enabled from the workspace
+  if (settings.styling.allowStyleOverwrite) {
+    // survey style overwrite is disabled
+    if (!survey.styling?.overwriteThemeStyling) {
+      return settings.styling;
+    }
+
+    // survey style overwrite is enabled
+    return survey.styling;
+  }
+
+  // allow style overwrite is disabled from the workspace
+  return settings.styling;
+};
+
+export const getDefaultLanguageCode = (survey: TWorkspaceStateSurvey): string | undefined => {
+  const defaultSurveyLanguage = survey.languages.find((surveyLanguage) => {
+    return surveyLanguage.default;
+  });
+  if (defaultSurveyLanguage) return defaultSurveyLanguage.language.code;
+};
+
+export const getLanguageCode = (survey: TWorkspaceStateSurvey, language?: string): string | undefined => {
+  const availableLanguageCodes = survey.languages.map((surveyLanguage) => surveyLanguage.language.code);
+  if (!language) return "default";
+
+  const selectedLanguage = survey.languages.find((surveyLanguage) => {
+    return (
+      surveyLanguage.language.code.toLowerCase() === language.toLowerCase() ||
+      surveyLanguage.language.alias?.toLowerCase() === language.toLowerCase()
+    );
+  });
+  if (selectedLanguage?.default) {
+    return "default";
+  }
+  if (
+    !selectedLanguage ||
+    !selectedLanguage.enabled ||
+    !availableLanguageCodes.includes(selectedLanguage.language.code)
+  ) {
+    return undefined;
+  }
+  return selectedLanguage.language.code;
+};
+
+export const getSecureRandom = (): number => {
+  const u32 = new Uint32Array(1);
+  crypto.getRandomValues(u32);
+  return u32[0] / 2 ** 32; // Normalized to [0, 1)
+};
+
+export const shouldDisplayBasedOnPercentage = (displayPercentage: number): boolean => {
+  const randomNum = Math.floor(getSecureRandom() * 10000) / 100;
+  return randomNum <= displayPercentage;
+};
+
+export const isNowExpired = (expirationDate: Date): boolean => new Date() >= expirationDate;
+
+export const checkUrlMatch = (
+  url: string,
+  pageUrlValue: string,
+  pageUrlRule: TActionClassPageUrlRule
+): boolean => {
+  let regex: RegExp;
+
+  switch (pageUrlRule) {
+    case "exactMatch":
+      return url === pageUrlValue;
+    case "contains":
+      return url.includes(pageUrlValue);
+    case "startsWith":
+      return url.startsWith(pageUrlValue);
+    case "endsWith":
+      return url.endsWith(pageUrlValue);
+    case "notMatch":
+      return url !== pageUrlValue;
+    case "notContains":
+      return !url.includes(pageUrlValue);
+    case "matchesRegex":
+      try {
+        regex = new RegExp(pageUrlValue);
+      } catch {
+        // edge case: fail closed if the regex expression is invalid
+        return false;
+      }
+
+      return regex.test(url);
+    default:
+      return false;
+  }
+};
+
+export const handleUrlFilters = (
+  urlFilters: TActionClassNoCodeConfig["urlFilters"],
+  connector: "or" | "and" = "or"
+): boolean => {
+  if (urlFilters.length === 0) {
+    return true;
+  }
+
+  const windowUrl = window.location.href;
+
+  if (connector === "and") {
+    const isMatch = urlFilters.every((filter) => {
+      const match = checkUrlMatch(windowUrl, filter.value, filter.rule);
+      return match;
+    });
+    return isMatch;
+  }
+
+  const isMatch = urlFilters.some((filter) => {
+    const match = checkUrlMatch(windowUrl, filter.value, filter.rule);
+    return match;
+  });
+
+  return isMatch;
+};
+
+export const evaluateNoCodeConfigClick = (
+  targetElement: HTMLElement,
+  action: TWorkspaceStateActionClass
+): boolean => {
+  if (action.noCodeConfig?.type !== "click") return false;
+
+  const innerHtml = action.noCodeConfig.elementSelector.innerHtml;
+  const cssSelector = action.noCodeConfig.elementSelector.cssSelector;
+  const urlFilters = action.noCodeConfig.urlFilters;
+
+  if (!innerHtml && !cssSelector) return false;
+
+  // Resolve the element to test: prefer the direct click target, but walk up to
+  // the nearest ancestor that matches the CSS selector (event delegation for nested markup,
+  // e.g. <svg> or <span> inside a <button class="my-btn">).
+  let matchedElement: HTMLElement = targetElement;
+
+  if (cssSelector) {
+    let matchesDirectly = false;
+    try {
+      matchesDirectly = targetElement.matches(cssSelector);
+    } catch {
+      matchesDirectly = false;
+    }
+    if (!matchesDirectly) {
+      const ancestor = targetElement.closest(cssSelector);
+      if (!ancestor) return false;
+      matchedElement = ancestor as HTMLElement;
+    }
+  }
+
+  // Check innerHtml against the resolved element, not the raw click target
+  if (innerHtml && matchedElement.innerHTML !== innerHtml) return false;
+
+  const connector = action.noCodeConfig.urlFiltersConnector ?? "or";
+  const isValidUrl = handleUrlFilters(urlFilters, connector);
+
+  if (!isValidUrl) return false;
+
+  return true;
+};
+
+export const getIsDebug = (): boolean => window.location.search.includes("formbricksDebug=true");

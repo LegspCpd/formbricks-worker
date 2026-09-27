@@ -1,0 +1,562 @@
+import {
+  getMockUpdateResponseInput,
+  mockContact,
+  mockContactId,
+  mockDisplay,
+  mockResponse,
+  mockResponseData,
+  mockResponseWithQuotas,
+  mockSingleUseId,
+  mockSurveyId,
+  mockSurveySummaryOutput,
+  mockTags,
+  mockWorkspaceId,
+} from "./__mocks__/data.mock";
+import { prisma } from "@/lib/__mocks__/database";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { testInputValidation } from "vitestSetup";
+import { Prisma } from "@formbricks/database/prisma";
+import { PrismaErrorType } from "@formbricks/database/types/error";
+import { DatabaseError, ResourceNotFoundError } from "@formbricks/types/errors";
+import { TResponse } from "@formbricks/types/responses";
+import { TTag } from "@formbricks/types/tags";
+import { getSurveySummary } from "@/app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/summary/lib/surveySummary";
+import {
+  mockContactAttributeKey,
+  mockOrganizationOutput,
+  mockSurveyOutput,
+} from "../../survey/__mock__/survey.mock";
+import {
+  deleteResponse,
+  getResponse,
+  getResponseBySingleUseId,
+  getResponseCountBySurveyId,
+  getResponseDownloadFile,
+  getResponseWithQuotas,
+  getResponsesByContactId,
+  getResponsesByWorkspaceId,
+  responseSelection,
+  updateResponse,
+} from "../service";
+
+const expectedResponseWithoutPerson: TResponse = {
+  ...mockResponse,
+  contact: null,
+  tags: mockTags.map((tagPrisma: { tag: TTag }) => tagPrisma.tag),
+};
+
+const mockOrganizationBillingRecord = {
+  stripeCustomerId: mockOrganizationOutput.billing.stripeCustomerId,
+  limits: mockOrganizationOutput.billing.limits,
+  usageCycleAnchor: mockOrganizationOutput.billing.usageCycleAnchor,
+  stripe: null,
+};
+
+beforeEach(() => {
+  // @ts-expect-error
+  prisma.response.create.mockImplementation(async (args) => {
+    if (args.data.contact && args.data.contact.connect) {
+      return {
+        ...mockResponse,
+        contact: mockContact,
+      };
+    }
+
+    return mockResponse;
+  });
+
+  // mocking the person findFirst call as it is used in the transformPrismaPerson function
+  prisma.contact.findFirst.mockResolvedValue(mockContact);
+
+  prisma.response.findUnique.mockResolvedValue(mockResponse);
+
+  // @ts-expect-error
+  prisma.response.update.mockImplementation(async (args) => {
+    if (args.data.finished === true) {
+      return {
+        ...mockResponse,
+        finished: true,
+        data: mockResponseData,
+      };
+    }
+
+    return {
+      ...mockResponse,
+      finished: false,
+      data: mockResponseData,
+    };
+  });
+
+  prisma.response.findMany.mockResolvedValue([mockResponse]);
+  prisma.response.delete.mockResolvedValue(mockResponse);
+
+  prisma.display.delete.mockResolvedValue({ ...mockDisplay, status: "seen" } as unknown as any);
+
+  prisma.response.count.mockResolvedValue(1);
+
+  prisma.organization.findFirst.mockResolvedValue(mockOrganizationOutput as unknown as any);
+  prisma.organization.findUnique.mockResolvedValue(mockOrganizationOutput as unknown as any);
+  prisma.organizationBilling.findUnique.mockResolvedValue(mockOrganizationBillingRecord as unknown as any);
+  prisma.workspace.findMany.mockResolvedValue([]);
+  prisma.workspace.findUnique.mockResolvedValue({ organizationId: mockOrganizationOutput.id } as any);
+  // @ts-expect-error
+  prisma.response.aggregate.mockResolvedValue({ _count: { id: 1 } });
+});
+
+describe("Tests for getResponsesBySingleUseId", () => {
+  describe("Happy Path", () => {
+    test("Retrieves responses linked to a specific single-use ID", async () => {
+      const responses = await getResponseBySingleUseId(mockSurveyId, mockSingleUseId);
+      expect(responses).toEqual(expectedResponseWithoutPerson);
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getResponseBySingleUseId, "123#", "123#");
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError occurrence", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      prisma.response.findUnique.mockRejectedValue(errToThrow);
+
+      await expect(getResponseBySingleUseId(mockSurveyId, mockSingleUseId)).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws a generic Error for other exceptions", async () => {
+      const mockErrorMessage = "Mock error message";
+      prisma.response.findUnique.mockRejectedValue(new Error(mockErrorMessage));
+
+      await expect(getResponseBySingleUseId(mockSurveyId, mockSingleUseId)).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for getResponse service", () => {
+  describe("Happy Path", () => {
+    test("Retrieves a specific response by its ID", async () => {
+      const response = await getResponse(mockResponse.id);
+      expect(response).toEqual(expectedResponseWithoutPerson);
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getResponse, "123#");
+
+    test("Throws ResourceNotFoundError if no response is found", async () => {
+      prisma.response.findUnique.mockResolvedValue(null);
+      const response = await getResponse(mockResponse.id);
+      expect(response).toBeNull();
+    });
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      prisma.response.findUnique.mockRejectedValue(errToThrow);
+
+      await expect(getResponse(mockResponse.id)).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws a generic Error for other unexpected issues", async () => {
+      const mockErrorMessage = "Mock error message";
+      prisma.response.findUnique.mockRejectedValue(new Error(mockErrorMessage));
+
+      await expect(getResponse(mockResponse.id)).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for getResponseWithQuotas service", () => {
+  describe("Happy Path", () => {
+    test("Returns the response with screened-in quotas", async () => {
+      prisma.response.findUnique.mockResolvedValue(mockResponseWithQuotas);
+
+      const result = await getResponseWithQuotas(mockResponseWithQuotas.id);
+
+      expect(result).toEqual({
+        ...expectedResponseWithoutPerson,
+        quotas: mockResponseWithQuotas.quotaLinks.map(
+          (ql: { quota: { id: string; name: string } }) => ql.quota
+        ),
+      });
+    });
+
+    test("Returns an empty quotas array when no quotaLinks are screened in", async () => {
+      prisma.response.findUnique.mockResolvedValue({ ...mockResponse, quotaLinks: [] } as any);
+
+      const result = await getResponseWithQuotas(mockResponse.id);
+
+      expect(result).toEqual({ ...expectedResponseWithoutPerson, quotas: [] });
+    });
+
+    test("Selects only screened-in quotaLinks", async () => {
+      prisma.response.findUnique.mockResolvedValue({ ...mockResponse, quotaLinks: [] } as any);
+
+      await getResponseWithQuotas(mockResponse.id);
+
+      const findUniqueCall = prisma.response.findUnique.mock.calls.at(-1)?.[0];
+      expect(findUniqueCall?.select?.quotaLinks).toEqual({
+        where: { status: "screenedIn" },
+        include: { quota: { select: { id: true, name: true } } },
+      });
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getResponseWithQuotas, "123#");
+
+    test("Returns null when no response is found", async () => {
+      prisma.response.findUnique.mockResolvedValue(null);
+
+      const result = await getResponseWithQuotas(mockResponse.id);
+      expect(result).toBeNull();
+    });
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError", async () => {
+      const errToThrow = new Prisma.PrismaClientKnownRequestError("Mock error", {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+      prisma.response.findUnique.mockRejectedValue(errToThrow);
+
+      await expect(getResponseWithQuotas(mockResponse.id)).rejects.toThrow(DatabaseError);
+    });
+
+    test("Rethrows generic errors", async () => {
+      prisma.response.findUnique.mockRejectedValue(new Error("boom"));
+
+      await expect(getResponseWithQuotas(mockResponse.id)).rejects.toThrow("boom");
+    });
+  });
+});
+
+describe("Tests for getSurveySummary service", () => {
+  describe("Happy Path", () => {
+    test("Returns a summary of the survey responses", async () => {
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.findMany.mockResolvedValue([mockResponse]);
+      prisma.contactAttributeKey.findMany.mockResolvedValueOnce([mockContactAttributeKey]);
+      prisma.surveyQuota.findMany.mockResolvedValue([]);
+
+      const summary = await getSurveySummary(mockSurveyId);
+      expect(summary).toEqual(mockSurveySummaryOutput);
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getSurveySummary, 1);
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.findMany.mockRejectedValue(errToThrow);
+      prisma.contactAttributeKey.findMany.mockResolvedValueOnce([mockContactAttributeKey]);
+
+      await expect(getSurveySummary(mockSurveyId)).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws a generic Error for unexpected problems", async () => {
+      const mockErrorMessage = "Mock error message";
+
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.findMany.mockRejectedValue(new Error(mockErrorMessage));
+      prisma.contactAttributeKey.findMany.mockResolvedValueOnce([mockContactAttributeKey]);
+
+      await expect(getSurveySummary(mockSurveyId)).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for getResponseDownloadUrl service", () => {
+  describe("Happy Path", () => {
+    test("Returns a download URL for the csv response file", async () => {
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.count.mockResolvedValue(1);
+      prisma.response.findMany.mockResolvedValue([mockResponseWithQuotas]);
+      prisma.surveyQuota.findMany.mockResolvedValue([]);
+
+      const result = await getResponseDownloadFile(mockSurveyId, "csv");
+      const fileExtension = result.fileName.split(".").pop();
+      expect(fileExtension).toEqual("csv");
+    });
+
+    test("Returns a download URL for the xlsx response file", async () => {
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.count.mockResolvedValue(1);
+      prisma.response.findMany.mockResolvedValue([mockResponseWithQuotas]);
+
+      const result = await getResponseDownloadFile(mockSurveyId, "xlsx", { finished: true });
+      const fileExtension = result.fileName.split(".").pop();
+      expect(fileExtension).toEqual("xlsx");
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getResponseDownloadFile, mockSurveyId, 123);
+
+    test("Throws error if response file is of different format than expected", async () => {
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.count.mockResolvedValue(1);
+      prisma.response.findMany.mockResolvedValue([mockResponseWithQuotas]);
+
+      const result = await getResponseDownloadFile(mockSurveyId, "csv", { finished: true });
+      const fileExtension = result.fileName.split(".").pop();
+      expect(fileExtension).not.toEqual("xlsx");
+    });
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError, when the getResponses fails", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.findMany.mockRejectedValue(errToThrow);
+
+      await expect(getResponseDownloadFile(mockSurveyId, "csv")).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError, when the getResponses fails", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+      prisma.response.count.mockResolvedValue(1);
+      prisma.response.findMany.mockRejectedValue(errToThrow);
+
+      await expect(getResponseDownloadFile(mockSurveyId, "csv")).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws a generic Error for unexpected problems", async () => {
+      const mockErrorMessage = "Mock error message";
+
+      // error from getSurvey
+      prisma.survey.findUnique.mockRejectedValue(new Error(mockErrorMessage));
+
+      await expect(getResponseDownloadFile(mockSurveyId, "xlsx")).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for getResponsesByWorkspaceId", () => {
+  describe("Happy Path", () => {
+    test("Obtains all responses associated with a specific workspace ID", async () => {
+      const responses = await getResponsesByWorkspaceId(mockWorkspaceId);
+      expect(responses).toEqual([expectedResponseWithoutPerson]);
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getResponsesByWorkspaceId, "123#");
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      prisma.response.findMany.mockRejectedValue(errToThrow);
+
+      await expect(getResponsesByWorkspaceId(mockWorkspaceId)).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws a generic Error for any other unhandled exceptions", async () => {
+      const mockErrorMessage = "Mock error message";
+      prisma.response.findMany.mockRejectedValue(new Error(mockErrorMessage));
+
+      await expect(getResponsesByWorkspaceId(mockWorkspaceId)).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for updateResponse Service", () => {
+  describe("Happy Path", () => {
+    test("Updates a response (finished = true)", async () => {
+      const response = await updateResponse(mockResponse.id, getMockUpdateResponseInput(true));
+      expect(response).toEqual({
+        ...expectedResponseWithoutPerson,
+        data: mockResponseData,
+      });
+    });
+
+    test("Updates a response (finished = false)", async () => {
+      const response = await updateResponse(mockResponse.id, getMockUpdateResponseInput(false));
+      expect(response).toEqual({
+        ...expectedResponseWithoutPerson,
+        finished: false,
+        data: mockResponseData,
+      });
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(updateResponse, "123#", {});
+
+    test("Throws ResourceNotFoundError if no response is found", async () => {
+      prisma.response.findUnique.mockResolvedValue(null);
+      await expect(updateResponse(mockResponse.id, getMockUpdateResponseInput())).rejects.toThrow(
+        ResourceNotFoundError
+      );
+    });
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      prisma.response.update.mockRejectedValue(errToThrow);
+
+      await expect(updateResponse(mockResponse.id, getMockUpdateResponseInput())).rejects.toThrow(
+        DatabaseError
+      );
+    });
+
+    test("Throws a generic Error for other unexpected issues", async () => {
+      const mockErrorMessage = "Mock error message";
+      prisma.response.update.mockRejectedValue(new Error(mockErrorMessage));
+
+      await expect(updateResponse(mockResponse.id, getMockUpdateResponseInput())).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for deleteResponse service", () => {
+  type MockTx = {
+    response: {
+      delete: ReturnType<typeof vi.fn>;
+    };
+  };
+
+  let mockTx: MockTx;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockTx = {
+      response: {
+        delete: vi.fn(),
+      },
+    };
+    (prisma.$transaction as unknown as ReturnType<typeof vi.fn>) = vi.fn(async (cb: any) => cb(mockTx));
+  });
+
+  describe("Happy Path", () => {
+    test("Successfully deletes a response based on its ID", async () => {
+      vi.mocked(mockTx.response.delete).mockResolvedValue({
+        ...mockResponse,
+        quotaLinks: mockResponseWithQuotas.quotaLinks,
+      });
+      const response = await deleteResponse(mockResponse.id);
+      expect(mockTx.response.delete).toHaveBeenCalledWith({
+        where: { id: mockResponse.id },
+        select: {
+          ...responseSelection,
+          quotaLinks: {
+            where: { status: "screenedIn" },
+            include: {
+              quota: {
+                select: {
+                  id: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(response).toEqual(expectedResponseWithoutPerson);
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(deleteResponse, "123#");
+
+    test("Throws DatabaseError on PrismaClientKnownRequestError", async () => {
+      const mockErrorMessage = "Mock error message";
+      const errToThrow = new Prisma.PrismaClientKnownRequestError(mockErrorMessage, {
+        code: PrismaErrorType.UniqueConstraintViolation,
+        clientVersion: "0.0.1",
+      });
+
+      mockTx.response.delete.mockRejectedValue(errToThrow);
+
+      await expect(deleteResponse(mockResponse.id)).rejects.toThrow(DatabaseError);
+    });
+
+    test("Throws a generic Error for any unhandled exception during deletion", async () => {
+      const mockErrorMessage = "Mock error message";
+      mockTx.response.delete.mockRejectedValue(new Error(mockErrorMessage));
+
+      await expect(deleteResponse(mockResponse.id)).rejects.toThrow(Error);
+    });
+  });
+});
+
+describe("Tests for getResponseCountBySurveyId service", () => {
+  describe("Happy Path", () => {
+    test("Counts the total number of responses for a given survey ID", async () => {
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+
+      const count = await getResponseCountBySurveyId(mockSurveyId);
+      expect(count).toEqual(1);
+    });
+
+    test("Returns zero count when there are no responses for a given survey ID", async () => {
+      prisma.response.count.mockResolvedValue(0);
+      const count = await getResponseCountBySurveyId(mockSurveyId);
+      expect(count).toEqual(0);
+    });
+  });
+
+  describe("Sad Path", () => {
+    testInputValidation(getResponseCountBySurveyId, "123#");
+
+    test("Throws a generic Error for other unexpected issues", async () => {
+      const mockErrorMessage = "Mock error message";
+      prisma.response.count.mockRejectedValue(new Error(mockErrorMessage));
+      prisma.survey.findUnique.mockResolvedValue(mockSurveyOutput);
+
+      await expect(getResponseCountBySurveyId(mockSurveyId)).rejects.toThrow(Error);
+    });
+  });
+});
+
+// ENG-2290: a contact id alone is not a tenant boundary. The contact detail page is reached through
+// a workspace id in the URL, so the responses it loads must be filtered through the workspace of the
+// contact they belong to — otherwise an authorized workspace id paired with a foreign contact id
+// reads that contact's answers.
+describe("getResponsesByContactId", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test("scopes the query to the workspace of the contact", async () => {
+    prisma.response.findMany.mockResolvedValue([]);
+
+    await getResponsesByContactId(mockContactId, mockWorkspaceId);
+
+    expect(prisma.response.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { contactId: mockContactId, contact: { workspaceId: mockWorkspaceId } },
+      })
+    );
+  });
+
+  testInputValidation(getResponsesByContactId, "123#", mockWorkspaceId);
+});

@@ -1,0 +1,603 @@
+import { Prisma } from "@formbricks/database/prisma";
+import { TActionClass } from "@formbricks/types/action-classes";
+import { TContactAttributeKey } from "@formbricks/types/contact-attribute-key";
+import {
+  type TLinkedEmbeddedField,
+  deriveLegacyEmbeddedData,
+} from "@formbricks/types/embedded-data-resolver";
+import { TOrganization } from "@formbricks/types/organizations";
+import { TSurveyElementTypeEnum } from "@formbricks/types/surveys/elements";
+import {
+  TSurvey,
+  TSurveyCreateInput,
+  TSurveyLanguage,
+  TSurveyWelcomeCard,
+} from "@formbricks/types/surveys/types";
+import { TUser } from "@formbricks/types/user";
+import { TWorkspace } from "@formbricks/types/workspace";
+import { selectSurvey } from "../service";
+
+const selectContact = {
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  workspaceId: true,
+  attributes: {
+    select: {
+      value: true,
+      attributeKey: {
+        select: {
+          key: true,
+          name: true,
+        },
+      },
+    },
+  },
+};
+
+const currentDate = new Date();
+const fourDaysAgo = new Date();
+fourDaysAgo.setDate(currentDate.getDate() - 4);
+
+export const mockId = "ars2tjk8hsi8oqk1uac00mo8";
+const commonMockProperties = {
+  createdAt: currentDate,
+  updatedAt: currentDate,
+  workspaceId: mockId,
+};
+
+type SurveyMock = Prisma.SurveyGetPayload<{
+  include: typeof selectSurvey;
+}>;
+
+export const mockSurveyLanguages: TSurveyLanguage[] = [
+  {
+    default: true,
+    enabled: true,
+    language: {
+      id: "rp2di001zicbm3mk8je1ue9u",
+      code: "en",
+      alias: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      workspaceId: mockId,
+    },
+  },
+  {
+    default: false,
+    enabled: true,
+    language: {
+      id: "cuuxfzls09sjkueg6lm6n7i0",
+      code: "de",
+      alias: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      workspaceId: mockId,
+    },
+  },
+];
+
+export const mockWorkspace: TWorkspace = {
+  id: mockId,
+  createdAt: currentDate,
+  updatedAt: currentDate,
+  name: "mock Workspace",
+  organizationId: mockId,
+  recontactDays: 0,
+  linkSurveyBranding: false,
+  inAppSurveyBranding: false,
+  placement: "bottomRight",
+  clickOutsideClose: false,
+  overlay: "none",
+  appSetupCompleted: false,
+  languages: [],
+  config: {
+    channel: "link",
+    industry: "saas",
+  },
+  styling: {
+    allowStyleOverwrite: false,
+  },
+};
+
+export const mockDisplay = {
+  id: mockId,
+  createdAt: fourDaysAgo,
+  updatedAt: fourDaysAgo,
+  surveyId: mockId,
+  personId: null,
+  responseId: null,
+  status: null,
+};
+
+export const mockUser: TUser = {
+  id: mockId,
+  name: "mock User",
+  email: "test@unit.com",
+  emailVerified: true,
+  createdAt: currentDate,
+  updatedAt: currentDate,
+  twoFactorEnabled: false,
+  identityProvider: "google",
+  notificationSettings: {
+    alert: {},
+
+    unsubscribedOrganizationIds: [],
+  },
+  locale: "en-US",
+  lastLoginAt: new Date(),
+  isActive: true,
+};
+
+export const mockPrismaPerson: Prisma.ContactGetPayload<{
+  include: typeof selectContact;
+}> = {
+  id: mockId,
+  attributes: [
+    {
+      value: "de",
+      attributeKey: {
+        key: "language",
+        name: "language",
+      },
+    },
+  ],
+  ...commonMockProperties,
+};
+
+export const mockActionClass: TActionClass = {
+  id: mockId,
+  name: "mock action class",
+  type: "code",
+  description: "mock desc",
+  noCodeConfig: null,
+  key: "mock action class",
+  ...commonMockProperties,
+};
+
+export const mockContactAttributeKey: TContactAttributeKey = {
+  id: mockId,
+  name: "mock attribute class",
+  key: "mock attribute class",
+  type: "custom",
+  description: "mock action class",
+  isUnique: false,
+  dataType: "string",
+  ...commonMockProperties,
+};
+
+const mockQuestion = {
+  id: mockId,
+  type: TSurveyElementTypeEnum.OpenText as typeof TSurveyElementTypeEnum.OpenText,
+  headline: { default: "Question Text", de: "Fragetext" },
+  required: false,
+  inputType: "text" as const,
+  charLimit: {
+    enabled: false,
+  },
+};
+
+const mockWelcomeCard: TSurveyWelcomeCard = {
+  enabled: false,
+  headline: { default: "My welcome card", de: "Meine Willkommenskarte" },
+  timeToFinish: false,
+  showResponseCount: false,
+};
+
+const mockBlocks = [
+  {
+    id: "block1",
+    name: "Block 1",
+    elements: [mockQuestion],
+  },
+];
+
+const baseSurveyProperties = {
+  id: mockId,
+  name: "Mock Survey",
+  autoClose: 10,
+  delay: 0,
+  autoComplete: 7,
+  publishOn: null,
+  closeOn: null,
+  archivedAt: null,
+  redirectUrl: "https://github.com/formbricks/formbricks",
+  recontactDays: 3,
+  displayLimit: 3,
+  welcomeCard: mockWelcomeCard,
+  questions: [],
+  blocks: mockBlocks as unknown as SurveyMock["blocks"],
+  isBackButtonHidden: false,
+  isAutoProgressingEnabled: false,
+  isCaptureIpEnabled: false,
+  isAnonymizeResponsesEnabled: false,
+  endings: [
+    {
+      id: "umyknohldc7w26ocjdhaa62c",
+      type: "endScreen" as const,
+      headline: { default: "Thank You!", de: "Danke!" },
+    },
+  ],
+  hiddenFields: { enabled: false },
+  surveyClosedMessage: {
+    enabled: false,
+  },
+  isVerifyEmailEnabled: false,
+  attributeFilters: [],
+  ...commonMockProperties,
+};
+
+export const mockOrganizationOutput: TOrganization = {
+  id: mockId,
+  name: "mock Organization",
+  createdAt: currentDate,
+  updatedAt: currentDate,
+  isAISmartToolsEnabled: false,
+  billing: {
+    stripeCustomerId: null,
+    limits: {
+      workspaces: 3,
+      monthly: {
+        responses: 1500,
+      },
+    },
+    usageCycleAnchor: currentDate,
+  },
+};
+
+export const mockSyncSurveyOutput: SurveyMock = {
+  type: "app",
+  status: "inProgress",
+  displayOption: "respondMultiple",
+  triggers: [{ actionClass: mockActionClass }],
+  workspaceOverwrites: null,
+  singleUse: null,
+  styling: null,
+  recaptcha: null,
+  displayPercentage: null,
+  createdBy: null,
+  pin: null,
+  segment: null,
+  segmentId: null,
+  inlineTriggers: null,
+  languages: mockSurveyLanguages,
+  // ENG-1837: the join `selectSurvey` now carries. Empty here, so readers fall back to the legacy
+  // columns above — the shape these fixtures have always described.
+  embeddedDataLinks: [],
+  ...baseSurveyProperties,
+  followUps: [],
+  variables: [],
+  showLanguageSwitch: null,
+  metadata: {},
+  slug: null,
+  customHeadScripts: null,
+  customHeadScriptsMode: null,
+};
+
+export const mockSurveyOutput: SurveyMock = {
+  type: "link",
+  status: "inProgress",
+  displayOption: "respondMultiple",
+  metadata: {},
+  triggers: [{ actionClass: mockActionClass }],
+  workspaceOverwrites: null,
+  recaptcha: null,
+  singleUse: null,
+  styling: null,
+  displayPercentage: null,
+  createdBy: null,
+  pin: null,
+  segment: null,
+  segmentId: null,
+  inlineTriggers: null,
+  languages: mockSurveyLanguages,
+  embeddedDataLinks: [],
+  followUps: [],
+  variables: [],
+  showLanguageSwitch: null,
+  ...baseSurveyProperties,
+  slug: null,
+  customHeadScripts: null,
+  customHeadScriptsMode: null,
+};
+
+export const createSurveyInput: TSurveyCreateInput = {
+  status: "inProgress",
+  displayOption: "respondMultiple",
+  triggers: [{ actionClass: mockActionClass }],
+  ...baseSurveyProperties,
+  blocks: mockBlocks,
+};
+
+export const updateSurveyInput: TSurvey = {
+  type: "link",
+  status: "inProgress",
+  displayOption: "respondMultiple",
+  metadata: {},
+  triggers: [{ actionClass: mockActionClass }],
+  workspaceOverwrites: null,
+  recaptcha: null,
+  singleUse: null,
+  styling: null,
+  displayPercentage: null,
+  createdBy: null,
+  pin: null,
+  segment: null,
+  languages: [],
+  showLanguageSwitch: null,
+  variables: [],
+  followUps: [],
+  ...baseSurveyProperties,
+  ...commonMockProperties,
+  blocks: mockBlocks,
+  slug: null,
+  customHeadScripts: null,
+  customHeadScriptsMode: null,
+};
+
+/**
+ * What `transformPrismaSurvey` returns: the raw `embeddedDataLinks` relation is replaced by the
+ * inlined `embeddedFields` the read seam consumes (ENG-1837).
+ */
+const withInlinedEmbeddedFields = <T extends { embeddedDataLinks: unknown[] }>({
+  embeddedDataLinks,
+  ...survey
+}: T) => ({ ...survey, embeddedFields: [] as TLinkedEmbeddedField[] });
+
+export const mockTransformedSurveyOutput = withInlinedEmbeddedFields(mockSurveyOutput);
+
+export const mockTransformedSyncSurveyOutput = withInlinedEmbeddedFields(mockSyncSurveyOutput);
+
+export const mockSurveyWithLogic: TSurvey = {
+  ...mockSyncSurveyOutput,
+  ...baseSurveyProperties,
+  displayPercentage: null,
+  segment: null,
+  type: "link",
+  endings: [],
+  hiddenFields: { enabled: true, fieldIds: ["name"] },
+  blocks: [
+    {
+      id: "block1",
+      name: "Block 1",
+      elements: [
+        {
+          id: "q1",
+          type: TSurveyElementTypeEnum.OpenText,
+          inputType: "text" as const,
+          headline: { default: "What is your favorite color?" },
+          required: true,
+          charLimit: {
+            enabled: false,
+          },
+        },
+        {
+          id: "q2",
+          type: TSurveyElementTypeEnum.OpenText,
+          inputType: "text" as const,
+          headline: { default: "What is your favorite food?" },
+          required: true,
+          charLimit: {
+            enabled: false,
+          },
+        },
+        {
+          id: "q3",
+          type: TSurveyElementTypeEnum.OpenText,
+          inputType: "text" as const,
+          headline: { default: "What is your favorite movie?" },
+          required: true,
+          charLimit: {
+            enabled: false,
+          },
+        },
+        {
+          id: "q4",
+          type: TSurveyElementTypeEnum.MultipleChoiceSingle,
+          headline: { default: "Select a number:" },
+          choices: [
+            { id: "mvedaklp0gxxycprpyhhwen7", label: { default: "lol" } },
+            { id: "i7ws8uqyj66q5x086vbqtm8n", label: { default: "lmao" } },
+            { id: "cy8hbbr9e2q6ywbfjbzwdsqn", label: { default: "XD" } },
+            { id: "sojc5wwxc5gxrnuib30w7t6s", label: { default: "hehe" } },
+          ],
+          required: true,
+          shuffleOption: "none" as const,
+        },
+        {
+          id: "q5",
+          type: TSurveyElementTypeEnum.OpenText,
+          inputType: "number" as const,
+          headline: { default: "Select your age group:" },
+          required: true,
+          charLimit: {
+            enabled: false,
+          },
+        },
+        {
+          id: "q6",
+          type: TSurveyElementTypeEnum.MultipleChoiceMulti,
+          headline: { default: "Select your age group:" },
+          required: true,
+          choices: [
+            { id: "mvedaklp0gxxycprpyhhwen7", label: { default: "lol" } },
+            { id: "i7ws8uqyj66q5x086vbqtm8n", label: { default: "lmao" } },
+            { id: "cy8hbbr9e2q6ywbfjbzwdsqn", label: { default: "XD" } },
+            { id: "sojc5wwxc5gxrnuib30w7t6s", label: { default: "hehe" } },
+          ],
+          shuffleOption: "none" as const,
+        },
+      ],
+      logic: [
+        {
+          id: "cdu9vgtmmd9b24l35pp9bodk",
+          conditions: {
+            id: "d21qg6x5fk65pf592jys5rcz",
+            connector: "and",
+            conditions: [
+              {
+                id: "swlje0bsnh6lkyk8vqs13oyr",
+                leftOperand: { type: "element", value: "q1" },
+                operator: "equals",
+                rightOperand: { type: "static", value: "blue" },
+              },
+            ],
+          },
+          actions: [],
+        },
+        {
+          id: "uwlm6kazj5pbt6licpa1hw5c",
+          conditions: {
+            id: "cvqxpbjydwktz4f9mvit2i11",
+            connector: "and",
+            conditions: [
+              {
+                id: "n74oght3ozqgwm9rifp2fxrr",
+                leftOperand: { type: "element", value: "q1" },
+                operator: "equals",
+                rightOperand: { type: "static", value: "blue" },
+              },
+              {
+                id: "fg4c9dwt9qjy8aba7zxbfdqd",
+                leftOperand: { type: "element", value: "q2" },
+                operator: "equals",
+                rightOperand: { type: "static", value: "pizza" },
+              },
+            ],
+          },
+          actions: [],
+        },
+        {
+          id: "dpi3zipezuo1idplztb1abes",
+          conditions: {
+            id: "h3tp53lf8lri4pjcqc1xz3d8",
+            connector: "or",
+            conditions: [
+              {
+                id: "tmj7p9d3kpz1v4mcgpguqytw",
+                leftOperand: { type: "element", value: "q2" },
+                operator: "equals",
+                rightOperand: { type: "static", value: "pizza" },
+              },
+              {
+                id: "rs7v5mmoetff7x8lo1gdsgpr",
+                leftOperand: { type: "element", value: "q3" },
+                operator: "equals",
+                rightOperand: { type: "static", value: "Inception" },
+              },
+            ],
+          },
+          actions: [],
+        },
+        {
+          id: "fbim31ttxe1s7qkrjzkj1mtc",
+          conditions: {
+            id: "db44yagvr140wahafu0n11x6",
+            connector: "and",
+            conditions: [
+              {
+                id: "ddhaccfqy7rr3d5jdswl8yl8",
+                leftOperand: { type: "variable", value: "siog1dabtpo3l0a3xoxw2922" },
+                operator: "equals",
+                rightOperand: { type: "element", value: "q4" },
+              },
+            ],
+          },
+          actions: [],
+        },
+        {
+          id: "o6n73uq9rysih9mpcbzlehfs",
+          conditions: {
+            id: "szdkmtz17j9008n4i2d1t040",
+            connector: "and",
+            conditions: [
+              {
+                id: "rb223vmzuuzo3ag1bp2m3i69",
+                leftOperand: { type: "variable", value: "km1srr55owtn2r7lkoh5ny1u" },
+                operator: "isGreaterThan",
+                rightOperand: { type: "static", value: 30 },
+              },
+              {
+                id: "ot894j7nwna24i6jo2zpk59o",
+                leftOperand: { type: "variable", value: "km1srr55owtn2r7lkoh5ny1u" },
+                operator: "isLessThan",
+                rightOperand: { type: "element", value: "q5" },
+              },
+            ],
+          },
+          actions: [],
+        },
+        {
+          id: "o6n73uq9rysih9mpcbzlehfs2",
+          conditions: {
+            id: "szdkmtz17j9008n4i2d1t041",
+            connector: "and",
+            conditions: [
+              {
+                id: "rb223vmzuuzo3ag1bp2m3i69",
+                leftOperand: { type: "element", value: "q6" },
+                operator: "includesOneOf",
+                rightOperand: {
+                  type: "static",
+                  value: ["i7ws8uqyj66q5x086vbqtm8n", "cy8hbbr9e2q6ywbfjbzwdsqn"],
+                },
+              },
+              {
+                id: "ot894j7nwna24i6jo2zpk59o",
+                leftOperand: { type: "element", value: "q1" },
+                operator: "doesNotEqual",
+                rightOperand: { type: "static", value: "teal" },
+              },
+              {
+                id: "j1appouxk700of7u8m15z625",
+                connector: "or",
+                conditions: [
+                  {
+                    id: "gy6xowchkv8bp1qj7ur79jvc",
+                    leftOperand: { type: "element", value: "q2" },
+                    operator: "doesNotEqual",
+                    rightOperand: { type: "static", value: "pizza" },
+                  },
+                  {
+                    id: "vxyccgwsbq34s3l0syom7y2w",
+                    leftOperand: { type: "hiddenField", value: "name" },
+                    operator: "contains",
+                    rightOperand: { type: "element", value: "q2" },
+                  },
+                ],
+              },
+              {
+                id: "yunz0k9w0xwparogz2n1twoy",
+                leftOperand: { type: "element", value: "q3" },
+                operator: "doesNotEqual",
+                rightOperand: { type: "static", value: "Inception" },
+              },
+              {
+                id: "x2j6qz3z7x9m3q5jz9x7c7v4",
+                leftOperand: { type: "variable", value: "siog1dabtpo3l0a3xoxw2922" },
+                operator: "endsWith",
+                rightOperand: { type: "static", value: "yo" },
+              },
+            ],
+          },
+          actions: [],
+        },
+      ],
+    },
+  ],
+  questions: [],
+  variables: [
+    { id: "siog1dabtpo3l0a3xoxw2922", type: "text", name: "var1", value: "lmao" },
+    { id: "km1srr55owtn2r7lkoh5ny1u", type: "number", name: "var2", value: 32 },
+  ],
+  // Since ENG-2412 the rows are the only thing `getSurveyEmbeddedFields` reads, so a survey that
+  // declares variables has to carry the matching rows — that is what a real read returns.
+  embeddedFields: deriveLegacyEmbeddedData({
+    variables: [
+      { id: "siog1dabtpo3l0a3xoxw2922", type: "text", name: "var1", value: "lmao" },
+      { id: "km1srr55owtn2r7lkoh5ny1u", type: "number", name: "var2", value: 32 },
+    ],
+  }),
+  customHeadScripts: null,
+  customHeadScriptsMode: null,
+};

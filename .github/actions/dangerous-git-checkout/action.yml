@@ -1,0 +1,13 @@
+name: Dangerous git Checkout
+description: "Git Checkout from PR code so we can run checks from forks"
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repo
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 2
+        # This checks out PR-controlled code that later steps execute (pnpm scripts),
+        # so never leave the token behind in .git/config.
+        persist-credentials: false

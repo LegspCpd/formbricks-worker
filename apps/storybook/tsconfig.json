@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "noEmit": true,
+    "noFallthroughCasesInSwitch": true,
+    "resolveJsonModule": true
+  },
+  "extends": "@formbricks/config-typescript/react-library.json",
+  // `.storybook` is authored source, not config-by-filename, so the shared react tier's type-aware
+  // rules need it in the project like anything else under src (ENG-2366). Spelled as a glob rather
+  // than a bare `.storybook`: TypeScript resolves a dot-prefixed directory name to no files at all.
+  "include": ["src", ".storybook/**/*.ts"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

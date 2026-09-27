@@ -1,0 +1,696 @@
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { MAX_INGESTED_VALUE_BYTES } from "@formbricks/types/embedded-data-ingest";
+import {
+  DatabaseError,
+  InvalidInputError,
+  RESPONSE_ALREADY_FINISHED_ERROR_CODE,
+  ResourceNotFoundError,
+} from "@formbricks/types/errors";
+import { responses } from "@/app/lib/api/response";
+import { putResponseHandler } from "./put-response-handler";
+
+const mocks = vi.hoisted(() => ({
+  formatValidationErrorsForV1Api: vi.fn((errors) => errors),
+  getResponse: vi.fn(),
+  getSurvey: vi.fn(),
+  getValidatedResponseUpdateInput: vi.fn(),
+  resolveClientApiIds: vi.fn(),
+  sendToPipeline: vi.fn(),
+  updateResponseWithQuotaEvaluation: vi.fn(),
+  validateClientFileUploads: vi.fn(),
+  validateOtherOptionLengthForMultipleChoice: vi.fn(),
+  validateResponseData: vi.fn(),
+  verifyLinkSurveyPinToken: vi.fn(),
+}));
+
+vi.mock("@/app/lib/pipelines", () => ({
+  sendToPipeline: mocks.sendToPipeline,
+}));
+
+vi.mock("@/lib/response/service", () => ({
+  getResponse: mocks.getResponse,
+}));
+
+vi.mock("@/lib/survey/service", () => ({
+  getSurvey: mocks.getSurvey,
+}));
+
+vi.mock("@/lib/utils/resolve-client-id", () => ({
+  resolveClientApiIds: mocks.resolveClientApiIds,
+}));
+
+vi.mock("@/modules/api/lib/validation", () => ({
+  formatValidationErrorsForV1Api: mocks.formatValidationErrorsForV1Api,
+  validateResponseData: mocks.validateResponseData,
+}));
+
+vi.mock("@/modules/api/v2/lib/element", () => ({
+  validateOtherOptionLengthForMultipleChoice: mocks.validateOtherOptionLengthForMultipleChoice,
+}));
+
+vi.mock("@/modules/storage/utils", () => ({
+  validateClientFileUploads: mocks.validateClientFileUploads,
+}));
+
+vi.mock("./response", () => ({
+  updateResponseWithQuotaEvaluation: mocks.updateResponseWithQuotaEvaluation,
+}));
+
+vi.mock("./validated-response-update-input", () => ({
+  getValidatedResponseUpdateInput: mocks.getValidatedResponseUpdateInput,
+}));
+
+vi.mock("@/modules/survey/link/lib/pin-token", () => ({
+  verifyLinkSurveyPinToken: mocks.verifyLinkSurveyPinToken,
+}));
+
+const workspaceId = "workspace_a";
+const responseId = "response_123";
+const surveyId = "survey_123";
+
+const createRequest = () =>
+  new Request(`https://api.test/api/v1/client/${workspaceId}/responses/${responseId}`, {
+    method: "PUT",
+  });
+
+const createHandlerParams = (params?: Partial<{ workspaceId: string; responseId: string }>) =>
+  ({
+    req: createRequest(),
+    props: {
+      params: Promise.resolve({
+        workspaceId,
+        responseId,
+        ...params,
+      }),
+    },
+  }) as never;
+
+const getBaseResponseUpdateInput = () => ({
+  data: {
+    q1: "updated-answer",
+  },
+  language: "en",
+});
+
+const getBaseExistingResponse = () =>
+  ({
+    id: responseId,
+    surveyId,
+    data: {
+      q0: "existing-answer",
+    },
+    finished: false,
+    language: "en",
+  }) as const;
+
+// `q0` and `q1` are real elements: the Embedded Data ingest contract runs unmocked on this handler,
+// and it only lets a key through as a question answer if the survey actually declares that element.
+const getBaseSurvey = () =>
+  ({
+    id: surveyId,
+    workspaceId,
+    status: "inProgress",
+    blocks: [{ id: "block_1", elements: [{ id: "q0" }, { id: "q1" }] }],
+    questions: [],
+  }) as const;
+
+const getBaseUpdatedResponse = () =>
+  ({
+    id: responseId,
+    surveyId,
+    data: {
+      q0: "existing-answer",
+      q1: "updated-answer",
+    },
+    finished: false,
+    quotaFull: undefined,
+  }) as const;
+
+describe("putResponseHandler", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    mocks.getValidatedResponseUpdateInput.mockResolvedValue({
+      responseUpdateInput: getBaseResponseUpdateInput(),
+    });
+    mocks.getResponse.mockResolvedValue(getBaseExistingResponse());
+    mocks.getSurvey.mockResolvedValue(getBaseSurvey());
+    mocks.resolveClientApiIds.mockResolvedValue({ workspaceId });
+    mocks.updateResponseWithQuotaEvaluation.mockResolvedValue(getBaseUpdatedResponse());
+    mocks.validateClientFileUploads.mockReturnValue(true);
+    mocks.validateOtherOptionLengthForMultipleChoice.mockReturnValue(null);
+    mocks.validateResponseData.mockReturnValue(null);
+    mocks.verifyLinkSurveyPinToken.mockReturnValue(true);
+  });
+
+  test("returns a bad request response when the response id is missing", async () => {
+    const result = await putResponseHandler(createHandlerParams({ responseId: "" }));
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Response ID is missing",
+      details: {},
+    });
+    expect(mocks.getValidatedResponseUpdateInput).not.toHaveBeenCalled();
+  });
+
+  test("returns the validation response from the parsed request input", async () => {
+    const validationResponse = responses.badRequestResponse(
+      "Malformed JSON in request body",
+      undefined,
+      true
+    );
+    mocks.getValidatedResponseUpdateInput.mockResolvedValue({
+      response: validationResponse,
+    });
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response).toBe(validationResponse);
+    expect(mocks.getResponse).not.toHaveBeenCalled();
+  });
+
+  test("returns not found when the response does not exist", async () => {
+    mocks.getResponse.mockResolvedValue(null);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(404);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "not_found",
+      message: "Response not found",
+      details: {
+        resource_id: responseId,
+        resource_type: "Response",
+      },
+    });
+  });
+
+  test("maps resource lookup errors to a not found response", async () => {
+    mocks.getResponse.mockRejectedValue(new ResourceNotFoundError("Response", responseId));
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(404);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "not_found",
+      message: "Response not found",
+      details: {
+        resource_id: responseId,
+        resource_type: "Response",
+      },
+    });
+  });
+
+  test("maps invalid lookup input errors to a bad request response", async () => {
+    mocks.getResponse.mockRejectedValue(new InvalidInputError("Invalid response id"));
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Invalid response id",
+      details: {},
+    });
+  });
+
+  test("maps database lookup errors to an internal server error without leaking the message", async () => {
+    const error = new DatabaseError("Lookup failed");
+    mocks.getResponse.mockRejectedValue(error);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    // The real error is threaded back so the wrapper logs/reports it; the client sees a generic message.
+    expect(result.error).toBe(error);
+    expect(result.response.status).toBe(500);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "internal_server_error",
+      message: "Something went wrong. Please try again.",
+      details: {},
+    });
+  });
+
+  test("maps unknown lookup failures to a generic internal server error", async () => {
+    const error = new Error("boom");
+    mocks.getResponse.mockRejectedValue(error);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.error).toBe(error);
+    expect(result.response.status).toBe(500);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "internal_server_error",
+      message: "Something went wrong. Please try again.",
+      details: {},
+    });
+  });
+
+  test("returns not found when the workspace id cannot be resolved", async () => {
+    mocks.resolveClientApiIds.mockResolvedValue(null);
+
+    const result = await putResponseHandler(createHandlerParams({ workspaceId: "unknown_workspace_or_env" }));
+
+    expect(result.response.status).toBe(404);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "not_found",
+      message: "Workspace not found",
+      details: {
+        resource_id: "unknown_workspace_or_env",
+        resource_type: "Workspace",
+      },
+    });
+    expect(mocks.getResponse).not.toHaveBeenCalled();
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+  });
+
+  test("accepts updates when the route param is a legacy environment id that resolves to the survey workspace", async () => {
+    mocks.resolveClientApiIds.mockResolvedValue({ workspaceId });
+
+    const result = await putResponseHandler(createHandlerParams({ workspaceId: "legacy_environment_id" }));
+
+    expect(mocks.resolveClientApiIds).toHaveBeenCalledWith("legacy_environment_id");
+    expect(result.response.status).toBe(200);
+    expect(mocks.updateResponseWithQuotaEvaluation).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects updates when the response survey does not belong to the requested workspace", async () => {
+    mocks.getSurvey.mockResolvedValue({
+      ...getBaseSurvey(),
+      workspaceId: "different_workspace",
+    });
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(404);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "not_found",
+      message: "Response not found",
+      details: {
+        resource_id: responseId,
+        resource_type: "Response",
+      },
+    });
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+    expect(mocks.sendToPipeline).not.toHaveBeenCalled();
+  });
+
+  test("rejects updates when the response is already finished", async () => {
+    mocks.getResponse.mockResolvedValue({
+      ...getBaseExistingResponse(),
+      finished: true,
+    });
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Response is already finished",
+      // Stable, locale-independent marker the surveys client keys off (see isResponseAlreadyCompletedError)
+      details: { code: RESPONSE_ALREADY_FINISHED_ERROR_CODE },
+    });
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+  });
+
+  test("rejects updates when the survey is closed (not accepting submissions)", async () => {
+    mocks.getSurvey.mockResolvedValue({
+      ...getBaseSurvey(),
+      status: "completed",
+    });
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(403);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "forbidden",
+      message: "Survey is not accepting submissions",
+      details: { surveyId },
+    });
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+  });
+
+  test("rejects updates to a PIN-protected survey without a valid PIN token", async () => {
+    mocks.getSurvey.mockResolvedValue({
+      ...getBaseSurvey(),
+      pin: "1234",
+    });
+    mocks.getValidatedResponseUpdateInput.mockResolvedValue({
+      responseUpdateInput: { ...getBaseResponseUpdateInput(), pinAuthToken: "invalid" },
+    });
+    mocks.verifyLinkSurveyPinToken.mockReturnValue(false);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(403);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "forbidden",
+      message: "Survey is protected by a PIN",
+      details: { surveyId },
+    });
+    expect(mocks.verifyLinkSurveyPinToken).toHaveBeenCalledWith("invalid", surveyId);
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+  });
+
+  test("allows updates to a PIN-protected survey with a valid PIN token", async () => {
+    mocks.getSurvey.mockResolvedValue({
+      ...getBaseSurvey(),
+      pin: "1234",
+    });
+    mocks.getValidatedResponseUpdateInput.mockResolvedValue({
+      responseUpdateInput: { ...getBaseResponseUpdateInput(), pinAuthToken: "valid-token" },
+    });
+    mocks.verifyLinkSurveyPinToken.mockReturnValue(true);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(200);
+    expect(mocks.verifyLinkSurveyPinToken).toHaveBeenCalledWith("valid-token", surveyId);
+    expect(mocks.updateResponseWithQuotaEvaluation).toHaveBeenCalled();
+  });
+
+  test("does not require a PIN token when the survey has no PIN", async () => {
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(200);
+    expect(mocks.verifyLinkSurveyPinToken).not.toHaveBeenCalled();
+    expect(mocks.updateResponseWithQuotaEvaluation).toHaveBeenCalled();
+  });
+
+  test("rejects invalid file upload updates", async () => {
+    mocks.validateClientFileUploads.mockReturnValue(false);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Invalid file upload response",
+      details: {},
+    });
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+  });
+
+  test("rejects updates when an other-option response exceeds the character limit", async () => {
+    mocks.validateOtherOptionLengthForMultipleChoice.mockReturnValue("question_123");
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Response exceeds character limit",
+      details: {
+        questionId: "question_123",
+      },
+    });
+    expect(mocks.updateResponseWithQuotaEvaluation).not.toHaveBeenCalled();
+  });
+
+  test("returns validation details when merged response data is invalid", async () => {
+    mocks.validateResponseData.mockReturnValue([{ field: "q1", message: "Required" }]);
+    mocks.formatValidationErrorsForV1Api.mockReturnValue({
+      q1: "Required",
+    });
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Validation failed",
+      details: {
+        q1: "Required",
+      },
+    });
+    expect(mocks.formatValidationErrorsForV1Api).toHaveBeenCalledWith([{ field: "q1", message: "Required" }]);
+  });
+
+  test("returns not found when the response disappears during update", async () => {
+    mocks.updateResponseWithQuotaEvaluation.mockRejectedValue(
+      new ResourceNotFoundError("Response", responseId)
+    );
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(404);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "not_found",
+      message: "Response not found",
+      details: {
+        resource_id: responseId,
+        resource_type: "Response",
+      },
+    });
+  });
+
+  test("returns a bad request response for invalid update input during persistence", async () => {
+    mocks.updateResponseWithQuotaEvaluation.mockRejectedValue(
+      new InvalidInputError("Response update payload is invalid")
+    );
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(400);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "bad_request",
+      message: "Response update payload is invalid",
+      details: {},
+    });
+  });
+
+  test("returns an internal server error for database update failures without leaking the message", async () => {
+    const error = new DatabaseError("Update failed");
+    mocks.updateResponseWithQuotaEvaluation.mockRejectedValue(error);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.error).toBe(error);
+    expect(result.response.status).toBe(500);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "internal_server_error",
+      message: "Something went wrong. Please try again.",
+      details: {},
+    });
+  });
+
+  test("returns a generic internal server error for unexpected update failures", async () => {
+    const error = new Error("Unexpected persistence failure");
+    mocks.updateResponseWithQuotaEvaluation.mockRejectedValue(error);
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.error).toBe(error);
+    expect(result.response.status).toBe(500);
+    await expect(result.response.json()).resolves.toEqual({
+      code: "internal_server_error",
+      message: "Something went wrong. Please try again.",
+      details: {},
+    });
+  });
+
+  test("returns a success payload and emits a responseUpdated pipeline event", async () => {
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(200);
+    await expect(result.response.json()).resolves.toEqual({
+      data: {
+        id: responseId,
+        quotaFull: false,
+      },
+    });
+    expect(mocks.sendToPipeline).toHaveBeenCalledTimes(1);
+    expect(mocks.sendToPipeline).toHaveBeenCalledWith({
+      event: "responseUpdated",
+      workspaceId,
+      surveyId,
+      response: {
+        id: responseId,
+        surveyId,
+        data: {
+          q0: "existing-answer",
+          q1: "updated-answer",
+        },
+        finished: false,
+      },
+    });
+  });
+
+  test("emits both pipeline events and includes quota metadata when the response finishes", async () => {
+    mocks.updateResponseWithQuotaEvaluation.mockResolvedValue({
+      ...getBaseUpdatedResponse(),
+      finished: true,
+      quotaFull: {
+        id: "quota_123",
+        action: "endSurvey",
+        endingCardId: "ending_card_123",
+      },
+    });
+
+    const result = await putResponseHandler(createHandlerParams());
+
+    expect(result.response.status).toBe(200);
+    await expect(result.response.json()).resolves.toEqual({
+      data: {
+        id: responseId,
+        quotaFull: true,
+        quota: {
+          id: "quota_123",
+          action: "endSurvey",
+          endingCardId: "ending_card_123",
+        },
+      },
+    });
+    expect(mocks.sendToPipeline).toHaveBeenCalledTimes(2);
+    expect(mocks.sendToPipeline).toHaveBeenNthCalledWith(1, {
+      event: "responseUpdated",
+      workspaceId,
+      surveyId,
+      response: {
+        id: responseId,
+        surveyId,
+        data: {
+          q0: "existing-answer",
+          q1: "updated-answer",
+        },
+        finished: true,
+      },
+    });
+    expect(mocks.sendToPipeline).toHaveBeenNthCalledWith(2, {
+      event: "responseFinished",
+      workspaceId,
+      surveyId,
+      response: {
+        id: responseId,
+        surveyId,
+        data: {
+          q0: "existing-answer",
+          q1: "updated-answer",
+        },
+        finished: true,
+      },
+    });
+  });
+  /**
+   * The AC's "server-side re-validation covered by a test that bypasses the client filter", on the
+   * boundary that is easiest to forget. `validateResponseData` only validates keys matching element
+   * ids, so without the contract a crafted PUT writes anything it likes into `response.data` —
+   * which exports, filters and the summary read directly.
+   */
+  describe("Embedded Data ingest contract", () => {
+    const ingestedField = ({
+      storageKey,
+      dataType = "string",
+      locked = false,
+    }: {
+      storageKey: string;
+      dataType?: string;
+      locked?: boolean;
+    }) => ({
+      field: { name: storageKey, source: "ingested", dataType, defaultValue: null, locked },
+      link: { storageKey },
+    });
+
+    const putData = (data: Record<string, unknown>) => {
+      mocks.getValidatedResponseUpdateInput.mockResolvedValue({
+        responseUpdateInput: { ...getBaseResponseUpdateInput(), data },
+      });
+    };
+
+    const surveyWithFields = (embeddedFields: unknown[], hiddenFields?: unknown) => ({
+      ...getBaseSurvey(),
+      embeddedFields,
+      ...(hiddenFields === undefined ? {} : { hiddenFields }),
+    });
+
+    /** What the handler actually persisted, and the flags it computed for it. */
+    const persisted = () => {
+      const [, updateInput, ingestFlags] = mocks.updateResponseWithQuotaEvaluation.mock.calls[0];
+      return { data: updateInput.data, ingestFlags };
+    };
+
+    test("drops a key no ingested field declares", async () => {
+      mocks.getSurvey.mockResolvedValue(surveyWithFields([ingestedField({ storageKey: "plan" })]));
+      putData({ q1: "answer", plan: "gold", rogue: "injected" });
+
+      const result = await putResponseHandler(createHandlerParams());
+
+      expect(result.response.status).toBe(200);
+      expect(persisted().data).toEqual({ q1: "answer", plan: "gold" });
+    });
+
+    test("drops a locked field's key", async () => {
+      mocks.getSurvey.mockResolvedValue(
+        surveyWithFields([ingestedField({ storageKey: "plan", locked: true })])
+      );
+      putData({ plan: "gold" });
+
+      const result = await putResponseHandler(createHandlerParams());
+
+      expect(result.response.status).toBe(200);
+      expect(persisted().data).toEqual({});
+    });
+
+    test("coerces a declared value to its dataType", async () => {
+      mocks.getSurvey.mockResolvedValue(
+        surveyWithFields([
+          ingestedField({ storageKey: "seats", dataType: "number" }),
+          ingestedField({ storageKey: "trial", dataType: "boolean" }),
+        ])
+      );
+      putData({ seats: "12", trial: "yes" });
+
+      await putResponseHandler(createHandlerParams());
+
+      expect(persisted().data).toEqual({ seats: 12, trial: "true" });
+      expect(persisted().ingestFlags).toEqual([]);
+    });
+
+    test("stores a wrong-typed value raw, flags it, and still saves the response", async () => {
+      mocks.getSurvey.mockResolvedValue(
+        surveyWithFields([ingestedField({ storageKey: "seats", dataType: "number" })])
+      );
+      putData({ seats: "many" });
+
+      const result = await putResponseHandler(createHandlerParams());
+
+      expect(result.response.status).toBe(200);
+      expect(persisted().data).toEqual({ seats: "many" });
+      expect(persisted().ingestFlags).toEqual([{ key: "seats", reason: "coercion_failed" }]);
+    });
+
+    test("truncates an oversize value and flags it", async () => {
+      mocks.getSurvey.mockResolvedValue(surveyWithFields([ingestedField({ storageKey: "note" })]));
+      putData({ note: "a".repeat(MAX_INGESTED_VALUE_BYTES + 500) });
+
+      const result = await putResponseHandler(createHandlerParams());
+
+      expect(result.response.status).toBe(200);
+      expect(persisted().data.note as string).toHaveLength(MAX_INGESTED_VALUE_BYTES);
+      expect(persisted().ingestFlags).toEqual([{ key: "note", reason: "truncated" }]);
+    });
+
+    test("ingests nothing when the survey select carried no rows, so the allow-list fails closed", async () => {
+      mocks.getSurvey.mockResolvedValue(getBaseSurvey());
+      putData({ q1: "answer", plan: "gold" });
+
+      await putResponseHandler(createHandlerParams());
+
+      expect(persisted().data).toEqual({ q1: "answer" });
+    });
+
+    // Pins ENG-1845 decision 5: the rows are the allow-list and they carry no `enabled` concept, so
+    // the legacy flag is not an ingest gate — `locked` is the per-field control for refusing writes.
+    test("ingests into a survey whose legacy hiddenFields.enabled flag is false", async () => {
+      mocks.getSurvey.mockResolvedValue(
+        surveyWithFields([ingestedField({ storageKey: "plan" })], { enabled: false, fieldIds: ["plan"] })
+      );
+      putData({ plan: "gold" });
+
+      await putResponseHandler(createHandlerParams());
+
+      expect(persisted().data).toEqual({ plan: "gold" });
+    });
+  });
+});

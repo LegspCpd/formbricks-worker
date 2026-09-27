@@ -1,0 +1,194 @@
+import preact from "@preact/preset-vite";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { visualizer } from "rollup-plugin-visualizer";
+import { type Plugin, loadEnv } from "vite";
+import tsconfigPaths from "vite-tsconfig-paths";
+import { defineConfig } from "vitest/config";
+import { copyCompiledAssetsPlugin } from "../vite-plugins/copy-compiled-assets";
+
+// Stubs the @formbricks/survey-ui/styles?inline import during vitest runs so that
+// tests do not require packages/survey-ui to be built first. The plugin only
+// activates when VITEST is set, leaving production builds untouched.
+const stubSurveyUiStylesForVitest = (): Plugin => {
+  const stubId = "\0virtual:survey-ui-styles-stub";
+  return {
+    name: "formbricks:stub-survey-ui-styles-in-tests",
+    enforce: "pre",
+    apply() {
+      return process.env.VITEST === "true";
+    },
+    resolveId(source) {
+      if (source === "@formbricks/survey-ui/styles?inline") {
+        return stubId;
+      }
+      return null;
+    },
+    load(id) {
+      if (id === stubId) {
+        return 'export default "";';
+      }
+      return null;
+    },
+  };
+};
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const localesDir = resolve(__dirname, "locales");
+
+/**
+ * Code-unit order, deliberately not `localeCompare`.
+ *
+ * This orders the input to a content hash, and `localeCompare` resolves its collation from the host's
+ * locale and ICU data — so the same locale files could hash differently on another machine and bust the
+ * CDN cache for no reason. Mirrors the helpers of the same name under `apps/web`, which a build config
+ * in another workspace cannot import.
+ */
+const byCodeUnit = (left: string, right: string): number => {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+};
+
+/**
+ * Content hash of every shipped locale, injected as `__FB_LOCALES_HASH__` and appended to each
+ * on-demand locale fetch as `?v=`. `/js/*` is served with a 30-day `s-maxage`, so without a token that
+ * moves with the strings a fresh bundle could be handed a month-old bundle of them; with one, the URL
+ * changes only when a translation actually does.
+ */
+const computeLocalesHash = (): string => {
+  const hash = createHash("sha256");
+  const files = readdirSync(localesDir).filter((name) => name.endsWith(".json"));
+  files.sort(byCodeUnit);
+  for (const file of files) {
+    hash.update(file);
+    hash.update(readFileSync(resolve(localesDir, file)));
+  }
+  return hash.digest("hex").slice(0, 12);
+};
+
+const config = ({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+
+  // Shared configuration
+  const sharedConfig = {
+    resolve: {
+      alias: {
+        // Alias React to Preact for survey-ui components
+        react: "preact/compat",
+        "react-dom": "preact/compat",
+        "react/jsx-runtime": "preact/jsx-runtime",
+      },
+    },
+    define: {
+      "process.env.NODE_ENV": JSON.stringify(mode),
+      __FB_LOCALES_HASH__: JSON.stringify(computeLocalesHash()),
+    },
+    plugins: [preact(), tsconfigPaths()],
+  };
+
+  // Check if we're building the UMD bundle (separate build step)
+  const isUmdBuild = process.env.BUILD_UMD === "true";
+
+  if (isUmdBuild) {
+    // UMD build for browser script tag usage (main entry only)
+    return defineConfig({
+      ...sharedConfig,
+      build: {
+        emptyOutDir: false,
+        lib: {
+          entry: resolve(__dirname, "src/index.ts"),
+          name: "formbricksSurveys",
+          formats: ["umd"],
+          fileName: () => "index.umd.cjs",
+        },
+        rollupOptions: {
+          external: ["node-html-parser"],
+        },
+        outDir: "dist",
+      },
+      plugins: [
+        ...sharedConfig.plugins,
+        copyCompiledAssetsPlugin({ filename: "surveys", distDir: resolve(__dirname, "dist"), localesDir }),
+      ],
+    });
+  }
+
+  // Main ESM build with multiple entry points
+  return defineConfig({
+    ...sharedConfig,
+    test: {
+      setupFiles: ["./vitestSetup.ts"],
+      exclude: ["dist/**", "node_modules/**"],
+      env: env,
+      // Environment selection (ENG-1680): Vitest 4 removed `environmentMatchGlobs`, so environments
+      // are assigned via projects. *.test.tsx (component tests) run in happy-dom automatically;
+      // *.test.ts default to node — the few DOM-dependent .ts tests keep their per-file
+      // `@vitest-environment happy-dom` pragma.
+      projects: [
+        {
+          extends: true,
+          test: {
+            name: "surveys-unit",
+            environment: "node",
+            include: ["**/*.test.ts"],
+            exclude: ["dist/**", "node_modules/**"],
+          },
+        },
+        {
+          extends: true,
+          test: {
+            name: "surveys-components",
+            environment: "happy-dom",
+            include: ["**/*.test.tsx"],
+            exclude: ["dist/**", "node_modules/**"],
+          },
+        },
+      ],
+      coverage: {
+        provider: "v8",
+        reporter: ["text", "html", "lcov"],
+        reportsDirectory: "./coverage",
+        include: ["src/lib/**/*.ts"],
+        exclude: ["**/*.tsx"],
+      },
+    },
+    build: {
+      emptyOutDir: false,
+      lib: {
+        entry: {
+          index: resolve(__dirname, "src/index.ts"),
+          validation: resolve(__dirname, "src/validation.ts"),
+        },
+        formats: ["es"],
+      },
+      rollupOptions: {
+        // Externalize node-html-parser to keep bundle size small (~53KB)
+        // It's pulled in via @formbricks/types but not used in browser runtime
+        external: ["node-html-parser"],
+        output: {
+          entryFileNames: "[name].js",
+          chunkFileNames: "assets/[name]-[hash].js",
+        },
+      },
+      outDir: "dist",
+    },
+    plugins: [
+      ...sharedConfig.plugins,
+      stubSurveyUiStylesForVitest(),
+      copyCompiledAssetsPlugin({ filename: "surveys", distDir: resolve(__dirname, "dist"), localesDir }),
+      process.env.ANALYZE === "true" &&
+        visualizer({
+          filename: resolve(__dirname, "stats.html"),
+          open: false,
+          gzipSize: true,
+          brotliSize: true,
+        }),
+    ],
+  });
+};
+
+export default config;

@@ -1,0 +1,237 @@
+import "server-only";
+import { cache as reactCache } from "react";
+import { prisma } from "@formbricks/database";
+import { Prisma } from "@formbricks/database/prisma";
+import { DatabaseError, ResourceNotFoundError } from "@formbricks/types/errors";
+import { TSurvey } from "@formbricks/types/surveys/types";
+import { selectSurveyEmbeddedDataLinks } from "@/lib/embedded-data/survey-fields";
+import { getOrganizationBillingWithReadThroughSync } from "@/modules/ee/billing/lib/organization-billing";
+import { transformPrismaSurvey } from "@/modules/survey/lib/utils";
+
+/**
+ * Comprehensive survey data fetcher for link surveys
+ * Combines all necessary data in a single optimized query
+ */
+export const getSurveyWithMetadata = reactCache(async (surveyId: string) => {
+  try {
+    const survey = await prisma.survey.findUnique({
+      where: { id: surveyId },
+      select: {
+        // Core survey fields
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        name: true,
+        type: true,
+        workspaceId: true,
+        createdBy: true,
+        status: true,
+        archivedAt: true,
+
+        // Survey configuration
+        welcomeCard: true,
+        questions: true,
+        blocks: true,
+        endings: true,
+        hiddenFields: true,
+        variables: true,
+        displayOption: true,
+        recontactDays: true,
+        displayLimit: true,
+        autoClose: true,
+        delay: true,
+        displayPercentage: true,
+        autoComplete: true,
+
+        // Authentication & access
+        isVerifyEmailEnabled: true,
+        redirectUrl: true,
+        pin: true,
+        isBackButtonHidden: true,
+        isAutoProgressingEnabled: true,
+        isCaptureIpEnabled: true,
+        isAnonymizeResponsesEnabled: true,
+
+        // Single use configuration
+        singleUse: true,
+
+        // Styling & branding
+        workspaceOverwrites: true,
+        styling: true,
+        surveyClosedMessage: true,
+        showLanguageSwitch: true,
+        recaptcha: true,
+        metadata: true,
+
+        // Custom scripts (self-hosted only)
+        customHeadScripts: true,
+        customHeadScriptsMode: true,
+
+        // Related data
+        languages: {
+          select: {
+            default: true,
+            enabled: true,
+            language: {
+              select: {
+                id: true,
+                createdAt: true,
+                updatedAt: true,
+                code: true,
+                workspaceId: true,
+                alias: true,
+              },
+            },
+          },
+        },
+        triggers: {
+          select: {
+            actionClass: {
+              select: {
+                id: true,
+                createdAt: true,
+                updatedAt: true,
+                workspaceId: true,
+                name: true,
+                description: true,
+                type: true,
+                key: true,
+                noCodeConfig: true,
+              },
+            },
+          },
+        },
+        segment: {
+          select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            workspaceId: true,
+            title: true,
+            description: true,
+            isPrivate: true,
+            filters: true,
+            surveys: {
+              select: {
+                id: true,
+              },
+            },
+          },
+        },
+        followUps: true,
+
+        // ENG-1837: the definitions the renderer's recall and logic engines resolve through.
+        embeddedDataLinks: selectSurveyEmbeddedDataLinks,
+      },
+    });
+
+    if (!survey) {
+      throw new ResourceNotFoundError("Survey", surveyId);
+    }
+
+    const transformedSurvey = transformPrismaSurvey<TSurvey>(survey);
+
+    // This survey object is handed to a client component on the *public* link-survey page, so every
+    // field in it ends up in the page payload for anonymous visitors. Follow-up configuration carries
+    // internal recipient addresses, subjects and email bodies, and segment filters carry targeting
+    // rules built from contact attributes — none of which the survey renderer reads. They are selected
+    // above only because `TSurvey` requires the keys, so blank them out before they leave the server.
+    return {
+      ...transformedSurvey,
+      followUps: [],
+      ...(transformedSurvey.segment
+        ? { segment: { ...transformedSurvey.segment, filters: [], description: null } }
+        : {}),
+    };
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+    throw error;
+  }
+});
+
+/**
+ * Lightweight survey metadata for use in generateMetadata()
+ * Extracts only needed fields from the cached full survey
+ */
+export const getSurveyMetadata = async (surveyId: string) => {
+  const fullSurvey = await getSurveyWithMetadata(surveyId);
+
+  // Extract only metadata-relevant fields
+  return {
+    id: fullSurvey.id,
+    type: fullSurvey.type,
+    status: fullSurvey.status,
+    workspaceId: fullSurvey.workspaceId,
+    name: fullSurvey.name,
+    styling: fullSurvey.styling,
+  };
+};
+
+/**
+ * Combined response lookup for single use surveys
+ * NO CACHING - responses change frequently during survey taking
+ */
+export const getResponseBySingleUseId = reactCache((surveyId: string, singleUseId: string) => async () => {
+  try {
+    const response = await prisma.response.findFirst({
+      where: {
+        surveyId,
+        singleUseId,
+      },
+      select: {
+        id: true,
+        finished: true,
+        // Include additional fields that might be useful
+        createdAt: true,
+        data: true,
+      },
+    });
+
+    return response;
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+    throw error;
+  }
+});
+
+/**
+ * Get existing contact response for contact surveys
+ * NO CACHING - response data changes frequently and needs to be fresh
+ */
+export const getExistingContactResponse = reactCache((surveyId: string, contactId: string) => async () => {
+  try {
+    const response = await prisma.response.findFirst({
+      where: {
+        surveyId,
+        contactId,
+      },
+      select: {
+        id: true,
+        finished: true,
+      },
+    });
+
+    return response ?? undefined;
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      throw new DatabaseError(error.message);
+    }
+    throw error;
+  }
+});
+
+/**
+ * Get organization billing information for survey limits
+ * Cached separately with longer TTL
+ */
+export const getOrganizationBilling = reactCache(async (organizationId: string) => {
+  const billing = await getOrganizationBillingWithReadThroughSync(organizationId);
+  if (!billing) {
+    throw new ResourceNotFoundError("Organization", organizationId);
+  }
+  return billing;
+});

@@ -1,0 +1,216 @@
+"use client";
+
+import { zodResolver } from "@hookform/resolvers/zod";
+import { ArrowLeft, MailIcon } from "lucide-react";
+import { useMemo, useState } from "react";
+import { FormProvider, useForm } from "react-hook-form";
+import { Toaster, toast } from "react-hot-toast";
+import { useTranslation } from "react-i18next";
+import { z } from "zod";
+import { TSurvey } from "@formbricks/types/surveys/types";
+import { getTextContent } from "@formbricks/types/surveys/validation";
+import { TUserLocale } from "@formbricks/types/user";
+import { TWorkspaceStyling } from "@formbricks/types/workspace";
+import { cn } from "@/lib/cn";
+import { getLocalizedValue } from "@/lib/i18n/utils";
+import { getFormattedErrorMessage } from "@/lib/utils/helper";
+import { replaceHeadlineRecall } from "@/lib/utils/recall";
+import { getElementsFromBlocks } from "@/modules/survey/lib/client-utils";
+import { sendLinkSurveyEmailAction } from "@/modules/survey/link/actions";
+import { useAppLocale } from "@/modules/survey/link/hooks/use-app-locale";
+import { Button } from "@/modules/ui/components/button";
+import { FormControl, FormError, FormField, FormItem } from "@/modules/ui/components/form";
+import { Input } from "@/modules/ui/components/input";
+import { StackedCardsContainer } from "@/modules/ui/components/stacked-cards-container";
+
+interface VerifyEmailProps {
+  survey: TSurvey;
+  isErrorComponent?: boolean;
+  singleUseId?: string;
+  singleUseToken?: string;
+  languageCode: string;
+  styling: TWorkspaceStyling;
+  locale: TUserLocale;
+}
+
+const ZVerifyEmailInput = z.object({
+  email: z.email(),
+});
+type TVerifyEmailInput = z.infer<typeof ZVerifyEmailInput>;
+
+export const VerifyEmail = ({
+  survey,
+  isErrorComponent,
+  singleUseId,
+  singleUseToken,
+  languageCode,
+  styling,
+  locale,
+}: VerifyEmailProps) => {
+  const { t } = useTranslation();
+  const isLocaleReady = useAppLocale(locale);
+
+  const form = useForm<TVerifyEmailInput>({
+    defaultValues: {
+      email: "",
+    },
+    resolver: zodResolver(ZVerifyEmailInput),
+  });
+
+  const localSurvey = useMemo(() => {
+    return replaceHeadlineRecall(survey, "default");
+  }, [survey]);
+
+  const questions = useMemo(() => getElementsFromBlocks(localSurvey.blocks), [localSurvey.blocks]);
+  const cardArrangement =
+    localSurvey.styling?.cardArrangement?.linkSurveys ?? styling.cardArrangement?.linkSurveys ?? "straight";
+  const isCardless = cardArrangement === "cardless";
+  const linkSurveyCardWidth =
+    localSurvey.styling?.linkSurveyCardWidth ?? styling.linkSurveyCardWidth ?? "default";
+
+  const { isSubmitting } = form.formState;
+  const [showPreviewQuestions, setShowPreviewQuestions] = useState(false);
+  const [emailSent, setEmailSent] = useState<boolean>(false);
+
+  const submitEmail = async (emailInput: TVerifyEmailInput) => {
+    const email = emailInput.email.toLowerCase();
+
+    const data = {
+      surveyId: localSurvey.id,
+      email: email,
+      surveyName: localSurvey.name,
+      suId: singleUseId ?? "",
+      suToken: singleUseToken,
+      locale,
+      // The language the respondent is reading the survey in, so the emailed link comes back to it.
+      surveyLanguageCode: languageCode,
+    };
+
+    const actionResult = await sendLinkSurveyEmailAction(data);
+    if (actionResult?.data) {
+      setEmailSent(true);
+    } else {
+      const errorMessage = getFormattedErrorMessage(actionResult);
+      toast.error(errorMessage);
+    }
+  };
+
+  const handlePreviewClick = () => {
+    setShowPreviewQuestions(!showPreviewQuestions);
+  };
+
+  const handleGoBackClick = () => {
+    setShowPreviewQuestions(false);
+    setEmailSent(false);
+  };
+
+  // The gate is nothing but translated chrome, so it waits for its locale instead of asking for an
+  // email address in the browser's language and switching a frame later.
+  if (!isLocaleReady) return null;
+
+  if (isErrorComponent) {
+    return (
+      <div className="flex h-screen w-screen flex-col items-center justify-center bg-slate-50">
+        <span className="size-24 rounded-full bg-slate-300 p-6 text-5xl">🤔</span>
+        <p className="mt-8 text-4xl font-bold">{t("s.this_looks_fishy")}</p>
+        <Button variant="ghost" className="mt-4" onClick={handleGoBackClick}>
+          {t("s.please_try_again_with_the_original_link")}
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "flex h-full w-full flex-col items-center justify-center text-center",
+        isCardless ? "px-4 py-12 sm:px-6" : "p-2"
+      )}>
+      <Toaster />
+      <StackedCardsContainer cardArrangement={cardArrangement} linkSurveyCardWidth={linkSurveyCardWidth}>
+        <FormProvider {...form}>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              await form.handleSubmit(submitEmail)(e);
+            }}>
+            {!emailSent && !showPreviewQuestions && (
+              <div className="flex flex-col">
+                <div className="mx-auto rounded-full border bg-slate-200 p-6">
+                  <MailIcon strokeWidth={1.5} className="mx-auto size-12 text-white" />
+                </div>
+                <p className="mt-8 text-2xl font-bold lg:text-4xl">{t("s.verify_email_before_submission")}</p>
+                <p className="mt-4 text-sm text-slate-500 lg:text-base">
+                  {t("s.verify_email_before_submission_description")}
+                </p>
+                <FormField
+                  control={form.control}
+                  name="email"
+                  render={({ field, fieldState: { error } }) => (
+                    <FormItem className="my-4 w-full space-y-4">
+                      <FormControl>
+                        <div>
+                          <div className="flex gap-x-2">
+                            <Input
+                              value={field.value}
+                              onChange={(email) => {
+                                field.onChange(email);
+                              }}
+                              type="email"
+                              placeholder="engineering@acme.com"
+                              className="h-10 bg-white"
+                            />
+                            <Button
+                              type="submit"
+                              size="tall"
+                              loading={isSubmitting}
+                              className="focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2">
+                              {t("s.verify_email_before_submission_button")}
+                            </Button>
+                          </div>
+                          {error?.message && <FormError className="mt-2">{error.message}</FormError>}
+                        </div>
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+                <Button variant="ghost" className="mt-6" onClick={handlePreviewClick}>
+                  {t("s.just_curious")} <span>{t("s.preview_survey_questions")}</span>
+                </Button>
+              </div>
+            )}
+          </form>
+        </FormProvider>
+        {!emailSent && showPreviewQuestions && (
+          <div>
+            <p className="text-2xl font-bold">{t("s.question_preview")}</p>
+            <div className="mt-4 flex max-h-[50vh] w-full flex-col overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/20 p-4 text-slate-700">
+              {questions.map((question, index) => (
+                <p
+                  key={index}
+                  className="my-1 text-sm">{`${(index + 1).toString()}. ${getTextContent(getLocalizedValue(question.headline, languageCode))}`}</p>
+              ))}
+            </div>
+            <Button variant="ghost" className="mt-6" onClick={handlePreviewClick}>
+              {t("s.want_to_respond")} <span>{t("s.verify_email")}</span>
+            </Button>
+          </div>
+        )}
+        {emailSent && (
+          <div>
+            <h1 className="mt-8 text-2xl font-bold lg:text-4xl">
+              {t("s.survey_sent_to", { email: form.getValues().email })}
+            </h1>
+            <p className="mt-4 text-center text-sm text-slate-500 lg:text-base">
+              {t("s.check_inbox_or_spam")}
+            </p>
+            <Button variant="secondary" className="mt-6" size="sm" onClick={handleGoBackClick}>
+              <ArrowLeft />
+              {t("common.back")}
+            </Button>
+          </div>
+        )}
+      </StackedCardsContainer>
+    </div>
+  );
+};

@@ -1,0 +1,284 @@
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { prisma } from "@formbricks/database";
+import { syncSsoIdentityForUser } from "./account-linking";
+import { OAUTH_ACCOUNT_NOT_LINKED_ERROR } from "./constants";
+
+const mocks = vi.hoisted(() => ({
+  accountFindUnique: vi.fn(),
+  accountDelete: vi.fn(),
+  accountUpdate: vi.fn(),
+  accountCreate: vi.fn(),
+  userUpdate: vi.fn(),
+}));
+
+vi.mock("@formbricks/database", () => ({
+  prisma: {
+    $transaction: vi.fn(),
+    account: {
+      findUnique: mocks.accountFindUnique,
+      delete: mocks.accountDelete,
+      update: mocks.accountUpdate,
+      create: mocks.accountCreate,
+    },
+    user: {
+      update: mocks.userUpdate,
+    },
+  },
+}));
+
+describe("syncSsoIdentityForUser", () => {
+  const account = {
+    type: "oauth" as const,
+    provider: "google",
+    providerAccountId: "provider-account-1",
+    issuer: "https://accounts.google.com",
+    access_token: "access-token",
+    refresh_token: "refresh-token",
+    scope: "openid email profile",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(prisma.$transaction).mockImplementation(async (callback) =>
+      callback({
+        account: {
+          findUnique: mocks.accountFindUnique,
+          delete: mocks.accountDelete,
+          update: mocks.accountUpdate,
+          create: mocks.accountCreate,
+        },
+        user: {
+          update: mocks.userUpdate,
+        },
+      } as any)
+    );
+    mocks.accountFindUnique.mockResolvedValue(null);
+    mocks.accountDelete.mockResolvedValue(undefined);
+    mocks.accountUpdate.mockResolvedValue(undefined);
+    mocks.accountCreate.mockResolvedValue(undefined);
+    mocks.userUpdate.mockResolvedValue(undefined);
+  });
+
+  test("throws when the canonical account is already linked to a different user", async () => {
+    mocks.accountFindUnique.mockResolvedValue({
+      id: "account_1",
+      userId: "user_2",
+    });
+
+    await expect(
+      syncSsoIdentityForUser({
+        userId: "user_1",
+        provider: "google",
+        account,
+      })
+    ).rejects.toThrow(OAUTH_ACCOUNT_NOT_LINKED_ERROR);
+
+    expect(mocks.accountUpdate).not.toHaveBeenCalled();
+    expect(mocks.accountCreate).not.toHaveBeenCalled();
+    expect(mocks.userUpdate).not.toHaveBeenCalled();
+  });
+
+  test("removes a legacy account row and refreshes the canonical account tokens when both exist", async () => {
+    mocks.accountFindUnique.mockResolvedValue({
+      id: "account_1",
+      userId: "user_1",
+    });
+
+    await syncSsoIdentityForUser({
+      userId: "user_1",
+      provider: "google",
+      account,
+      legacyAccountIdToNormalize: "legacy_account_1",
+    });
+
+    expect(mocks.accountDelete).toHaveBeenCalledWith({
+      where: {
+        id: "legacy_account_1",
+      },
+    });
+    expect(mocks.accountUpdate).toHaveBeenCalledWith({
+      where: {
+        id: "account_1",
+      },
+      data: {
+        // `issuer` on the token-refresh branch too (ENG-2343, corrected in ENG-2555): the canonical row
+        // may predate the backfill window OR carry a wrong value written before the fix, and 1.7's
+        // account lookup filters on `(issuer, accountId)` — so leaving it alone here would keep a
+        // recovered link invisible and re-trigger recovery on the next sign-in, forever.
+        issuer: "https://accounts.google.com",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        scope: "openid email profile",
+      },
+    });
+    expect(mocks.userUpdate).toHaveBeenCalledWith({
+      where: {
+        id: "user_1",
+      },
+      data: {
+        identityProvider: "google",
+        identityProviderAccountId: "provider-account-1",
+      },
+    });
+  });
+
+  test("reassigns a legacy account row when no canonical account exists yet", async () => {
+    await syncSsoIdentityForUser({
+      userId: "user_1",
+      provider: "google",
+      account,
+      legacyAccountIdToNormalize: "legacy_account_1",
+    });
+
+    expect(mocks.accountUpdate).toHaveBeenCalledWith({
+      where: {
+        id: "legacy_account_1",
+      },
+      data: {
+        userId: "user_1",
+        type: "oauth",
+        provider: "google",
+        providerAccountId: "provider-account-1",
+        issuer: "https://accounts.google.com",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        scope: "openid email profile",
+      },
+    });
+    expect(mocks.accountCreate).not.toHaveBeenCalled();
+  });
+
+  test("wraps non-transactional calls in a prisma transaction", async () => {
+    await syncSsoIdentityForUser({
+      userId: "user_1",
+      provider: "google",
+      account,
+    });
+
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
+  });
+
+  test("uses the transaction client when one is provided", async () => {
+    const txAccountFindUnique = vi.fn().mockResolvedValue({
+      id: "account_1",
+      userId: "user_1",
+    });
+    const txAccountUpdate = vi.fn().mockResolvedValue(undefined);
+    const txUserUpdate = vi.fn().mockResolvedValue(undefined);
+    const tx = {
+      account: {
+        findUnique: txAccountFindUnique,
+        update: txAccountUpdate,
+      },
+      user: {
+        update: txUserUpdate,
+      },
+    };
+
+    await syncSsoIdentityForUser({
+      userId: "user_1",
+      provider: "google",
+      account,
+      tx: tx as any,
+    });
+
+    expect(txAccountFindUnique).toHaveBeenCalledOnce();
+    expect(txAccountUpdate).toHaveBeenCalledWith({
+      where: {
+        id: "account_1",
+      },
+      // `issuer` is written here as of ENG-2555 — this branch used to update tokens only, which is what
+      // stopped a row with a wrong issuer from ever healing.
+      data: {
+        issuer: "https://accounts.google.com",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        scope: "openid email profile",
+      },
+    });
+    expect(txUserUpdate).toHaveBeenCalledWith({
+      where: {
+        id: "user_1",
+      },
+      data: {
+        identityProvider: "google",
+        identityProviderAccountId: "provider-account-1",
+      },
+    });
+    expect(prisma.account.findUnique).not.toHaveBeenCalled();
+  });
+
+  test("creates a canonical account when no account rows exist yet", async () => {
+    await syncSsoIdentityForUser({
+      userId: "user_1",
+      provider: "google",
+      account: {
+        ...account,
+        expires_at: 1234,
+        token_type: "Bearer",
+        id_token: "id-token",
+      },
+    });
+
+    expect(mocks.accountCreate).toHaveBeenCalledWith({
+      data: {
+        userId: "user_1",
+        type: "oauth",
+        provider: "google",
+        providerAccountId: "provider-account-1",
+        issuer: "https://accounts.google.com",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        expires_at: 1234,
+        scope: "openid email profile",
+        token_type: "Bearer",
+        id_token: "id-token",
+      },
+    });
+    expect(mocks.userUpdate).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * Every other assertion in this file uses google, which is exactly how ENG-2555 shipped: google is the
+   * one provider whose issuer is NOT the synthetic `local:oauth:` form, so a helper that always returned
+   * the synthetic form looked correct against a google-only suite. These two pin both arms.
+   */
+  test("uses the provider's own declared issuer for google, not the synthetic form", async () => {
+    await syncSsoIdentityForUser({ userId: "user_1", provider: "google", account });
+
+    expect(mocks.accountCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ issuer: "https://accounts.google.com" }),
+      })
+    );
+  });
+
+  test("uses the synthetic issuer for a provider that declares none", async () => {
+    await syncSsoIdentityForUser({
+      userId: "user_1",
+      provider: "github",
+      account: { ...account, provider: "github", providerAccountId: "github-account-1" },
+    });
+
+    expect(mocks.accountCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ provider: "github", issuer: "local:oauth:github" }),
+      })
+    );
+  });
+
+  /**
+   * The branch that made the loop unbreakable (ENG-2555): with a canonical row already present and no
+   * legacy row, this used to update tokens only, so a row carrying a wrong issuer could never heal.
+   */
+  test("repairs the issuer on an existing canonical row", async () => {
+    mocks.accountFindUnique.mockResolvedValue({ id: "account_1", userId: "user_1" });
+
+    await syncSsoIdentityForUser({ userId: "user_1", provider: "google", account });
+
+    expect(mocks.accountUpdate).toHaveBeenCalledWith({
+      where: { id: "account_1" },
+      data: expect.objectContaining({ issuer: "https://accounts.google.com" }),
+    });
+  });
+});

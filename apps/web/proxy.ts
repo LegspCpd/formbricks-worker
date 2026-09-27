@@ -1,0 +1,154 @@
+import { NextRequest, NextResponse } from "next/server";
+import { v4 as uuidv4 } from "uuid";
+import { logger } from "@formbricks/logger";
+import { isPublicDomainConfigured, isRequestFromPublicDomain } from "@/app/middleware/domain-utils";
+import { isAuthProtectedRoute, isRouteAllowedForDomain } from "@/app/middleware/endpoint-validator";
+import { TRUSTED_PROXY_HOP_COUNT, WEBAPP_URL } from "@/lib/constants";
+import { FORMBRICKS_WORKSPACE_ID_COOKIE } from "@/lib/localStorage";
+import { FORMBRICKS_CLIENT_IP_HEADER, resolveClientIp } from "@/lib/utils/client-ip";
+import { getValidatedCallbackUrl } from "@/lib/utils/url";
+import { getProxySession } from "@/modules/auth/lib/proxy-session";
+
+const handleAuth = async (request: NextRequest): Promise<NextResponse | null> => {
+  const session = await getProxySession(request);
+
+  if (isAuthProtectedRoute(request.nextUrl.pathname) && !session) {
+    const loginUrl = `${WEBAPP_URL}/auth/login?callbackUrl=${encodeURIComponent(WEBAPP_URL + request.nextUrl.pathname + request.nextUrl.search)}`;
+    return NextResponse.redirect(loginUrl);
+  }
+
+  const callbackUrl = request.nextUrl.searchParams.get("callbackUrl");
+  const validatedCallbackUrl = getValidatedCallbackUrl(callbackUrl, WEBAPP_URL);
+
+  if (callbackUrl && !validatedCallbackUrl) {
+    return NextResponse.json({ error: "Invalid callback URL" }, { status: 400 });
+  }
+
+  if (session && validatedCallbackUrl) {
+    return NextResponse.redirect(validatedCallbackUrl);
+  }
+
+  return null;
+};
+
+/**
+ * Handle domain-aware routing based on PUBLIC_URL and WEBAPP_URL
+ */
+const handleDomainAwareRouting = (request: NextRequest): NextResponse | null => {
+  try {
+    const publicDomainConfigured = isPublicDomainConfigured();
+
+    // When PUBLIC_URL is not configured, admin domain allows all routes (backward compatibility)
+    if (!publicDomainConfigured) return null;
+
+    const isPublicDomain = isRequestFromPublicDomain(request);
+
+    const pathname = request.nextUrl.pathname;
+
+    // Check if the route is allowed for the current domain
+    const isAllowed = isRouteAllowedForDomain(pathname, isPublicDomain);
+
+    if (!isAllowed) {
+      return new NextResponse(null, { status: 404 });
+    }
+
+    return null; // Allow the request to continue
+  } catch (error) {
+    logger.error(error, "Error handling domain-aware routing");
+    return new NextResponse(null, { status: 404 });
+  }
+};
+
+/**
+ * Request headers Next.js sets only on prefetches (`next/dist/client/components/app-router-headers`).
+ * A prefetch is speculative — the router issues one for every link it has rendered, whether or not
+ * the user ever opens it — so it must never be read as "the user is here now".
+ */
+const NEXT_PREFETCH_HEADERS = [
+  "next-router-prefetch",
+  "next-router-segment-prefetch",
+  "next-instant-navigation-testing-prefetch",
+] as const;
+
+const isPrefetchRequest = (request: NextRequest): boolean =>
+  NEXT_PREFETCH_HEADERS.some((header) => request.headers.has(header));
+
+export const proxy = async (originalRequest: NextRequest) => {
+  // Handle domain-aware routing first
+  const domainResponse = handleDomainAwareRouting(originalRequest);
+  if (domainResponse) return domainResponse;
+
+  // Create a new Request object to override headers and add a unique request ID header
+  const request = new NextRequest(originalRequest, {
+    headers: new Headers(originalRequest.headers),
+  });
+
+  const clientIp = resolveClientIp(request.headers, TRUSTED_PROXY_HOP_COUNT);
+  if (clientIp) {
+    request.headers.set(FORMBRICKS_CLIENT_IP_HEADER, clientIp);
+  } else {
+    // A caller may send this private header directly. Removing it on failure is what makes Proxy the
+    // trust boundary; downstream code must never see an identity Proxy did not establish itself.
+    request.headers.delete(FORMBRICKS_CLIENT_IP_HEADER);
+  }
+
+  request.headers.set("x-request-id", uuidv4());
+  request.headers.set("x-start-time", Date.now().toString());
+
+  // Create a new NextResponse object to forward the new request with headers
+  const nextResponseWithCustomHeader = NextResponse.next({
+    request: {
+      headers: request.headers,
+    },
+  });
+
+  // Handle authentication
+  const authResponse = await handleAuth(request);
+  if (authResponse) return authResponse;
+
+  // Remember the active workspace so the workspace-agnostic org-settings shell can resolve it
+  // server-side (localStorage is browser-only). Mirrors the /workspaces/[workspaceId] path segment.
+  // Only set the cookie when the value actually changes: a Set-Cookie on a server-action POST makes
+  // Next.js treat the action as revalidated, forcing a router refresh after every action — on pages
+  // that call an action on mount this becomes an infinite POST/refresh loop.
+  //
+  // Prefetches are excluded because they are not visits. The router re-prefetches the links of a
+  // tree it rendered earlier, so after deleting a workspace it still prefetches that workspace's
+  // now-stale links — and letting one write this cookie overwrote the surviving workspace the
+  // delete action had just stored, pointing it at a workspace that no longer exists. The
+  // org-settings shell then cannot trust the cookie and falls back to `organizations[0]`, dropping
+  // a member of several organizations into an unrelated one.
+  const workspaceMatch = /^\/workspaces\/([^/]+)/.exec(request.nextUrl.pathname);
+  if (
+    workspaceMatch?.[1] &&
+    !isPrefetchRequest(request) &&
+    request.cookies.get(FORMBRICKS_WORKSPACE_ID_COOKIE)?.value !== workspaceMatch[1]
+  ) {
+    nextResponseWithCustomHeader.cookies.set(FORMBRICKS_WORKSPACE_ID_COOKIE, workspaceMatch[1], {
+      path: "/",
+      sameSite: "lax",
+      httpOnly: true,
+      maxAge: 60 * 60 * 24 * 365,
+    });
+  }
+
+  return nextResponseWithCustomHeader;
+};
+
+export const config = {
+  matcher: [
+    // Keep asset exclusions segment-bound: every dynamic route must traverse Proxy so callers cannot
+    // bypass the private client-IP header overwrite by choosing an asset-like route prefix.
+    //
+    // The `\\.` escapes stay, and S7780's `String.raw` fix must NOT be applied here: Next.js reads this
+    // matcher by statically parsing the file, and its extractor
+    // (`next/dist/build/analysis/extract-const-value.js`, 16.2.11) understands string literals,
+    // template literals, arrays and objects — but not a `TaggedTemplateExpression`. Verified against
+    // Next's own SWC parser: `String.raw` yields `Unsupported node type "TaggedTemplateExpression" at
+    // "config.matcher[0]"`, which throws in dev and, in a production build, only logs an error and
+    // leaves `config` undefined — so `parseMiddlewareConfig` receives nothing and the matcher is
+    // silently DROPPED, running Proxy on every static asset and voiding the exclusions above. A plain
+    // template literal parses, but needs the same `\\.` escapes, so it does not satisfy the rule either.
+    "/((?!_next/(?:static|image)(?:/|$)|(?:favicon\\.ico|sitemap\\.xml|robots\\.txt)$|(?:js|css|images|fonts|icons|public|animated-bgs)(?:/|$)).*)", // NOSONAR(typescript:S7780) -- String.raw breaks Next.js's static matcher extraction; see above
+  ],
+};

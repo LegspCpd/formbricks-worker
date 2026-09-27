@@ -1,0 +1,766 @@
+---
+title: "Docker Setup"
+description: "Set up Formbricks quickly using our ready-to-use Docker image."
+icon: "docker"
+---
+
+Use this guide for a manual Docker Compose setup. It downloads the production Compose file and starts the
+baseline Formbricks stack: Formbricks Web, PostgreSQL, Redis/Valkey, Formbricks Hub, and Cube. Optional
+services such as Qwen/vLLM, AI taxonomy, and RustFS are documented after the baseline stack is running. The
+baseline also runs a single SpiceDB instance for Formbricks authorization data.
+
+### Requirements
+
+Make sure the following tools are installed:
+
+- Docker Engine with Docker Compose V2 (`docker compose`)
+- `curl`
+- `openssl`
+- A POSIX-compatible shell such as `sh`, `bash`, or `zsh`
+
+Docker and Docker Compose are usually included in tools like Docker Desktop and Rancher Desktop.
+
+<Note>
+  `docker compose` without the hyphen is now the primary method of using docker-compose, according to the
+  Docker documentation.
+</Note>
+
+## Choose Your Setup Path
+
+- Use this manual Docker Compose guide for local installs, custom servers, or custom reverse-proxy setups.
+- Use the [one-click setup script](/self-hosting/setup/one-click) for production Ubuntu servers where you want
+  Traefik, HTTPS certificates, and optional RustFS automation.
+- Use the [migration guide](/self-hosting/advanced/migration#v5) before updating an existing Formbricks 4.x
+  install or an older v5 compose file.
+
+<Info>
+  Starting with Formbricks v5, the production Docker Compose stack includes Formbricks Hub and Cube as part of
+  the baseline. Keep `HUB_API_URL` at its internal default unless Hub runs elsewhere.
+</Info>
+
+## Start
+
+1. **Create a New Directory for Formbricks**
+
+   Open a terminal and run the following commands to create and enter a new directory for Formbricks:
+
+   ```bash
+   mkdir formbricks-quickstart && cd formbricks-quickstart
+   ```
+
+1. **Download the Docker Files**
+
+   Get the Docker Compose file, AuthZed database bootstrap helper, and Cube configuration shipped with the
+   baseline stack:
+
+   ```bash
+   mkdir -p cube/schema
+   curl -fsSL \
+     -o docker-compose.yml \
+     https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/docker-compose.yml
+   curl -fsSL \
+     -o authzed-postgres-bootstrap.sh \
+     https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/authzed-postgres-bootstrap.sh
+   chmod 700 authzed-postgres-bootstrap.sh
+   curl -fsSL \
+     -o cube/cube.js \
+     https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/cube/cube.js
+   curl -fsSL \
+     -o cube/schema/FeedbackRecords.js \
+     https://raw.githubusercontent.com/formbricks/formbricks/stable/docker/cube/schema/FeedbackRecords.js
+   ```
+
+1. **Create the Environment File**
+
+   Store your configuration in `.env`. Docker Compose reads this file for variable interpolation, and the
+   Formbricks container also loads it at startup. For a local install, use `http://localhost:3000`. For a server
+   install, replace both URL values with your public HTTPS URL before starting the stack.
+
+   ```bash
+   POSTGRES_PASSWORD=$(openssl rand -hex 32)
+   cat <<EOF > .env
+   WEBAPP_URL=http://localhost:3000
+   BETTER_AUTH_URL=http://localhost:3000
+   POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+   POSTGRES_PASSWORD_URL_ENCODED=$POSTGRES_PASSWORD
+   BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+   ENCRYPTION_KEY=$(openssl rand -hex 32)
+   CRON_SECRET=$(openssl rand -hex 32)
+   HUB_API_KEY=$(openssl rand -hex 32)
+   CUBEJS_API_SECRET=$(openssl rand -hex 32)
+   CUBEJS_JWT_ISSUER=formbricks-web
+   CUBEJS_JWT_AUDIENCE=formbricks-cube
+   AUTHZED_TOKEN=$(openssl rand -hex 32)
+   AUTHZED_DATABASE_PASSWORD=$(openssl rand -hex 32)
+   EOF
+   chmod 600 .env
+   ```
+
+   Keep `POSTGRES_PASSWORD` unchanged after PostgreSQL initializes the `postgres` volume. The generated
+   hexadecimal value is already URL-safe, so `POSTGRES_PASSWORD_URL_ENCODED` uses the same value. If you replace
+   an existing `docker-compose.yml`, copy the exact password from that deployment instead of generating a new
+   one. If it contains URI-reserved characters, set `POSTGRES_PASSWORD_URL_ENCODED` to its percent-encoded form;
+   otherwise you can use the same value or omit the encoded variable. The PostgreSQL image only applies the raw
+   password when it creates a new database volume.
+
+1. **Validate the Docker Compose Configuration**
+
+   Validate the Compose file after `.env` contains the required values:
+
+   ```bash
+   docker compose config >/dev/null
+   ```
+
+   If validation fails, check that `.env` contains the required values and that `docker-compose.yml` has valid
+   syntax.
+
+1. **Start the Docker Setup**
+
+   Now, you're ready to run Formbricks with Docker. Use the command below to start Formbricks together with
+   PostgreSQL, Redis, the Formbricks Hub API and worker, Cube, and SpiceDB.
+
+   ```bash
+   docker compose up -d
+   ```
+
+   The `-d` flag runs the containers in the background, so they keep running even after you close the terminal.
+
+1. **Verify the Stack**
+
+   Confirm the baseline services started and the Formbricks health endpoint responds:
+
+   ```bash
+   docker compose ps -a
+   curl -fsS http://localhost:3000/health
+   docker compose logs --tail=100 formbricks-migrate hub-migrate authzed-db-bootstrap spicedb-migrate
+   docker compose logs --tail=100 formbricks hub hub-worker cube spicedb
+   ```
+
+   `formbricks-migrate`, `hub-migrate`, `authzed-db-bootstrap`, and `spicedb-migrate` should complete
+   successfully. `postgres`, `redis`, `cube`, `hub`, `hub-worker`, `spicedb`, and `formbricks` should be running
+   or healthy. The worker has no HTTP health endpoint, so verify that it stays `Up` without repeated restarts.
+
+1. **Open Formbricks in Your Browser**
+
+   Once the setup is running, open [**http://localhost:3000**](http://localhost:3000) in your browser to access
+   Formbricks. The first time you visit, you'll see a setup wizard. Follow the steps to create your first user
+   and start using Formbricks.
+
+<Note>
+  The bundled Docker stack keeps Formbricks Hub and Cube internal to the compose network. The app reaches them
+  through `http://hub:8080` and `http://cube:4000`. When AI taxonomy beta is enabled, Hub reaches taxonomy
+  internally through `http://taxonomy:8000`.
+</Note>
+
+## AuthZed and SpiceDB
+
+The bundled SpiceDB service stores its data in a dedicated `spicedb` database and login inside the existing
+PostgreSQL container. Database bootstrap, datastore migration, and the release-matched `authzed-initialize`
+service are idempotent. Fresh installs apply the canonical schema and verify an empty or reconciled graph
+without making Formbricks startup or `/health` depend on SpiceDB. SpiceDB is reachable only inside the Compose
+network at `spicedb:50051`; it is not published on the host or routed through Traefik.
+
+The Formbricks container receives the supported AuthZed variables automatically. Keep `AUTHZED_TOKEN` and
+`AUTHZED_DATABASE_PASSWORD` private and include `.env` and the PostgreSQL volume in your backup plan. Running
+`docker compose down` preserves the volume; `docker compose down -v` deletes both Formbricks and SpiceDB data.
+
+The release image includes an opt-in operations CLI. It does not start during normal installation:
+
+```bash
+docker compose --profile authzed-ops run --rm authzed-ops health
+docker compose --profile authzed-ops run --rm authzed-ops schema check
+docker compose --profile authzed-ops run --rm authzed-ops backfill
+docker compose --profile authzed-ops run --rm authzed-ops upgrade check
+```
+
+See [AuthZed Operations](/self-hosting/configuration/authzed-operations) before applying a schema, repairing
+relationships, upgrading SpiceDB, or restoring a backup.
+
+The bundled PostgreSQL service leaves `track_commit_timestamp` at its default `off` value, so SpiceDB reports
+that its Watch API is disabled. This does not affect schema writes, relationship writes, or permission checks.
+If a future integration consumes the Watch API, enable that PostgreSQL setting separately and plan for the
+required database restart.
+
+Repository development exposes SpiceDB on `127.0.0.1:50051`. To start the optional authenticated browser UI:
+
+```bash
+docker compose -f docker-compose.dev.yml --profile authzed-ui up -d authzed-ui
+```
+
+Then open [http://127.0.0.1:50052](http://127.0.0.1:50052). Run `pnpm authzed:smoke` for an isolated
+application-health, authentication-failure, bounded-outage, schema, permission, migration-idempotency, and
+persistence check. The smoke command uses its own Compose project and random host port, then removes its test
+data afterward.
+
+To check the developer stack through the Formbricks AuthZed client without writing data, run:
+
+```bash
+pnpm authzed:health
+```
+
+It reads the repository `.env`, prints one JSON result, and returns exit code `0` only when healthy. An empty
+SpiceDB schema is still a healthy connection. There is no AuthZed browser health page, and the normal
+Formbricks `/health` endpoint deliberately remains independent of SpiceDB. Restart Formbricks after changing
+any `AUTHZED_*` value.
+
+## Optional Services
+
+Start and verify the baseline stack before enabling optional services.
+
+<Note>
+  If `.env` already contains a `COMPOSE_PROFILES` line, update that line instead of adding a second one.
+</Note>
+
+### Enable Bundled Qwen/vLLM For AI
+
+The Docker stack can optionally run Qwen through vLLM as an OpenAI-compatible `/v1` endpoint. Baseline
+installs do not start vLLM and can still use Google Vertex, Azure, AWS Bedrock, or another OpenAI-compatible
+endpoint.
+
+The bundled Qwen/vLLM service requires a GPU-capable Docker host with the NVIDIA Container Toolkit installed.
+Model files are stored in the `qwen-model-cache` Docker volume. Startup can take several minutes while vLLM
+downloads and loads the model.
+
+To use the bundled Qwen runtime, add these values to `.env`:
+
+```bash
+cat <<EOF >> .env
+COMPOSE_PROFILES=qwen
+AI_PROVIDER=openai-compatible
+AI_MODEL=qwen3-14b-awq
+AI_OPENAI_COMPATIBLE_BASE_URL=http://vllm:8000/v1
+AI_OPENAI_COMPATIBLE_PROVIDER_NAME=vllm
+AI_OPENAI_COMPATIBLE_SUPPORTS_STRUCTURED_OUTPUTS=1
+EOF
+```
+
+Then start the stack with the profile and check vLLM:
+
+```bash
+docker compose --profile qwen up -d
+docker compose --profile qwen ps
+docker compose logs --tail=100 vllm formbricks
+curl -fsS http://127.0.0.1:8000/health
+```
+
+The vLLM endpoint is available inside the Compose network at `http://vllm:8000/v1` and is bound to
+`127.0.0.1:8000` by default for local checks.
+
+If you run your own Qwen/vLLM service, do not enable the `qwen` profile. Set `AI_PROVIDER`, `AI_MODEL`, and
+`AI_OPENAI_COMPATIBLE_BASE_URL` to your external endpoint instead.
+
+### Enable AI Taxonomy Beta
+
+The standalone AI taxonomy service is included as an opt-in Docker Compose profile. Baseline installs do not
+start taxonomy and do not require taxonomy or LLM secrets.
+
+To enable taxonomy with the bundled Qwen runtime, add these values to `.env`:
+
+```bash
+cat <<EOF >> .env
+COMPOSE_PROFILES=qwen,taxonomy
+TAXONOMY_SERVICE_URL=http://taxonomy:8000
+TAXONOMY_SERVICE_TOKEN=$(openssl rand -hex 32)
+HUB_INTERNAL_API_TOKEN=$(openssl rand -hex 32)
+TAXONOMY_IMAGE_REF=:v0.1.0
+TAXONOMY_LLM_PROVIDER=openai-compatible
+TAXONOMY_LLM_MODEL=qwen3-14b-awq
+TAXONOMY_LLM_BASE_URL=http://vllm:8000/v1
+TAXONOMY_LLM_API_KEY=not-used
+EOF
+```
+
+Replace `:v0.1.0` with the current released `ghcr.io/formbricks/taxonomy` image tag for your Formbricks
+version. Production installs should pin a release tag instead of relying on `:latest`.
+
+If you run your own OpenAI-compatible endpoint, use `COMPOSE_PROFILES=taxonomy` instead and point
+`TAXONOMY_LLM_BASE_URL` at that `/v1` endpoint. The selected model must reliably return strict JSON because
+taxonomy generation validates an exact 5-level tree.
+
+To use Amazon Bedrock instead of an OpenAI-compatible endpoint, replace the taxonomy LLM values with:
+
+```bash
+TAXONOMY_LLM_PROVIDER=bedrock
+TAXONOMY_LLM_MODEL=eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+AWS_REGION=eu-north-1
+AWS_BEARER_TOKEN_BEDROCK=<bedrock-api-key>
+```
+
+To use Gemini on Vertex AI instead, replace the taxonomy LLM values with:
+
+```bash
+TAXONOMY_LLM_PROVIDER=vertex-gemini
+TAXONOMY_LLM_MODEL=gemini-2.5-flash
+TAXONOMY_VERTEX_PROJECT=<google-cloud-project>
+TAXONOMY_VERTEX_LOCATION=<vertex-location>
+TAXONOMY_GOOGLE_CLOUD_CREDENTIALS_JSON=<service-account-json>
+```
+
+Start the stack after updating `.env`. Compose reads `COMPOSE_PROFILES` from `.env`, so the same command works
+for `taxonomy` and `qwen,taxonomy` setups:
+
+```bash
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 taxonomy hub
+```
+
+If you enabled the bundled Qwen profile, also check vLLM:
+
+```bash
+docker compose logs --tail=100 vllm
+```
+
+Run the authenticated preflight after startup to verify Hub internal auth and LLM reachability:
+
+```bash
+docker compose --profile taxonomy exec -T taxonomy python - <<'PY'
+import os
+import urllib.request
+
+request = urllib.request.Request(
+    "http://127.0.0.1:8000/v1/preflight",
+    headers={"Authorization": "Bearer " + os.environ["TAXONOMY_SERVICE_TOKEN"]},
+)
+print(urllib.request.urlopen(request, timeout=10).read().decode())
+PY
+```
+
+This command runs inside the taxonomy container, so `127.0.0.1:8000` refers to the taxonomy service itself.
+The preflight endpoint then checks Hub internal auth and LLM reachability from taxonomy.
+
+The taxonomy service remains internal to the compose network by default. For production workloads,
+`TAXONOMY_MAX_RECORDS` defaults to `50000`; override it only as an advanced safety limit after sizing CPU,
+memory, and LLM capacity.
+
+<Info>
+  The taxonomy service is internal to the Docker network. Formbricks Web still calls Hub with
+  <code>HUB_API_KEY</code>; Hub calls taxonomy with <code>TAXONOMY_SERVICE_TOKEN</code>; taxonomy calls Hub
+  internal APIs with <code>HUB_INTERNAL_API_TOKEN</code>.
+</Info>
+
+<Info>
+  The one-click installer does not prompt for AI taxonomy settings. One-click users can enable the beta later
+  by editing `./formbricks/.env`, adding the taxonomy variables above, ensuring `COMPOSE_PROFILES=taxonomy` is
+  set, and restarting with `docker compose up -d`.
+</Info>
+
+<Info>
+  If you use the one-click Traefik setup, FeedbackRecords are available on the Formbricks origin at
+  `/api/v3/feedbackRecords` and `/v1/feedback-records`. Custom Docker reverse proxies need equivalent wiring:
+  run gateway auth against the Formbricks app, rewrite `/api/v3/feedbackRecords` to Hub's
+  `/v1/feedback-records`, and inject `Authorization: Bearer <HUB_API_KEY>` only on the Hub-bound hop.
+</Info>
+
+## Update
+
+See our [migration guide](/self-hosting/advanced/migration) for version-specific steps to update Formbricks.
+
+### Add SpiceDB to an Existing Docker Installation
+
+The normal image update commands do not add new services to an existing customized Compose file. Before the
+first release that requires the AuthZed runtime:
+
+1. Follow the [maintenance upgrade guide](/self-hosting/advanced/v6-maintenance-upgrade): stop all writers and
+   controllers, drain in-flight work, then back up configuration, secrets, and databases.
+2. Download `authzed-postgres-bootstrap.sh` from the same Formbricks release as the Compose file.
+3. Generate `AUTHZED_TOKEN` and `AUTHZED_DATABASE_PASSWORD` with `openssl rand -hex 32` and add them to `.env`.
+4. Merge `authzed-db-bootstrap`, `spicedb-migrate`, `spicedb`, `authzed-initialize`, and the profiled
+   `authzed-ops` service, plus the six `AUTHZED_*` Formbricks variables, from the released Compose file into your
+   customized file. Use `AUTHZED_CONSISTENCY=fully_consistent`. Preserve proxy, storage, and SMTP settings.
+5. Validate the reviewed Compose configuration privately and pull the pinned images. Keep writers stopped.
+6. Wait for PostgreSQL and SpiceDB, then run the target image's maintenance command. It runs application
+   migrations before graph preparation and verification:
+
+   ```bash
+   docker compose up -d --wait postgres spicedb
+   docker compose --profile authzed-ops run --rm --no-deps \
+     --entrypoint formbricks-authzed-prepare authzed-ops \
+     --backup-confirmed --writers-stopped
+   ```
+
+   A non-empty mismatched schema requires the reviewed `remoteDigest` as described in
+   [AuthZed Operations](/self-hosting/configuration/authzed-operations#upgrade-an-existing-installation-to-v6).
+7. Only after preparation and verification exit `0`, set `FORMBRICKS_AUTHZED_V6_MIGRATION_ACKNOWLEDGED=true` in `.env` and
+   run `docker compose up -d`. The one-click updater only checks the already-prepared graph; it does not perform
+   online preparation. Keep maintenance active until authorization checks pass.
+8. Confirm `authzed-db-bootstrap`, `spicedb-migrate`, and `authzed-initialize` completed and `spicedb` is healthy
+   with `docker compose ps -a`.
+9. Back up the new authorization database with
+   `docker compose exec -T postgres pg_dump -U postgres -d spicedb > spicedb-backup.sql` after validation and
+   include it in future database backup procedures.
+
+After database changes, restoring the old image alone may not be safe. Remain in maintenance and either fix
+forward or restore coordinated backups with the matching v5 configuration. Never delete volumes. See the
+rollback procedure in [AuthZed Operations](/self-hosting/configuration/authzed-operations#roll-back-a-v6-upgrade).
+
+<Info>
+  For a major migration such as Formbricks 4.x to 5.0, update your compose structure and configuration first.
+  Pulling images alone is not enough if your stack does not yet include Hub (`HUB_API_KEY`), Cube (`cube/`
+  config files plus `CUBEJS_API_SECRET`), or the new edge rate-limiting setup.
+</Info>
+
+1. Pull the latest Formbricks image
+
+   ```bash
+   docker compose pull
+   ```
+
+1. Check the target release's already-prepared authorization graph. If blocked, follow the maintenance
+   preparation guide above before proceeding.
+
+   ```bash
+   docker compose --profile authzed-ops run --rm --no-deps authzed-ops upgrade check
+   ```
+
+1. Stop the Formbricks stack
+
+   ```bash
+   docker compose down
+   ```
+
+1. Wait for PostgreSQL and complete application migrations before restarting the updated stack. Stop if a
+   command fails; do not restart against a partially migrated database.
+
+   ```bash
+   docker compose up -d --wait postgres &&
+   docker compose run --rm --no-deps formbricks-migrate &&
+   docker compose up -d
+   ```
+
+<Warning>
+  **Security (existing installs):** these steps — and the [one-click setup script](/self-hosting/setup/one-click)
+  updater — do **not** rewrite your existing
+  `docker-compose.yml`. If your bundled `redis` (Valkey) service still publishes `ports: - "6379:6379"`, it
+  stays exposed to the host after updating. See [Debug](#debug) for how to remove the mapping and, if the port
+  was reachable from an untrusted network, invalidate existing sessions.
+</Warning>
+
+## Optional: Add RustFS for File Storage
+
+RustFS provides S3-compatible object storage for file uploads in Formbricks. It is not required for the
+baseline Docker setup. Add it only when you want features like image uploads, survey file uploads, or custom
+logos.
+
+<Note>
+  For a broader overview of file storage options and required environment variables, see our [File Uploads
+  Configuration](/self-hosting/configuration/file-uploads) guide.
+</Note>
+
+<Warning>
+  **For production deployments with HTTPS**, use the [one-click setup script](/self-hosting/setup/one-click)
+  which automatically configures RustFS with Traefik, SSL certificates, a dedicated `files.` subdomain, and
+  least-privilege service credentials. The examples below are best suited for development, testing, or custom
+  local setups.
+</Warning>
+
+<Warning>
+  The bundled RustFS examples on this page are convenience-oriented single-server setups. They work well for
+  development, evaluation, and smaller self-hosted deployments, but they are not the ideal RustFS architecture
+  for high-availability or larger-scale production storage. For stricter production requirements, use external
+  object storage or run a dedicated RustFS deployment separately.
+</Warning>
+
+### Quick Start: Repository Development Stack
+
+If you cloned the Formbricks repository, the fastest way to test file uploads locally is to use the included
+`docker-compose.dev.yml`, which already starts RustFS and auto-creates the `formbricks` bucket.
+
+<Note>
+  This development compose file is not downloaded by the manual production quickstart above. If you only
+  downloaded `docker-compose.yml`, use the manual RustFS setup below or the one-click production setup.
+</Note>
+
+1. **Start the local stack**
+
+   From the repository root:
+
+   ```bash
+   docker compose -f docker-compose.dev.yml up -d
+   ```
+
+   This starts PostgreSQL, Valkey (Redis), Mailhog, RustFS, a permissions helper, a one-time bucket
+   bootstrap job, Formbricks Hub, and a local Cube instance for analytics testing.
+
+2. **Access the RustFS console**
+
+   Open http://localhost:9001 in your browser and sign in with:
+   - Username: `devrustfs`
+   - Password: `devrustfs123`
+
+3. **Configure Formbricks**
+
+   Update your `.env` file or environment variables:
+
+   ```bash
+   S3_ACCESS_KEY="devrustfs"
+   S3_SECRET_KEY="devrustfs123"
+   S3_REGION="us-east-1"
+   S3_BUCKET_NAME="formbricks"
+   S3_ENDPOINT_URL="http://localhost:9000"
+   S3_FORCE_PATH_STYLE="1"
+   ```
+
+4. **Verify uploads**
+
+   After uploading a file in Formbricks, open http://localhost:9001 and navigate to **Buckets → formbricks**
+   to confirm the object was stored successfully.
+
+<Note>
+  The development compose file also runs a `rustfs-init` job so you do not need to create the bucket manually.
+</Note>
+
+### Manual RustFS Setup (Custom Configuration)
+
+<Note>
+  <strong>Recommended:</strong> Prefer <code>docker-compose.dev.yml</code> for local development unless you
+  need to fold RustFS into an existing custom Compose stack.
+</Note>
+
+If you want to add RustFS to your own `docker-compose.yml`, use a pinned RustFS image plus two helper
+services:
+
+```yaml
+services:
+  rustfs-perms:
+    image: busybox:1.36.1
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /data && chown -R 10001:10001 /data"]
+    volumes:
+      - rustfs-data:/data
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.2@sha256:7d6d361c49c08d427250fb59aae5d78df83d644c3405d9ccf4b21cda0b0692d0
+    restart: always
+    depends_on:
+      rustfs-perms:
+        condition: service_completed_successfully
+    command: /data
+    environment:
+      RUSTFS_ACCESS_KEY: "${FORMBRICKS_RUSTFS_ADMIN_USER}"
+      RUSTFS_SECRET_KEY: "${FORMBRICKS_RUSTFS_ADMIN_PASSWORD}"
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      # CORS for browser uploads: set to your Formbricks origin(s), comma-separated.
+      # Unset = no CORS headers are emitted, so browser uploads fail; a value is treated as an allow-list.
+      # See the File Uploads guide.
+      RUSTFS_CORS_ALLOWED_ORIGINS: "https://app.yourdomain.com"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+
+  rustfs-init:
+    image: rustfs/rc:v0.1.36@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699
+    depends_on:
+      - rustfs
+    environment:
+      RUSTFS_ADMIN_USER: "${FORMBRICKS_RUSTFS_ADMIN_USER}"
+      RUSTFS_ADMIN_PASSWORD: "${FORMBRICKS_RUSTFS_ADMIN_PASSWORD}"
+      RUSTFS_SERVICE_USER: "${FORMBRICKS_RUSTFS_SERVICE_USER}"
+      RUSTFS_SERVICE_PASSWORD: "${FORMBRICKS_RUSTFS_SERVICE_PASSWORD}"
+      RUSTFS_BUCKET_NAME: "${FORMBRICKS_RUSTFS_BUCKET_NAME}"
+      RUSTFS_POLICY_NAME: "${FORMBRICKS_RUSTFS_POLICY_NAME}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        until rc alias set rustfs http://rustfs:9000 "$RUSTFS_ADMIN_USER" "$RUSTFS_ADMIN_PASSWORD" >/dev/null 2>&1 \
+          && rc bucket list rustfs >/dev/null 2>&1; do
+          sleep 2
+        done
+        rc bucket create rustfs/"$RUSTFS_BUCKET_NAME" --ignore-existing
+        cat > /tmp/formbricks-policy.json << EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"],
+              "Resource": ["arn:aws:s3:::$RUSTFS_BUCKET_NAME/*"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": ["s3:ListBucket"],
+              "Resource": ["arn:aws:s3:::$RUSTFS_BUCKET_NAME"]
+            }
+          ]
+        }
+        EOF
+        if ! rc admin policy info rustfs "$RUSTFS_POLICY_NAME" >/dev/null 2>&1; then
+          rc admin policy create rustfs "$RUSTFS_POLICY_NAME" /tmp/formbricks-policy.json
+        fi
+        if ! rc admin user info rustfs "$RUSTFS_SERVICE_USER" >/dev/null 2>&1; then
+          rc admin user add rustfs "$RUSTFS_SERVICE_USER" "$RUSTFS_SERVICE_PASSWORD"
+        fi
+        rc admin policy attach rustfs "$RUSTFS_POLICY_NAME" --user "$RUSTFS_SERVICE_USER"
+```
+
+Declare the corresponding volume:
+
+```yaml
+volumes:
+  rustfs-data:
+    driver: local
+```
+
+Store the generated RustFS credentials in a local `.env` file next to your `docker-compose.yml` instead of
+hardcoding them in Compose:
+
+```bash
+FORMBRICKS_RUSTFS_ADMIN_USER=formbricks-root
+FORMBRICKS_RUSTFS_ADMIN_PASSWORD=change-this-secure-password
+FORMBRICKS_RUSTFS_SERVICE_USER=formbricks-service
+FORMBRICKS_RUSTFS_SERVICE_PASSWORD=change-this-service-password
+FORMBRICKS_RUSTFS_BUCKET_NAME=formbricks
+FORMBRICKS_RUSTFS_POLICY_NAME=formbricks-policy
+FORMBRICKS_RUSTFS_REGION=us-east-1
+```
+
+Then configure Formbricks to use the RustFS service credentials:
+
+```bash
+S3_ACCESS_KEY="${FORMBRICKS_RUSTFS_SERVICE_USER}"
+S3_SECRET_KEY="${FORMBRICKS_RUSTFS_SERVICE_PASSWORD}"
+S3_REGION="${FORMBRICKS_RUSTFS_REGION}"
+S3_BUCKET_NAME="${FORMBRICKS_RUSTFS_BUCKET_NAME}"
+S3_ENDPOINT_URL="http://rustfs:9000"
+S3_FORCE_PATH_STYLE="1"
+```
+
+Start the stack:
+
+```bash
+docker compose up -d
+```
+
+The bucket and service account are created automatically by the `rustfs-init` job defined above, so no manual
+RustFS console step is required.
+
+<Note>
+  Restrict the `.env` file to `0600` and do not commit it to source control. For production, prefer the
+  [one-click setup script](/self-hosting/setup/one-click), which creates a separate least-privilege service
+  account automatically.
+</Note>
+
+#### Tips & Common Gotchas
+
+- **Permission denied on `/data`**: Ensure the mounted directory or volume is owned by UID `10001`. The
+  `rustfs-perms` helper handles this for Compose-managed volumes.
+- **Storage medium matters**: Prefer local SSD or NVMe storage for `rustfs-data`, use XFS on dedicated
+  host-managed disks where possible, and avoid NFS or other network filesystems for RustFS data.
+- **Connection refused**: Ensure the `rustfs` container is running and port `9000` is reachable from the
+  Formbricks container.
+- **Bucket not found**: Confirm that `rustfs-init` completed successfully or create the bucket manually with
+  `rc`.
+- **Auth failed**: Confirm that `S3_ACCESS_KEY` and `S3_SECRET_KEY` match the RustFS credentials configured on
+  the server.
+- **Backups**: Back up the `rustfs-data` volume regularly, especially for single-server deployments.
+- **Console exposure**: Do not expose the RustFS console port publicly in production. Keep it on a private
+  network or behind admin-only controls.
+- **Health check**: From the Formbricks container:
+
+  ```bash
+  docker compose exec formbricks sh -c 'wget -O- http://rustfs:9000/health'
+  ```
+
+### Production Setup with Traefik
+
+For production deployments, use the [one-click setup script](/self-hosting/setup/one-click), which
+automatically configures:
+
+- RustFS behind Traefik on a dedicated `files.yourdomain.com` subdomain
+- Automatic SSL certificate generation via Let's Encrypt
+- CORS configuration scoped to your Formbricks domain
+- Rate limiting middleware
+- Separate RustFS admin and Formbricks service credentials
+- A `rustfs-init` job that creates the bucket and access policy
+
+The production setup from [formbricks.sh](https://github.com/formbricks/formbricks/blob/main/docker/formbricks.sh)
+adds the reverse proxy wiring and bootstrap automation needed for long-lived deployments.
+
+<Note>
+  Even in the one-click flow, bundled RustFS remains a convenience-oriented single-server deployment. For
+  higher availability, stricter operational requirements, or larger storage footprints, prefer external object
+  storage or a dedicated RustFS deployment managed separately from Formbricks.
+</Note>
+
+## Debug
+
+If startup fails, first check the resolved configuration and container state:
+
+```bash
+docker compose config >/dev/null
+docker compose ps -a
+```
+
+Then inspect the services that commonly explain startup issues:
+
+```bash
+docker compose logs --tail=200 formbricks-migrate hub-migrate formbricks hub hub-worker cube
+docker compose logs --tail=200 postgres redis
+```
+
+Common checks:
+
+- **Missing or empty secrets**: Confirm `.env` contains `BETTER_AUTH_SECRET`, `ENCRYPTION_KEY`, `CRON_SECRET`,
+  `HUB_API_KEY`, and `CUBEJS_API_SECRET`.
+- **Migration failures**: Check `formbricks-migrate`, `hub-migrate`, and `postgres` logs. Do not remove Docker
+  volumes on an existing install unless you intend to delete its data.
+- **Cube is unhealthy**: Confirm `cube/cube.js`, `cube/schema/FeedbackRecords.js`, and `CUBEJS_API_SECRET`
+  exist, then inspect `docker compose logs cube`.
+- **Hub auth errors**: Confirm the same `HUB_API_KEY` from `.env` is used by Formbricks Web and the Hub
+  service.
+- **Hub jobs remain queued**: Confirm `docker compose ps hub-worker` reports `Up`, then inspect
+  `docker compose logs --tail=200 hub-worker`. The worker has no HTTP health endpoint; a stable process and a
+  shrinking River backlog are its readiness signals. If it restarts, confirm each configured enrichment
+  provider/model has the required credentials and that the worker can reach PostgreSQL.
+- **Port conflicts**: Confirm port `3000` and any optional service ports you enabled are not already in use on
+  the host. The current template does not publish the bundled Valkey (`redis` service) to the host — it is
+  reachable only on the internal compose network — so a fresh install does not need port `6379` free on the
+  host.
+- **Optional Qwen/vLLM issues**: Check GPU availability, NVIDIA Container Toolkit installation, and
+  `docker compose --profile qwen logs --tail=200 vllm`.
+
+<Warning>
+  **Existing installs: remove the bundled Valkey host port.** Older templates published the `redis`
+  (Valkey) service on `0.0.0.0:6379` with no password. That instance stores Better Auth sessions and
+  verification tokens, so an exposed port lets anyone who can reach it read live sessions and take over
+  accounts. Updating Formbricks (`docker compose pull` / `up -d`) does **not** rewrite your existing
+  `docker-compose.yml`, so the mapping stays until you remove it. Open your `docker-compose.yml`, delete the
+  ```yaml
+  ports:
+    - "6379:6379"
+  ```
+  lines from the `redis:` service, then run `docker compose up -d`. The app reaches Valkey over the internal
+  compose network, so no other configuration change is needed. Only keep a publish if an external tool
+  genuinely needs it, and then bind it to loopback (`127.0.0.1:6379:6379`) rather than all interfaces.
+
+  **If the port was reachable from an untrusted network, also invalidate existing sessions.** Valkey persists
+  to its `redis` volume, so removing the port does not clear session or token state an attacker may already
+  have written — a forged session can remain valid afterward. After closing the port, set a new
+  `BETTER_AUTH_SECRET` in your `.env`, then recreate the app container so it picks up the change:
+  ```bash
+  docker compose up -d --force-recreate formbricks
+  ```
+  A plain `docker compose restart` keeps the container's original environment, so the rotated secret would not
+  take effect. Recreating invalidates every session cookie, so all users must sign in again, while stored
+  data, the job queue, and the cache stay intact. (On an instance installed before this variable was
+  renamed, the secret may live in your `.env` under the older name, `NEXTAUTH_SECRET`. Replace the value
+  of whichever name your `.env` actually defines. Adding the *other* name alongside it does not reliably
+  rotate anything: `BETTER_AUTH_SECRET` wins whenever both are set, so a new `NEXTAUTH_SECRET` next to an
+  existing `BETTER_AUTH_SECRET` changes nothing and leaves the forged session valid.) Leave
+  `ENCRYPTION_KEY` unchanged, and do **not** run a blanket `FLUSHDB` — the same Valkey also holds BullMQ
+  job queues and the application cache.
+</Warning>
+
+<Note>
+  To edit any of the available environment variables, check out our
+  [Configuration](/self-hosting/configuration/environment-variables) section.
+</Note>
+
+If you have any questions or require help, reach out on
+[**GitHub Discussions**](https://github.com/formbricks/formbricks/discussions).

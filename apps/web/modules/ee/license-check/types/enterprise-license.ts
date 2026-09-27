@@ -1,0 +1,41 @@
+import { z } from "zod";
+
+const ZEnterpriseLicenseStatus = z.enum(["active", "expired"]);
+
+export type TEnterpriseLicenseStatus = z.infer<typeof ZEnterpriseLicenseStatus>;
+
+const ZEnterpriseLicenseFeatures = z.object({
+  isMultiOrgEnabled: z.boolean(),
+  contacts: z.boolean(),
+  workspaces: z.number().nullable(),
+  whitelabel: z.boolean(),
+  removeBranding: z.boolean(),
+  twoFactorAuth: z.boolean(),
+  sso: z.boolean(),
+  saml: z.boolean(),
+  spamProtection: z.boolean(),
+  aiSmartTools: z.boolean(),
+  auditLogs: z.boolean(),
+  accessControl: z.boolean(),
+  quotas: z.boolean(),
+  feedbackDirectories: z.boolean().default(false),
+  dashboards: z.boolean().default(false),
+  workflows: z.boolean().default(false),
+});
+
+export type TEnterpriseLicenseFeatures = z.infer<typeof ZEnterpriseLicenseFeatures>;
+
+export const ZEnterpriseLicenseDetails = z.object({
+  status: ZEnterpriseLicenseStatus,
+  features: ZEnterpriseLicenseFeatures,
+});
+
+export type TEnterpriseLicenseDetails = z.infer<typeof ZEnterpriseLicenseDetails>;
+
+export type TLicenseStatus =
+  | "active"
+  | "expired"
+  | "instance_mismatch"
+  | "unreachable"
+  | "invalid_license"
+  | "no-license";

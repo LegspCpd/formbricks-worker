@@ -1,0 +1,381 @@
+# @formbricks/database
+
+The database package for the Formbricks monorepo, providing centralized database schema management, migration handling, and type definitions for the entire platform.
+
+## Overview
+
+This package serves as the central database layer for Formbricks, containing:
+
+- **Prisma Schema**: Complete database schema definition with PostgreSQL support
+- **Migration System**: Custom migration management for both schema and data migrations
+- **Type Definitions**: Zod schemas and TypeScript types for database models
+- **Database Client**: Configured Prisma client with extensions and generators
+- **Migration Scripts**: Automated tools for creating and applying migrations
+
+## Package Structure
+
+```
+packages/database/
+├── src/
+│   ├── client.ts              # Prisma client configuration
+│   ├── index.ts               # Package exports
+│   └── scripts/               # Migration management scripts
+│       ├── apply-migrations.ts
+│       ├── create-migration.ts
+│       ├── generate-data-migration.ts
+│       ├── migration-runner.ts
+│       └── create-saml-database.ts
+├── migration/                 # Custom migrations directory
+│   ├── [timestamp_name]/      # Schema migration folder
+│   │   └── migration.sql      # Schema migration file
+│   └── [timestamp_name]/      # Data migration folder
+│       └── migration.ts       # Data migration file
+├── .prisma-migrations/        # Transient Prisma scratch dir (gitignored)
+├── schema/                    # Prisma schema folder
+│   ├── main.prisma            # Shared models, datasource, and generators
+│   └── workflows.prisma       # Workflows models and enums
+├── types/                     # Custom TypeScript types
+├── zod/                       # Zod schema definitions
+├── prisma.config.ts           # Prisma schema and migration paths
+└── package.json
+```
+
+## Migration System
+
+### Key Features
+
+- **Custom Migrations Directory**: Schema and data migrations are managed in the `packages/database/migration` directory
+- **Separation of Concerns**: Each migration is classified as either:
+  - **Schema Migration**: Contains a `migration.sql` file
+  - **Data Migration**: Contains a `migration.ts` file
+- **Single Type per Subdirectory**: A migration subdirectory can only contain one file type—either `migration.sql` or `migration.ts`
+- **Custom Naming Convention**: Subdirectories follow the format `timestamp_name_of_the_migration` (e.g., `20241214112456_add_users_table`)
+- **Order of Execution**: Migrations are executed sequentially based on their timestamps, enabling precise control over the execution sequence
+
+> **Why two directories?** `migration/` (singular, checked in) is the source of truth — it contains both schema and data migrations interleaved by timestamp. `.prisma-migrations/` (hidden, gitignored) is a transient scratch directory generated at runtime: the runner copies only schema migrations into it and feeds them to `prisma migrate deploy`. The hidden name prevents accidental edits; developers should only work in `migration/`.
+
+### Database Tracking
+
+- **Schema Migrations**: Continue to be tracked by Prisma in the `_prisma_migrations` table
+- **Data Migrations**: Are tracked in the new `DataMigration` table to avoid reapplying already executed migrations
+
+### ⚠️ Data migrations must be no-ops on an empty database
+
+Data migrations exist to **transform pre-existing rows**. On a brand-new
+(empty) database — every CI run and every fresh install — the migration runner
+takes a fast path: it applies the whole schema in a single `prisma migrate
+deploy` and marks all data migrations **applied without running them**
+(baselining). This is safe only because there is no data to transform, and it
+is necessary because some older data migrations reference columns/tables that
+later schema migrations drop or rename, so they can no longer execute against
+the final schema.
+
+Therefore, a data migration must **only** read and modify existing rows and do
+nothing when its tables are empty (guard writes behind a `SELECT` of existing
+rows, or keep them to `UPDATE`/`DELETE`/`INSERT ... SELECT` that naturally
+affect zero rows on an empty table). **Never seed essential/default data from a
+data migration** — it would be silently skipped on fresh installs. Seed base
+data via the seed script (`src/seed.ts`, `pnpm db:seed`) instead.
+
+### Directory Structure Example
+
+```
+packages/database/migration/
+├── 20241214112456_xm_user_identification/
+│   └── migration.sql
+├── 20241214113000_xm_user_identification/
+│   └── migration.ts
+└── 20241215120000_add_new_feature/
+    └── migration.sql
+```
+
+Each subdirectory under `packages/database/migration` represents a single migration and must:
+
+- Have a **14-digit UTC timestamp** followed by an underscore and the migration name (similar to Prisma)
+- Contain only one file, either `migration.sql` (for schema migrations) or `migration.ts` (for data migrations)
+
+## Scripts and Commands
+
+### Root Level Commands
+
+Run these commands from the root directory of the Formbricks monorepo:
+
+- **`pnpm fb-migrate-dev`**: Create and apply schema migrations
+  - Prompts for migration name
+  - Generates new `migration.sql` in the custom directory
+  - Copies migration to Prisma's internal directory
+  - Applies all pending migrations to the database
+- **`pnpm db:seed`**: Seed the database with sample data
+  - Upserts base infrastructure (Organization, Workspaces)
+  - Creates multi-role users (Admin, Manager)
+  - Generates complex surveys and sample responses
+- **`pnpm db:seed:clear`**: Clear all seeded data and re-seed
+  - **WARNING**: This will delete existing data in the database.
+
+### Package Level Commands
+
+Run these commands from the `packages/database` directory:
+
+- **`pnpm generate-data-migration`**: Create data migrations
+  - Prompts for data migration name
+  - Creates new subdirectory with appropriate timestamp
+  - Generates `migration.ts` file with pre-configured ID and name
+  - **Note**: Only use Prisma raw queries in data migrations for better performance and to avoid type errors
+- **`pnpm db:seed`**: Run the seeding script
+- **`pnpm db:seed:clear`**: Clear data and run the seeding script
+- **`pnpm lint:migrations migration/<timestamp>/migration.sql`**: Lint one or more new schema
+  migrations with Squawk
+- **`pnpm check:migration-drift`**: Compare the complete checked-in SQL migration history with the
+  Prisma schema (requires a disposable `SHADOW_DATABASE_URL`)
+
+### Migration safety checks
+
+CI runs Squawk only on schema migrations added, copied, renamed, or modified by the pull request. Existing
+migrations are the baseline and are not linted again. To check a migration locally from this package, run:
+
+```bash
+pnpm lint:migrations migration/<timestamp>/migration.sql
+```
+
+Squawk checks PostgreSQL 15 syntax, which remains relevant to older one-click installations in the
+[self-hosted migration guide](../../docs/self-hosting/advanced/migration.mdx#v27), while CI replays the complete
+history on PostgreSQL 18. Prisma 7.8 does not add a transaction wrapper around migration SQL, so concurrent index
+checks remain enabled and migrations must add `BEGIN` and `COMMIT` explicitly when atomic execution is required.
+
+`pnpm create-migration` copies Prisma's generated SQL unchanged. Before committing every generated migration:
+
+1. Add `SET lock_timeout = '1s';` at the top.
+2. Add explicit transaction boundaries when the statements must be atomic.
+3. Change eligible index builds to `CREATE INDEX CONCURRENTLY`, which cannot run inside a transaction.
+4. Run `pnpm lint:migrations migration/<timestamp>/migration.sql` and document targeted exceptions.
+
+Squawk cannot inspect statements hidden inside a `DO $$ ... $$` block. Use such blocks only when PostgreSQL
+procedural logic is required, not to bypass the migration safety checks.
+
+If a warning is intentional, place a statement-level ignore immediately before the affected statement and
+document why it is safe. Package-level exclusions are reserved for rules that conflict with Prisma's generated
+SQL or deployment model; do not add one for a migration-specific exception or use historical path allowlists.
+For example:
+
+```sql
+SET lock_timeout = '1s';
+-- A preceding data migration guarantees that Example has no rows.
+-- squawk-ignore adding-required-field
+ALTER TABLE "Example" ADD COLUMN IF NOT EXISTS "slug" TEXT NOT NULL;
+```
+
+Squawk enforces a short lock timeout, but intentionally does not require a statement timeout. If an operation
+needs one, size it for that operation and table; a blanket value can abort legitimate large-table index builds.
+
+The drift check replays only checked-in `migration.sql` files, so interleaved TypeScript data migrations are
+excluded. Data migrations must remain data-only: DDL in a `migration.ts` file is invisible to the replay and
+causes false drift. Prisma resets the shadow database while evaluating migration history. The helper requires
+the database name to contain `shadow` and rejects the primary database identity, but that marker is only a
+fail-safe: still use a dedicated disposable database and never point this variable at a development, staging, or
+production database:
+
+```bash
+SHADOW_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/formbricks_migration_shadow?schema=public" \
+  pnpm check:migration-drift
+```
+
+Pass `SHADOW_DATABASE_URL` inline or through ephemeral CI configuration. Do not persist it in `.env`, because
+`prisma.config.ts` would then activate that shadow database for other Prisma migration commands as well.
+
+### Available Scripts
+
+```json
+{
+  "build": "pnpm generate && vite build",
+  "check:migration-drift": "Compare SQL migration history with the Prisma schema",
+  "create-migration": "Create new schema migration",
+  "db:migrate:deploy": "Apply migrations in production",
+  "db:migrate:dev": "Apply migrations in development",
+  "db:push": "prisma db push --accept-data-loss --config ./prisma.config.ts",
+  "db:seed": "Seed the database with sample data",
+  "db:seed:clear": "Clear all data and re-seed",
+  "db:setup": "pnpm db:migrate:dev && pnpm db:create-saml-database:dev && pnpm db:seed",
+  "dev": "vite build --watch",
+  "generate": "prisma generate --config ./prisma.config.ts",
+  "generate-data-migration": "Create new data migration",
+  "lint:migrations": "Lint one or more schema migration SQL files"
+}
+```
+
+## Database Seeding
+
+The seeding system provides a quick way to set up a functional workspace for development, QA, and testing.
+
+### Safety Guard
+
+To prevent accidental data loss in production, seeding is blocked if `NODE_ENV=production`. If you explicitly need to seed a production-like workspace (e.g., staging), you must set:
+
+```bash
+ALLOW_SEED=true
+```
+
+### Seeding Logic
+
+The `pnpm db:seed` script:
+
+1. **Infrastructure**: Upserts a default organization and workspace.
+2. **Users**: Creates default users with the following credentials (passwords are hashed):
+   - **Admin**: `admin@formbricks.com` / `password123`
+   - **Manager**: `manager@formbricks.com` / `password123`
+3. **Surveys**: Creates complex sample surveys (Kitchen Sink, CSAT, Draft, etc.) in the **Production** workspace.
+4. **Responses**: Generates ~50 realistic responses and displays for each survey.
+
+### Idempotency
+
+By default, the seed script uses `upsert` to ensure it can be run multiple times without creating duplicate infrastructure. To perform a clean reset, use `pnpm db:seed:clear`.
+
+## Migration Workflow
+
+### Adding a Schema Migration
+
+1. Modify your Prisma schema in `schema/`
+2. Run `pnpm fb-migrate-dev` from the root of the monorepo
+3. Follow the prompts to name your migration
+4. The script automatically:
+   - Generates the new `migration.sql` file in the custom directory
+   - Copies the file to Prisma's internal directory
+   - Applies the migration to the database
+
+### Indexes Prisma cannot express
+
+Prisma's `@@index` has no `where`, so a **partial index** can only live in hand-written migration SQL. When a
+model needs one, declare **no** `@@index` for it at all and leave a comment on the model pointing at the
+migration — do not also declare an approximate non-partial copy.
+
+Both ways of keeping one are worse than keeping none. Under the same index name, `prisma db push` sees a name
+match with a different definition, drops the index and recreates it without the predicate, and the migration's
+`CREATE INDEX IF NOT EXISTS` then skips it — leaving a silently wrong shape. Under a different name, dev
+databases accumulate both sets.
+
+Deployments are unaffected either way: `prisma migrate deploy` never reads the schema file. A developer who runs
+`db push` must first inspect `pg_indexes.indexdef`, drop any same-name non-partial replacement, and only then rerun
+the migration (or its exact partial-index statements). `CREATE INDEX IF NOT EXISTS` cannot repair a same-name
+index with the wrong predicate because PostgreSQL treats the existing name as success. This is the same contract
+any hand-written trigger or function in a migration already lives under — make the migration rerunnable, but do
+not mistake idempotency for shape validation.
+
+`AuthzedProjectionOutbox` is the worked example.
+
+### Adding a Data Migration
+
+1. Navigate to the `packages/database` directory
+2. Run `pnpm generate-data-migration`
+3. Follow the prompts to name your migration
+4. Implement the required data changes in the generated `migration.ts` file
+5. Use only Prisma raw queries for optimal performance
+
+### Example Data Migration Structure
+
+```typescript
+import { createId } from "@paralleldrive/cuid2";
+import { Prisma } from "@formbricks/database/prisma";
+import { logger } from "@formbricks/logger";
+import type { MigrationScript } from "../../src/scripts/migration-runner";
+
+export const myDataMigration: MigrationScript = {
+  type: "data",
+  id: "unique_migration_id",
+  name: "20241214113000_my_data_migration",
+  run: async ({ tx }) => {
+    // Use raw SQL queries for data transformations
+    const result = await tx.$queryRaw`
+      UPDATE "MyTable" SET "newField" = 'defaultValue' WHERE "newField" IS NULL
+    `;
+
+    logger.info(`Updated ${result} records`);
+  },
+};
+```
+
+## Database Schema
+
+The package uses PostgreSQL with the following key features:
+
+- **Extensions**: pgvector for vector operations
+- **Generators**:
+  - Prisma Client with PostgreSQL extensions
+  - JSON types generator for enhanced type safety
+- **Models**: Comprehensive schema covering users, organizations, surveys, responses, webhooks, and more
+
+### Key Models
+
+- **User**: User accounts with authentication and profile data
+- **Organization**: Multi-tenant organization structure
+- **Workspace**: Workspace-level configuration and settings
+- **Survey**: Survey definitions with advanced targeting and styling
+- **Response**: Survey response data with metadata
+- **Contact**: Contact management and attributes
+- **Webhook**: Event-driven integrations
+- **ApiKey**: API authentication and access control
+
+## Type Definitions
+
+### Zod Schemas
+
+Located in the `zod/` directory, providing runtime validation for:
+
+- API keys
+- Contacts and contact attributes
+- Organizations and teams
+- Surveys and responses
+- Webhooks and integrations
+- User management
+
+### TypeScript Types
+
+Custom types in the `types/` directory for:
+
+- Error handling
+- Survey follow-up logic
+- Complex data structures
+
+## Development
+
+### Prerequisites
+
+- PostgreSQL database
+- Redis (for caching)
+- Node.js and pnpm
+
+### Setup
+
+1. Ensure database is running: `pnpm db:up` (from root)
+2. Install dependencies: `pnpm install`
+3. Generate Prisma client: `pnpm generate`
+4. Apply migrations: `pnpm db:setup`
+
+### Building
+
+```bash
+# Development build with watch
+pnpm dev
+
+# Production build
+pnpm build
+```
+
+## Key Benefits
+
+- **Unified Management**: Schema and data migrations are managed together in a single directory
+- **Controlled Execution**: Timestamp-based sorting ensures migrations run in the desired sequence
+- **Automation**: Simplifies the process of creating, copying, and applying migrations with custom scripts
+- **Tracking**: Separate tracking for schema and data migrations prevents duplicate executions
+- **Type Safety**: Comprehensive Zod schemas and TypeScript types for all database operations
+- **Performance**: Optimized queries and proper indexing for production workloads
+
+## Contributing
+
+When making changes to the database schema:
+
+1. Always create migrations for schema changes
+2. Use data migrations for data transformations
+3. Follow the naming conventions for migration directories
+4. Test migrations thoroughly in development before applying to production
+5. Document any breaking changes or special considerations
+
+For more information about the Formbricks project structure, see the main repository README.

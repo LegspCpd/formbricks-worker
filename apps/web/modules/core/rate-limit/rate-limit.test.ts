@@ -1,0 +1,510 @@
+// Import modules after mocking
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+// Import after mocking
+import { checkRateLimit, peekRateLimit } from "./rate-limit";
+import { TRateLimitConfig } from "./types/rate-limit";
+
+const { mockEval, mockGet, mockRedisClient, mockCache } = vi.hoisted(() => {
+  const _mockEval = vi.fn();
+  const _mockGet = vi.fn();
+  const _mockRedisClient = {
+    eval: _mockEval,
+    get: _mockGet,
+  } as any;
+
+  const _mockCache = {
+    getRedisClient: vi.fn().mockResolvedValue(_mockRedisClient),
+  };
+
+  return {
+    mockEval: _mockEval,
+    mockGet: _mockGet,
+    mockRedisClient: _mockRedisClient,
+    mockCache: _mockCache,
+  };
+});
+
+// Mock all dependencies (will use the hoisted mocks above)
+vi.mock("@/lib/cache", () => ({
+  cache: mockCache,
+}));
+
+vi.mock("@/lib/constants", () => ({
+  REDIS_URL: "redis://localhost:6379",
+  RATE_LIMITING_DISABLED: false,
+  SENTRY_DSN: "https://test@sentry.io/test",
+}));
+vi.mock("@formbricks/logger", () => ({
+  logger: {
+    info: vi.fn(),
+    debug: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock("@sentry/nextjs", () => ({
+  addBreadcrumb: vi.fn(),
+  captureException: vi.fn(),
+}));
+
+describe("checkRateLimit", () => {
+  const testConfig: TRateLimitConfig = {
+    interval: 300, // 5 minutes
+    allowedPerInterval: 5,
+    namespace: "test",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Reset the mock to return our mock client
+    mockCache.getRedisClient.mockResolvedValue(mockRedisClient);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Ensure mocks don't leak to other test suites (e.g. load tests)
+  afterAll(() => {
+    vi.resetModules();
+    vi.resetAllMocks();
+  });
+
+  test("should allow request when under limit", async () => {
+    // Mock Redis returning count of 2, which is under limit of 5
+    mockEval.mockResolvedValue([2, 1]);
+
+    const result = await checkRateLimit(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+  });
+
+  test("should deny request when over limit", async () => {
+    // Mock Redis returning count of 6, which is over limit of 5
+    mockEval.mockResolvedValue([6, 0]);
+
+    const result = await checkRateLimit(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(false);
+    }
+  });
+
+  test("should fail open when Redis is unavailable", async () => {
+    // Mock Redis throwing an error
+    mockEval.mockRejectedValue(new Error("Redis connection failed"));
+
+    const result = await checkRateLimit(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+  });
+
+  test("should fail open when rate limiting is disabled", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: true,
+      SENTRY_DSN: "https://test@sentry.io/test",
+    }));
+
+    // Dynamic import after mocking
+    const { checkRateLimit: checkRateLimitMocked } = await import("./rate-limit");
+    const result = await checkRateLimitMocked(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+  });
+
+  test("should fail open when Redis is not configured", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/cache", () => ({
+      cache: {
+        getRedisClient: vi.fn().mockResolvedValue(null),
+      },
+    }));
+
+    // Dynamic import after mocking
+    const { checkRateLimit: checkRateLimitMocked } = await import("./rate-limit");
+    const result = await checkRateLimitMocked(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+  });
+
+  test("should generate correct Redis key with window alignment", async () => {
+    mockEval.mockResolvedValue([1, 1]);
+
+    await checkRateLimit(testConfig, "test-user");
+
+    expect(mockEval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        keys: [expect.stringMatching(/^fb:rate_limit:test:test-user:\d+$/)],
+        arguments: ["5", expect.any(String), "1"],
+      })
+    );
+  });
+
+  test("should use provided namespace", async () => {
+    const configWithCustomNamespace: TRateLimitConfig = {
+      interval: 300,
+      allowedPerInterval: 5,
+      namespace: "custom",
+    };
+
+    mockEval.mockResolvedValue([1, 1]);
+
+    await checkRateLimit(configWithCustomNamespace, "test-user");
+
+    expect(mockEval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        keys: [expect.stringMatching(/^fb:rate_limit:custom:test-user:\d+$/)],
+        arguments: ["5", expect.any(String), "1"],
+      })
+    );
+  });
+
+  test("should calculate correct TTL for window expiration", async () => {
+    mockEval.mockResolvedValue([1, 1]);
+
+    await checkRateLimit(testConfig, "test-user");
+
+    // TTL should be between 0 and 300 seconds (window interval)
+    const ttlUsed = Number.parseInt(mockEval.mock.calls[0][1].arguments[1]);
+    expect(ttlUsed).toBeGreaterThan(0);
+    expect(ttlUsed).toBeLessThanOrEqual(300);
+  });
+
+  test("should count multiple recipients in one atomic request", async () => {
+    mockEval.mockResolvedValue([5, 1]);
+
+    const result = await checkRateLimit(testConfig, "test-user", 5);
+
+    expect(result).toEqual({ ok: true, data: { allowed: true, retryAfter: undefined } });
+    expect(mockEval).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        arguments: ["5", expect.any(String), "5"],
+      })
+    );
+  });
+
+  test.each([0, -1, 1.5])("should reject invalid usage %s", async (requested) => {
+    await expect(checkRateLimit(testConfig, "test-user", requested)).rejects.toThrow(
+      "Rate limit usage must be a positive integer"
+    );
+    expect(mockEval).not.toHaveBeenCalled();
+  });
+
+  test("should not call Sentry when SENTRY_DSN is not configured", async () => {
+    vi.resetModules();
+
+    // Re-mock all dependencies after resetModules
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: false,
+      SENTRY_DSN: undefined,
+    }));
+
+    const mockAddBreadcrumb = vi.fn();
+    const mockCaptureException = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({
+      addBreadcrumb: mockAddBreadcrumb,
+      captureException: mockCaptureException,
+    }));
+
+    vi.doMock("@formbricks/logger", () => ({
+      logger: {
+        info: vi.fn(),
+        debug: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    }));
+
+    vi.doMock("@/lib/cache", () => ({
+      cache: {
+        getRedisClient: vi.fn().mockResolvedValue({
+          eval: vi.fn().mockResolvedValue([6, 0]),
+        }),
+      },
+    }));
+
+    // Dynamic import after mocking
+    const { checkRateLimit: checkRateLimitMocked } = await import("./rate-limit");
+
+    await checkRateLimitMocked(testConfig, "test-user");
+
+    // Verify Sentry functions were not called
+    expect(mockAddBreadcrumb).not.toHaveBeenCalled();
+  });
+
+  test("should call Sentry when SENTRY_DSN is configured and rate limit exceeded", async () => {
+    vi.resetModules();
+
+    // Re-mock all dependencies after resetModules
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: false,
+      SENTRY_DSN: "https://test@sentry.io/test",
+    }));
+
+    const mockAddBreadcrumb = vi.fn();
+    const mockCaptureException = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({
+      addBreadcrumb: mockAddBreadcrumb,
+      captureException: mockCaptureException,
+    }));
+
+    vi.doMock("@formbricks/logger", () => ({
+      logger: {
+        info: vi.fn(),
+        debug: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    }));
+
+    vi.doMock("@/lib/cache", () => ({
+      cache: {
+        getRedisClient: vi.fn().mockResolvedValue({
+          eval: vi.fn().mockResolvedValue([6, 0]),
+        }),
+      },
+    }));
+
+    // Dynamic import after mocking
+    const { checkRateLimit: checkRateLimitMocked } = await import("./rate-limit");
+
+    await checkRateLimitMocked(testConfig, "test-user");
+
+    // Verify Sentry breadcrumb was added
+    expect(mockAddBreadcrumb).toHaveBeenCalledWith({
+      message: "Rate limit exceeded",
+      level: "warning",
+      data: expect.objectContaining({
+        identifier: "test-user",
+        currentCount: 6,
+        limit: 5,
+        namespace: "test",
+      }),
+    });
+  });
+
+  test("should call Sentry when SENTRY_DSN is configured and Redis error occurs", async () => {
+    vi.resetModules();
+
+    // Re-mock all dependencies after resetModules
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: false,
+      SENTRY_DSN: "https://test@sentry.io/test",
+    }));
+
+    const mockAddBreadcrumb = vi.fn();
+    const mockCaptureException = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({
+      addBreadcrumb: mockAddBreadcrumb,
+      captureException: mockCaptureException,
+    }));
+
+    vi.doMock("@formbricks/logger", () => ({
+      logger: {
+        info: vi.fn(),
+        debug: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    }));
+
+    const redisError = new Error("Redis connection failed");
+    vi.doMock("@/lib/cache", () => ({
+      cache: {
+        getRedisClient: vi.fn().mockResolvedValue({
+          eval: vi.fn().mockRejectedValue(redisError),
+        }),
+      },
+    }));
+
+    // Dynamic import after mocking
+    const { checkRateLimit: checkRateLimitMocked } = await import("./rate-limit");
+
+    await checkRateLimitMocked(testConfig, "test-user");
+
+    // Verify Sentry exception was captured
+    expect(mockCaptureException).toHaveBeenCalledWith(
+      redisError,
+      expect.objectContaining({
+        tags: {
+          component: "rate-limiter",
+          namespace: "test",
+        },
+        extra: expect.objectContaining({
+          error: redisError,
+          identifier: "test-user",
+          namespace: "test",
+        }),
+      })
+    );
+  });
+});
+
+describe("peekRateLimit", () => {
+  const testConfig: TRateLimitConfig = {
+    interval: 300,
+    allowedPerInterval: 5,
+    namespace: "test",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCache.getRedisClient.mockResolvedValue(mockRedisClient);
+  });
+
+  test("should allow request when current usage is below the limit", async () => {
+    mockGet.mockResolvedValue("2");
+
+    const result = await peekRateLimit(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+    expect(mockGet).toHaveBeenCalledWith(expect.stringMatching(/^fb:rate_limit:test:test-user:\d+$/));
+    expect(mockEval).not.toHaveBeenCalled();
+  });
+
+  test("should deny request when current usage reached the limit", async () => {
+    mockGet.mockResolvedValue("5");
+
+    const result = await peekRateLimit(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(false);
+      expect(result.data.retryAfter).toBeGreaterThan(0);
+    }
+  });
+
+  test("should treat missing redis key as zero usage", async () => {
+    mockGet.mockResolvedValue(null);
+
+    const result = await peekRateLimit(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+  });
+
+  test("should allow request without touching Redis when rate limiting is disabled", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: true,
+      SENTRY_DSN: "https://test@sentry.io/test",
+    }));
+
+    const { peekRateLimit: peekRateLimitMocked } = await import("./rate-limit");
+    const result = await peekRateLimitMocked(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  test("should fail open when Redis is not configured", async () => {
+    vi.resetModules();
+    // Re-assert rate limiting is enabled so we reach the Redis-client check (doMock from the
+    // previous test persists across resetModules).
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: false,
+      SENTRY_DSN: "https://test@sentry.io/test",
+    }));
+    vi.doMock("@/lib/cache", () => ({
+      cache: {
+        getRedisClient: vi.fn().mockResolvedValue(null),
+      },
+    }));
+
+    const { peekRateLimit: peekRateLimitMocked } = await import("./rate-limit");
+    const result = await peekRateLimitMocked(testConfig, "test-user");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+  });
+
+  test("should fail open and report to Sentry when the Redis read throws", async () => {
+    vi.resetModules();
+
+    vi.doMock("@/lib/constants", () => ({
+      REDIS_URL: "redis://localhost:6379",
+      RATE_LIMITING_DISABLED: false,
+      SENTRY_DSN: "https://test@sentry.io/test",
+    }));
+
+    const mockCaptureException = vi.fn();
+    vi.doMock("@sentry/nextjs", () => ({
+      addBreadcrumb: vi.fn(),
+      captureException: mockCaptureException,
+    }));
+
+    vi.doMock("@formbricks/logger", () => ({
+      logger: {
+        info: vi.fn(),
+        debug: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    }));
+
+    const redisError = new Error("Redis connection failed");
+    vi.doMock("@/lib/cache", () => ({
+      cache: {
+        getRedisClient: vi.fn().mockResolvedValue({
+          get: vi.fn().mockRejectedValue(redisError),
+        }),
+      },
+    }));
+
+    const { peekRateLimit: peekRateLimitMocked } = await import("./rate-limit");
+    const result = await peekRateLimitMocked(testConfig, "test-user");
+
+    // Fail open: rate-limit read errors must not block the request.
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.allowed).toBe(true);
+    }
+    expect(mockCaptureException).toHaveBeenCalledWith(
+      redisError,
+      expect.objectContaining({
+        tags: {
+          component: "rate-limiter",
+          namespace: "test",
+        },
+        extra: expect.objectContaining({
+          error: redisError,
+          identifier: "test-user",
+          namespace: "test",
+        }),
+      })
+    );
+  });
+});

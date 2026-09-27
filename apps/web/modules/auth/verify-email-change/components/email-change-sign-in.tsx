@@ -1,0 +1,85 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { logger } from "@formbricks/logger";
+import { authClient } from "@/modules/auth/lib/auth-client";
+import { verifyEmailChangeAction } from "@/modules/auth/verify-email-change/actions";
+
+interface EmailChangeSignInProps {
+  token: string;
+}
+
+export const EmailChangeSignIn = ({ token }: EmailChangeSignInProps) => {
+  const { t } = useTranslation();
+  const [status, setStatus] = useState<"success" | "error" | "loading">("loading");
+
+  useEffect(() => {
+    const validateToken = async () => {
+      if (typeof token === "string" && token.trim() !== "") {
+        const result = await verifyEmailChangeAction({ token });
+
+        if (!result?.data) {
+          setStatus("error");
+        } else {
+          setStatus("success");
+        }
+      } else {
+        setStatus("error");
+      }
+    };
+
+    if (token) {
+      validateToken();
+    } else {
+      setStatus("error");
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (status === "success") {
+      // Email changed server-side; drop the now-stale session so the user re-authenticates with
+      // their new address. Best-effort — the email change itself already succeeded. The BA client
+      // resolves HTTP failures as { error } rather than throwing, so handle both shapes.
+      authClient
+        .signOut()
+        .then(({ error }) => {
+          if (error) {
+            logger.error(
+              new Error(error.message ?? "signOut returned an error"),
+              "Email-change signOut failed"
+            );
+          }
+        })
+        .catch((error) => {
+          logger.error(
+            error instanceof Error ? error : new Error(String(error)),
+            "Email-change signOut failed"
+          );
+        });
+    }
+  }, [status]);
+
+  const text = {
+    heading: {
+      success: t("auth.email-change.email_change_success"),
+      error: t("auth.email-change.email_verification_failed"),
+      loading: t("auth.email-change.email_verification_loading"),
+    },
+    description: {
+      success: t("auth.email-change.email_change_success_description"),
+      error: t("auth.email-change.invalid_or_expired_token"),
+      loading: t("auth.email-change.email_verification_loading_description"),
+    },
+  };
+
+  return (
+    <>
+      <h1 className={`mb-4 text-center leading-2 font-bold ${status === "error" ? "text-red-600" : ""}`}>
+        {text.heading[status]}
+      </h1>
+      <p className="text-center text-sm">{text.description[status]}</p>
+      <hr className="my-4" />
+    </>
+  );
+};

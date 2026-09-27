@@ -1,0 +1,179 @@
+name: Integration Tests
+
+# Runs the Better Auth integration harness (apps/web/integration + the *.integration.test.ts files)
+# against a real Postgres + Valkey — the only runtime validation of the BA↔Formbricks boundary
+# (no DB mocks). The unit suite (`pnpm test`) mocks @formbricks/database, so these would otherwise
+# only run locally. Services + .env setup mirror e2e.yml.
+
+on:
+  pull_request:
+    # apps/web holds the auth code under test; packages/** because the harness transitively imports
+    # several workspace packages (@formbricks/logger, cache, types, email, database) whose changes
+    # can affect the BA boundary. The dependency/toolchain files are included because a lockfile-only
+    # Better Auth/Prisma transitive bump, a workspace/root-manifest change, or an edit to the shared
+    # checkout action can all alter this job's behavior without touching apps/web or packages/**.
+    paths:
+      - "apps/web/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+      - ".github/actions/dangerous-git-checkout/action.yml"
+      - ".github/workflows/integration-tests.yml"
+  # Also run in the merge queue (matches pr.yml / docker-build-validation.yml) so this suite can be
+  # promoted to a required check that actually gates merges. merge_group events ignore `paths`, so the
+  # job always runs in the queue regardless of the PR-event filter above.
+  merge_group:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR/ref (matches pr.yml).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Better Auth integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:9ae02a756ba16a2d69dd78058e25915e36e189bb36ddf01ceae86390d7ed786a
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      valkey:
+        image: valkey/valkey@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+        ports:
+          - 6379:6379
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false # no later step needs git auth (dangerous-git-checkout re-auths)
+      - uses: ./.github/actions/dangerous-git-checkout
+
+      # Branches that predate the Better Auth cutover (#8384) don't contain the integration harness,
+      # yet this workflow — now on main — still triggers for their PRs (the definition is resolved from
+      # the base branch) and dangerous-git-checkout checks out the PR *head*. Detect whether the harness
+      # is actually present on the checked-out ref so the steps below can skip instead of hard-failing on
+      # a missing file. hashFiles/`-f` run post-checkout, so this correctly reflects the head's contents.
+      - name: Detect Better Auth integration harness
+        id: harness
+        run: |
+          if [ -f apps/web/integration/ba-test-schema-shape.sql ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Better Auth integration harness absent on this ref (branch predates #8384) — skipping the integration suite."
+          fi
+        shell: bash
+
+      - name: Install pnpm
+        if: steps.harness.outputs.present == 'true'
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+
+      - name: Setup Node.js (version from .nvmrc)
+        if: steps.harness.outputs.present == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: pnpm
+
+      - name: Install dependencies
+        if: steps.harness.outputs.present == 'true'
+        run: pnpm install --frozen-lockfile --config.platform=linux --config.architecture=x64
+        shell: bash
+
+      # The .env must exist before the package build: @formbricks/database's prisma.config.ts
+      # resolves DATABASE_URL at config load (dotenv from the repo root), so `prisma generate`
+      # fails without it. Same order as e2e.yml.
+      - name: Create .env
+        if: steps.harness.outputs.present == 'true'
+        run: pnpm dev:setup
+        shell: bash
+
+      # The harness exercises enterprise-gated flows (e.g. SSO provisioning) by calling the functions
+      # directly, so it doesn't need a real ENTERPRISE_LICENSE_KEY (verified: the suite is green with it
+      # empty). Only point the DB + Redis at the CI services.
+      - name: Point .env at the CI services + test database
+        if: steps.harness.outputs.present == 'true'
+        run: |
+          sed -i "s|REDIS_URL=.*|REDIS_URL=redis://localhost:6379|" .env
+          sed -i "s|DATABASE_URL=.*|DATABASE_URL=postgresql://postgres:postgres@localhost:5432/formbricks_ba_test?schema=public|" .env
+          # The password-reset integration tests call Better Auth's native endpoints
+          # directly, so the before-hook gate added in ENG-2105 would block them when
+          # PASSWORD_RESET_DISABLED=1 (the .env.example default). Override to 0 so the
+          # reset-related test coverage still runs.
+          sed -i "s|PASSWORD_RESET_DISABLED=.*|PASSWORD_RESET_DISABLED=0|" .env
+          sed -i "s|AUTHZED_CONSISTENCY=.*|AUTHZED_CONSISTENCY=fully_consistent|" .env
+        shell: bash
+
+      - name: Start AuthZed CI fixture
+        if: steps.harness.outputs.present == 'true'
+        run: bash scripts/start-authzed-ci.sh
+        shell: bash
+
+      # Build the workspace packages the tests import (@formbricks/logger, cache, types, email, …) so
+      # vite can resolve their package.json `exports` → dist. Deps only (`^...`), not the Next app.
+      - name: Build workspace package dependencies
+        if: steps.harness.outputs.present == 'true'
+        run: pnpm build --filter=@formbricks/web^...
+        shell: bash
+
+      - name: Create the test database
+        if: steps.harness.outputs.present == 'true'
+        run: psql "postgresql://postgres:postgres@localhost:5432/postgres" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE formbricks_ba_test;'
+        shell: bash
+
+      - name: Apply schema + data migrations to the test database
+        if: steps.harness.outputs.present == 'true'
+        # @formbricks/database is already built by the "Build workspace package
+        # dependencies" step above, so run the migration runner directly instead
+        # of db:migrate:dev (which would rebuild + re-generate the package).
+        # db:migrate:ci was added in #8627; PR branches cut before it lack the
+        # script (this workflow runs from the base ref against the PR-head code),
+        # so fall back to db:migrate:dev, which every older branch already has.
+        run: |
+          if node -e "process.exit(require('./packages/database/package.json').scripts['db:migrate:ci'] ? 0 : 1)"; then
+            pnpm --filter=@formbricks/database db:migrate:ci
+          else
+            echo "::warning::db:migrate:ci absent on this ref (predates #8627); falling back to db:migrate:dev"
+            pnpm --filter=@formbricks/database db:migrate:dev
+          fi
+        shell: bash
+
+      # Shared with apps/web/integration/global-setup.ts (the local harness applies the same file) so
+      # CI and local provision an identical Better Auth schema shape.
+      - name: Shape the schema for Better Auth (emailVerified boolean, Account.type nullable)
+        if: steps.harness.outputs.present == 'true'
+        run: psql "postgresql://postgres:postgres@localhost:5432/formbricks_ba_test" -v ON_ERROR_STOP=1 -f apps/web/integration/ba-test-schema-shape.sql
+        shell: bash
+
+      - name: Run Better Auth integration tests
+        if: steps.harness.outputs.present == 'true'
+        # The DB is provisioned above, so global-setup skips its docker-exec clone (TEST_DB_PROVISIONED).
+        run: cd apps/web && pnpm test:integration
+        env:
+          TEST_DB_PROVISIONED: "1"
+        shell: bash
+
+      - name: Output AuthZed logs
+        if: failure() && steps.harness.outputs.present == 'true'
+        run: docker logs formbricks-authzed-ci 2>&1 || true
+        shell: bash

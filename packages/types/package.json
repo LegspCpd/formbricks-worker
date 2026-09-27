@@ -1,0 +1,29 @@
+{
+  "name": "@formbricks/types",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    "./integration": "./integration/index.ts",
+    "./*": "./*.ts"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "clean": "rimraf node_modules .turbo"
+  },
+  "dependencies": {
+    "zod": "catalog:",
+    "zod-openapi": "catalog:",
+    "node-html-parser": "7.1.0"
+  },
+  "devDependencies": {
+    "@formbricks/config-typescript": "workspace:*",
+    "@vitest/coverage-v8": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

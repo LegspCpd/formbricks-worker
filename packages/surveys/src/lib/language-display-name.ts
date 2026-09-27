@@ -1,0 +1,283 @@
+import type { Iso639Code } from "@formbricks/i18n-utils";
+
+/**
+ * Native-script display names for every ISO 639 code Formbricks supports.
+ *
+ * Each language is shown in its own script (e.g. "Deutsch", "français", "日本語")
+ * so users can recognise their language regardless of the current UI locale.
+ *
+ * The `Iso639Code` key type is derived from the `iso639Languages` array in
+ * @formbricks/i18n-utils via `as const satisfies`, so adding or removing a
+ * language there will cause a compile-time error here until this map is updated.
+ *
+ * ~5 KB — still ~71 KB smaller than the old 14-locale static list from
+ * @formbricks/i18n-utils that was previously bundled.
+ */
+const NATIVE_NAMES: Record<Iso639Code, string> = {
+  aa: "Afar",
+  ab: "Abkhazian",
+  ae: "Avestan",
+  af: "Afrikaans",
+  ak: "Akan",
+  am: "አማርኛ",
+  an: "Aragonese",
+  ar: "العربية",
+  "ar-SA": "العربية (المملكة العربية السعودية)",
+  "ar-EG": "العربية (مصر)",
+  "ar-AE": "العربية (الإمارات العربية المتحدة)",
+  "ar-MA": "العربية (المغرب)",
+  as: "অসমীয়া",
+  av: "Avaric",
+  ay: "Aymara",
+  az: "azərbaycan",
+  ba: "Bashkir",
+  be: "беларуская",
+  bg: "български",
+  bh: "Bhojpuri",
+  bi: "Bislama",
+  bm: "bamanakan",
+  bn: "বাংলা",
+  bo: "བོད་སྐད་",
+  br: "brezhoneg",
+  bs: "bosanski",
+  ca: "català",
+  ce: "нохчийн",
+  ch: "Chamorro",
+  co: "Corsican",
+  cr: "Cree",
+  cs: "čeština",
+  cu: "Church Slavic",
+  cv: "чӑваш",
+  cy: "Cymraeg",
+  da: "dansk",
+  de: "Deutsch",
+  "de-DE": "Deutsch (Deutschland)",
+  "de-AT": "Österreichisches Deutsch",
+  "de-CH": "Schweizer Hochdeutsch",
+  "de-LU": "Deutsch (Luxemburg)",
+  dv: "Divehi",
+  dz: "རྫོང་ཁ",
+  ee: "eʋegbe",
+  el: "Ελληνικά",
+  en: "English",
+  "en-US": "American English",
+  "en-GB": "British English",
+  "en-AU": "Australian English",
+  "en-CA": "Canadian English",
+  "en-IE": "English (Ireland)",
+  eo: "Esperanto",
+  es: "español",
+  "es-ES": "español de España",
+  "es-MX": "español de México",
+  "es-AR": "español (Argentina)",
+  "es-CO": "español (Colombia)",
+  "es-CL": "español (Chile)",
+  "es-PE": "español (Perú)",
+  "es-VE": "español (Venezuela)",
+  et: "eesti",
+  eu: "euskara",
+  fa: "فارسی",
+  ff: "Pulaar",
+  fi: "suomi",
+  fj: "Fijian",
+  fo: "føroyskt",
+  fr: "français",
+  "fr-FR": "français (France)",
+  "fr-CA": "français canadien",
+  "fr-BE": "français (Belgique)",
+  "fr-CH": "français suisse",
+  "fr-LU": "français (Luxembourg)",
+  fy: "Frysk",
+  ga: "Gaeilge",
+  gd: "Gàidhlig",
+  gl: "galego",
+  gn: "Guarani",
+  gu: "ગુજરાતી",
+  gv: "Gaelg",
+  ha: "Hausa",
+  he: "עברית",
+  hi: "हिन्दी",
+  ho: "Hiri Motu",
+  hr: "hrvatski",
+  ht: "Haitian Creole",
+  hu: "magyar",
+  hy: "հայերեն",
+  hz: "Herero",
+  ia: "interlingua",
+  id: "Indonesia",
+  ie: "Interlingue",
+  ig: "Igbo",
+  ii: "ꆈꌠꉙ",
+  ik: "Inupiaq",
+  io: "Ido",
+  is: "íslenska",
+  it: "italiano",
+  "it-CH": "italiano (Svizzera)",
+  iu: "Inuktitut",
+  ja: "日本語",
+  jv: "Jawa",
+  ka: "ქართული",
+  kg: "Kongo",
+  ki: "Gikuyu",
+  kj: "Kuanyama",
+  kk: "қазақ тілі",
+  kl: "kalaallisut",
+  km: "ខ្មែរ",
+  kn: "ಕನ್ನಡ",
+  ko: "한국어",
+  kr: "Kanuri",
+  ks: "کٲشُر",
+  ku: "kurdî (kurmancî)",
+  kv: "Komi",
+  kw: "kernewek",
+  ky: "кыргызча",
+  la: "Latin",
+  lb: "Lëtzebuergesch",
+  lg: "Luganda",
+  li: "Limburgish",
+  ln: "lingála",
+  lo: "ລາວ",
+  lt: "lietuvių",
+  lu: "Tshiluba",
+  lv: "latviešu",
+  mg: "Malagasy",
+  mh: "Marshallese",
+  mi: "Māori",
+  mk: "македонски",
+  ml: "മലയാളം",
+  mn: "монгол",
+  mr: "मराठी",
+  ms: "Melayu",
+  mt: "Malti",
+  my: "မြန်မာ",
+  na: "Nauru",
+  nb: "norsk bokmål",
+  nd: "isiNdebele",
+  ne: "नेपाली",
+  ng: "Ndonga",
+  nl: "Nederlands",
+  "nl-BE": "Nederlands (België)",
+  nn: "norsk nynorsk",
+  no: "norsk",
+  nr: "South Ndebele",
+  nv: "Navajo",
+  ny: "Nyanja",
+  oc: "occitan",
+  oj: "Ojibwa",
+  om: "Oromoo",
+  or: "ଓଡ଼ିଆ",
+  os: "ирон",
+  pa: "ਪੰਜਾਬੀ",
+  pi: "Pali",
+  pl: "polski",
+  ps: "پښتو",
+  pt: "português",
+  "pt-BR": "português (Brasil)",
+  "pt-PT": "português europeu",
+  qu: "Runasimi",
+  rm: "rumantsch",
+  rn: "Ikirundi",
+  ro: "română",
+  ru: "русский",
+  rw: "Ikinyarwanda",
+  sa: "संस्कृत भाषा",
+  sc: "sardu",
+  sd: "سنڌي",
+  se: "davvisámegiella",
+  sg: "Sängö",
+  si: "සිංහල",
+  sk: "slovenčina",
+  sl: "slovenščina",
+  sm: "Samoan",
+  sn: "chiShona",
+  so: "Soomaali",
+  sq: "shqip",
+  sr: "српски",
+  ss: "Swati",
+  st: "Sesotho",
+  su: "Basa Sunda",
+  sv: "svenska",
+  sw: "Kiswahili",
+  ta: "தமிழ்",
+  te: "తెలుగు",
+  tg: "тоҷикӣ",
+  th: "ไทย",
+  ti: "ትግርኛ",
+  tk: "türkmen dili",
+  tl: "Filipino",
+  tn: "Setswana",
+  to: "lea fakatonga",
+  tr: "Türkçe",
+  ts: "Tsonga",
+  tt: "татар",
+  tw: "Akan",
+  ty: "Tahitian",
+  ug: "ئۇيغۇرچە",
+  uk: "українська",
+  ur: "اردو",
+  uz: "o'zbek",
+  ve: "Venda",
+  vi: "Tiếng Việt",
+  vo: "Volapük",
+  wa: "Walloon",
+  wo: "Wolof",
+  xh: "IsiXhosa",
+  yi: "ייִדיש",
+  yo: "Èdè Yorùbá",
+  za: "Vahcuengh",
+  "zh-Hans": "简体中文",
+  "zh-Hant": "繁體中文",
+  "zh-CN": "中文（中国）",
+  "zh-TW": "中文（台灣）",
+  "zh-HK": "中文（中國香港特別行政區）",
+  zu: "isiZulu",
+};
+
+/**
+ * Returns the native display name for a language code (e.g. "de" → "Deutsch").
+ *
+ * Canonical codes are region-tagged (`hi-IN`, `zh-Hans-CN`) and not every one has its own entry in
+ * NATIVE_NAMES, so we fall back from the exact code to its language+script form, then to the bare
+ * language: `hi-IN` → `hi` → "हिन्दी"; `zh-Hans-CN` → `zh-Hans` → "简体中文". Region-specific entries that
+ * do exist (e.g. `de-DE`, `de-AT`) are still preferred. Finally falls back to the raw code.
+ */
+export function getLanguageDisplayName(code: string): string {
+  let name = NATIVE_NAMES[code as Iso639Code];
+  if (!name) {
+    try {
+      const locale = new Intl.Locale(code);
+      const languageWithScript = [locale.language, locale.script].filter(Boolean).join("-");
+      name = NATIVE_NAMES[languageWithScript as Iso639Code] ?? NATIVE_NAMES[locale.language as Iso639Code];
+    } catch {
+      // malformed code — fall through to the raw code below
+    }
+  }
+  name = name ?? code;
+  // Capitalize the first letter so names like "español" display as "Español"
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/**
+ * Region-less variant of {@link getLanguageDisplayName}, for labels with no room for a full name.
+ *
+ * Canonical codes carry a region and NATIVE_NAMES spells it out wherever it has an entry, so
+ * `de-DE` reads "Deutsch (Deutschland)" and `en-US` reads "American English". That is right for a
+ * list, where "Português (Brasil)" has to be told apart from "Português (Portugal)", but too long
+ * for a compact one-line label. Only the REGION is dropped: the script is what distinguishes
+ * 简体中文 from 繁體中文, so it is kept (`zh-Hans-CN` → "简体中文", `de-DE` → "Deutsch").
+ */
+export function getShortLanguageDisplayName(code: string): string {
+  try {
+    const locale = new Intl.Locale(code);
+    const languageWithScript = [locale.language, locale.script].filter(Boolean).join("-");
+    if (languageWithScript) {
+      const short = getLanguageDisplayName(languageWithScript);
+      // getLanguageDisplayName echoes the code back when it has no entry. A code whose bare
+      // language is unknown but whose full form is named ("xx-YY") is better off with the full name.
+      if (short.toLowerCase() !== languageWithScript.toLowerCase()) return short;
+    }
+  } catch {
+    // malformed code — fall back to the full name below
+  }
+  return getLanguageDisplayName(code);
+}

@@ -1,0 +1,638 @@
+x-formbricks-database: &formbricks-database
+  DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD_URL_ENCODED:-${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}}@postgres:5432/formbricks?schema=public"
+
+x-hub-runtime-environment: &hub-runtime-environment
+  DATABASE_URL: ${HUB_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD_URL_ENCODED:-${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}}@postgres:5432/formbricks?sslmode=disable}
+  TAXONOMY_SERVICE_URL: ${TAXONOMY_SERVICE_URL:-}
+  TAXONOMY_SERVICE_TOKEN: ${TAXONOMY_SERVICE_TOKEN:-}
+  HUB_INTERNAL_API_TOKEN: ${HUB_INTERNAL_API_TOKEN:-}
+
+x-environment: &environment
+  environment: &app-environment
+    ######################################################## REQUIRED ########################################################
+
+    # The url of your Formbricks instance used in the admin panel
+    # Set this to your public-facing URL, e.g., example http://localhost:3000 or https://example.com
+    WEBAPP_URL:
+
+    # The auth base URL. Should be the same as WEBAPP_URL.
+    BETTER_AUTH_URL:
+
+    # Legacy alias for BETTER_AUTH_URL, kept so an instance installed before the rename keeps working.
+    # Set BETTER_AUTH_URL on a new install; this one needs no value.
+    NEXTAUTH_URL:
+
+    # PostgreSQL DB for Formbricks to connect to
+    <<: *formbricks-database
+
+    # Signs session cookies and every invite, verification and email-change token.
+    # You can use: `openssl rand -hex 32` to generate one
+    BETTER_AUTH_SECRET:
+
+    # Legacy alias for BETTER_AUTH_SECRET. An instance installed before the rename keeps its value here
+    # and nothing rewrites it, so this key stays supported indefinitely.
+    NEXTAUTH_SECRET:
+
+    # Encryption Key is used for 2FA & Single use URLs for Link Surveys
+    # You can use: $(openssl rand -hex 32) to generate one
+    ENCRYPTION_KEY:
+
+    # API Secret for running cron jobs.
+    # You can use: $(openssl rand -hex 32) to generate a secure one
+    CRON_SECRET:
+
+    # Redis URL for caching, rate limiting, and audit logging
+    # To use external Redis/Valkey: remove the redis service below and update this URL
+    REDIS_URL: redis://redis:6379
+
+    # Formbricks Hub (port 8080): API key required. Use e.g. openssl rand -hex 32
+    HUB_API_KEY: ${HUB_API_KEY:-}
+
+    # Taxonomy service credentials are consumed by Hub/taxonomy only. Keep these
+    # empty here so a shared docker/.env file cannot leak them into the web app.
+    TAXONOMY_SERVICE_URL: ""
+    TAXONOMY_SERVICE_TOKEN: ""
+    HUB_INTERNAL_API_TOKEN: ""
+    TAXONOMY_LLM_PROVIDER: ""
+    TAXONOMY_LLM_MODEL: ""
+    TAXONOMY_LLM_BASE_URL: ""
+    TAXONOMY_LLM_API_KEY: ""
+    TAXONOMY_VERTEX_PROJECT: ""
+    TAXONOMY_VERTEX_LOCATION: ""
+    TAXONOMY_GOOGLE_CLOUD_CREDENTIALS_JSON: ""
+    TAXONOMY_BEDROCK_MODEL: ""
+    TAXONOMY_MAX_RECORDS: ""
+    AWS_BEARER_TOKEN_BEDROCK: ""
+
+    # Base URL the Formbricks app uses to reach Hub. Defaults to the internal Hub service.
+    HUB_API_URL: ${HUB_API_URL:-http://hub:8080}
+
+    # Hub database URL (optional). Default: same Postgres as Formbricks. Set only if Hub uses a separate DB.
+    # HUB_DATABASE_URL:
+
+    # Cube semantic-layer API used by Formbricks analytics. Required.
+    CUBEJS_API_URL: ${CUBEJS_API_URL:-http://cube:4000}
+    CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}
+    CUBEJS_JWT_ISSUER: ${CUBEJS_JWT_ISSUER:-formbricks-web}
+    CUBEJS_JWT_AUDIENCE: ${CUBEJS_JWT_AUDIENCE:-formbricks-cube}
+
+    # Set the minimum log level(debug, info, warn, error, fatal)
+    # LOG_LEVEL: info
+
+    ############################################# OPTIONAL (ENTERPRISE EDITION) #############################################
+
+    # Enterprise License Key (More info at: https://formbricks.com/docs/self-hosting/license)
+    # Required to access Enterprise-only features
+    # ENTERPRISE_LICENSE_KEY:
+
+    ############################################# OPTIONAL (EMAIL CONFIGURATION) #############################################
+
+    # Email Configuration
+    # MAIL_FROM:
+    # MAIL_FROM_NAME:
+    # SMTP_HOST:
+    # SMTP_PORT:
+    # SMTP_USER:
+    # SMTP_PASSWORD:
+    # SMTP_AUTHENTICATED:
+
+    # (Additional option for TLS (port 465) only)
+    # SMTP_SECURE_ENABLED:
+
+    # Keep certificate verification enabled in production (default is 1). If your SMTP server uses a private CA,
+    # mount the CA and configure NODE_EXTRA_CA_CERTS instead of setting this to 0.
+    # SMTP_REJECT_UNAUTHORIZED_TLS: 1
+
+    ############################################## OPTIONAL (APP CONFIGURATION) ##############################################
+
+    # Set the below to 0 to enable Email Verification for new signups (will required Email Configuration)
+    EMAIL_VERIFICATION_DISABLED: 1
+
+    # Set the below to 0 to enable Password Reset (will required Email Configuration)
+    PASSWORD_RESET_DISABLED: 1
+
+    # Set the below to 1 to disable logins with email
+    # EMAIL_AUTH_DISABLED:
+
+    # Set the below to 1 to disable invites
+    # INVITE_DISABLED:
+
+    # Maximum number of invite recipients an organization may target within 24 hours
+    # INVITE_RATE_LIMIT_PER_24_HOURS: 50
+
+    # Set the below if you want to ship JS & CSS files from a complete URL instead of the current domain
+    # ASSET_PREFIX_URL:
+
+    # Set the below to your Unsplash API Key for their Survey Backgrounds
+    # UNSPLASH_ACCESS_KEY:
+
+    # Set the below to your public domain (default is WEBAPP_URL)
+    # PUBLIC_URL:
+
+    # The SENTRY_DSN is used for error tracking and performance monitoring with Sentry.
+    # SENTRY_DSN:
+    # It's used for authentication when uploading source maps to Sentry, to make errors more readable.
+    # SENTRY_AUTH_TOKEN:
+    # The SENTRY_ENVIRONMENT is used to identify the environment in Sentry.
+    # SENTRY_ENVIRONMENT:
+
+    ################################################### OPTIONAL (STORAGE) ###################################################
+
+    # Set S3 Storage configuration (required for the file upload in serverless environments)
+    # S3_ACCESS_KEY:
+    # S3_SECRET_KEY:
+    # S3_REGION:
+    # S3_BUCKET_NAME:
+
+    # Set a third party S3 compatible storage service endpoint like StorJ leave empty if you use Amazon S3
+    # S3_ENDPOINT_URL:
+
+    # Force path style for S3 compatible storage (0 for disabled, 1 for enabled)
+    # S3_FORCE_PATH_STYLE: 0
+
+    ############################################# OPTIONAL (OAUTH CONFIGURATION) #############################################
+
+    # Set the below from Cloudflare Turnstile if you want to enable turnstile in signups
+    # TURNSTILE_SITE_KEY:
+    # TURNSTILE_SECRET_KEY:
+
+    # Set the below keys to enable recaptcha V3 for survey responses bot protection(only available in the Enterprise Edition)
+    # RECAPTCHA_SITE_KEY:
+    # RECAPTCHA_SECRET_KEY:
+
+    # Set the below from GitHub if you want to enable GitHub OAuth
+    # GITHUB_ID:
+    # GITHUB_SECRET:
+
+    # Set the below from Google if you want to enable Google OAuth
+    # GOOGLE_CLIENT_ID:
+    # GOOGLE_CLIENT_SECRET:
+
+    # Set the below from Azure Active Directory Login if you want to enable Azure AD OAuth
+    # AZUREAD_CLIENT_ID:
+    # AZUREAD_CLIENT_SECRET:
+    # AZUREAD_TENANT_ID:
+
+    # Set the below to OpenID Connect Provider if you want to enable OIDC
+    # OIDC_CLIENT_ID:
+    # OIDC_CLIENT_SECRET:
+    # OIDC_ISSUER:
+    # OIDC_DISPLAY_NAME:
+    # OIDC_SIGNING_ALGORITHM:
+
+    # Set the below to SAML Provider if you want to enable SAML
+    # SAML_DATABASE_URL: "postgresql://<user>:<password>@postgres:5432/formbricks-saml?sslmode=disable"
+
+    ########################################## OPTIONAL (THIRD PARTY INTEGRATIONS) ###########################################
+
+    # Oauth credentials for Notion Integration
+    # NOTION_OAUTH_CLIENT_ID:
+    # NOTION_OAUTH_CLIENT_SECRET:
+
+    # Oauth credentials for Google Sheet Integration
+    # GOOGLE_SHEETS_CLIENT_ID:
+    # GOOGLE_SHEETS_CLIENT_SECRET:
+    # GOOGLE_SHEETS_REDIRECT_URL:
+
+    # Oauth credentials for Airtable Integration
+    # AIRTABLE_CLIENT_ID:
+
+    # Oauth credentials for Slack Integration
+    # SLACK_CLIENT_ID:
+    # SLACK_CLIENT_SECRET:
+
+    ############################################### OPTIONAL (LEGAL INFORMATION) ################################################
+
+    # Set the below to have your own Privacy Page URL on auth & link survey page
+    # PRIVACY_URL:
+
+    # Set the below to have your own Terms Page URL on auth & link survey page
+    # TERMS_URL:
+
+    # Set the below to have your own Imprint Page URL on auth & link survey page
+    # IMPRINT_URL:
+
+    # Set the below to have your own Address on email footer
+    # IMPRINT_ADDRESS:
+
+    ########################################## OPTIONAL (SERVER CONFIGURATION) ###########################################
+
+    # Set the below to 1 to disable Rate Limiting across Formbricks
+    # RATE_LIMITING_DISABLED: 1
+
+    # Set the below to 1 to disable telemetry reporting (ignored when EE license is active)
+    # TELEMETRY_DISABLED: 1
+
+    # Set the below to send OpenTelemetry data via OTLP to your collector
+    # OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+    # OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    # OTEL_SERVICE_NAME: formbricks
+    # OTEL_RESOURCE_ATTRIBUTES: deployment.environment=development
+    # Set the below to 1 to also export Pino logs via OTLP (needs OTEL_EXPORTER_OTLP_ENDPOINT)
+    # OTEL_LOGS_ENABLED: 1
+    # OTEL_TRACES_SAMPLER: parentbased_traceidratio
+    # OTEL_TRACES_SAMPLER_ARG: 1
+
+    ########################################## OPTIONAL (AUDIT LOGGING) ###########################################
+
+    # Set the below to 1 to enable audit logging.
+    # AUDIT_LOG_ENABLED: 1
+
+    # Set the below to get the ip address of the user from the request headers
+    # AUDIT_LOG_GET_USER_IP: 1
+
+    ############################################# OPTIONAL (OTHER) #############################################
+
+    # signup is disabled by default for self-hosted instances, users can only signup using an invite link, in order to allow signup from SSO(without invite), set the below to 1
+    # AUTH_SKIP_INVITE_FOR_SSO: 1
+    # Set the below to automatically assign new users to a specific team, insert an existing team id
+    # (Role Management is an Enterprise feature)
+    # AUTH_SSO_DEFAULT_TEAM_ID:
+
+    # Set the below to automatically assign every new SSO user to one organization, without requiring
+    # an invite. Insert an existing organization id, or a valid CUID2 to have it created on the first
+    # sign-up. AUTH_SSO_DEFAULT_ORGANIZATION_ROLE (owner, manager, member, billing) sets the role and
+    # defaults to manager; the sign-up that creates the organization is always owner.
+    # AUTH_SSO_DEFAULT_ORGANIZATION_ID:
+    # AUTH_SSO_DEFAULT_ORGANIZATION_ROLE:
+
+    # Configure the minimum role for user management from UI(owner, manager, disabled)
+    # USER_MANAGEMENT_MINIMUM_ROLE: "manager"
+
+    # Configure the maximum age for the session in seconds. Default is 86400 (24 hours)
+    # SESSION_MAX_AGE: 86400
+
+services:
+  postgres:
+    restart: always
+    image: pgvector/pgvector:pg18
+    volumes:
+      - postgres:/var/lib/postgresql
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: formbricks
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  authzed-db-bootstrap:
+    image: pgvector/pgvector:pg18
+    restart: "no"
+    entrypoint: ["/bin/sh", "/usr/local/bin/authzed-postgres-bootstrap.sh"]
+    environment:
+      POSTGRES_ADMIN_URL: postgresql://postgres:${POSTGRES_PASSWORD_URL_ENCODED:-${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}}@postgres:5432/postgres?sslmode=disable
+      AUTHZED_DATABASE_NAME: spicedb
+      AUTHZED_DATABASE_USERNAME: spicedb
+      AUTHZED_DATABASE_PASSWORD: ${AUTHZED_DATABASE_PASSWORD:?AUTHZED_DATABASE_PASSWORD is required}
+    volumes:
+      - ./authzed-postgres-bootstrap.sh:/usr/local/bin/authzed-postgres-bootstrap.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  spicedb-migrate:
+    image: ${SPICEDB_IMAGE_REF:-authzed/spicedb:v1.52.0}
+    restart: "no"
+    command: datastore migrate head
+    environment:
+      SPICEDB_DATASTORE_ENGINE: postgres
+      SPICEDB_DATASTORE_CONN_URI: postgresql://spicedb:${AUTHZED_DATABASE_PASSWORD:?AUTHZED_DATABASE_PASSWORD is required}@postgres:5432/spicedb?sslmode=disable
+    depends_on:
+      authzed-db-bootstrap:
+        condition: service_completed_successfully
+
+  spicedb:
+    image: ${SPICEDB_IMAGE_REF:-authzed/spicedb:v1.52.0}
+    restart: always
+    command: serve
+    mem_limit: 512m
+    environment:
+      SPICEDB_DATASTORE_ENGINE: postgres
+      SPICEDB_DATASTORE_CONN_URI: postgresql://spicedb:${AUTHZED_DATABASE_PASSWORD:?AUTHZED_DATABASE_PASSWORD is required}@postgres:5432/spicedb?sslmode=disable
+      SPICEDB_GRPC_PRESHARED_KEY: ${AUTHZED_TOKEN:?AUTHZED_TOKEN is required}
+      SPICEDB_LOG_FORMAT: json
+      SPICEDB_LOG_LEVEL: info
+      SPICEDB_TELEMETRY_ENDPOINT: ""
+    depends_on:
+      spicedb-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=localhost:50051"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Redis/Valkey service for caching, rate limiting, and audit logging
+  # Remove this service if you want to use an external Redis/Valkey instance
+  # No host port is published: this instance is Better Auth's session/token store and is reached
+  # only over the internal compose network (REDIS_URL=redis://redis:6379). Publishing 6379 to the
+  # host would expose every live session token unauthenticated (and Docker's port rule bypasses
+  # host firewalls like ufw). Same treatment as the postgres service above.
+  redis:
+    restart: always
+    image: valkey/valkey@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
+    command: valkey-server --appendonly yes --maxmemory-policy noeviction
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  # Run Formbricks Prisma migrations before Hub writes tables to the shared database.
+  formbricks-migrate:
+    image: ghcr.io/formbricks/formbricks:latest
+    restart: "no"
+    env_file:
+      - path: .env
+        required: false
+    entrypoint: ["sh", "-c"]
+    command:
+      [
+        "node /home/nextjs/validate-env.mjs && if command -v timeout >/dev/null 2>&1; then timeout 300 node packages/database/dist/scripts/apply-migrations.js; else node packages/database/dist/scripts/apply-migrations.js; fi",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    <<: *environment
+
+  formbricks:
+    restart: always
+    image: ghcr.io/formbricks/formbricks:latest
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      cube:
+        condition: service_healthy
+    ports:
+      - 3000:3000
+    volumes:
+      - ./saml-connection:/home/nextjs/apps/web/saml-connection
+    environment:
+      <<: *app-environment
+      SKIP_STARTUP_MIGRATION: "true"
+      AUTHZED_ENABLED: ${AUTHZED_ENABLED:-true}
+      AUTHZED_ENDPOINT: ${AUTHZED_ENDPOINT:-spicedb:50051}
+      AUTHZED_TOKEN: ${AUTHZED_TOKEN:?AUTHZED_TOKEN is required}
+      AUTHZED_SYSTEM_KEY: ${AUTHZED_SYSTEM_KEY:-formbricks}
+      AUTHZED_INSECURE: ${AUTHZED_INSECURE:-true}
+      AUTHZED_CONSISTENCY: ${AUTHZED_CONSISTENCY:-fully_consistent}
+
+  # Opt-in AuthZed health, schema, and relationship-repair commands. This profile never starts with
+  # the normal stack. Example: docker compose --profile authzed-ops run --rm authzed-ops health
+  authzed-ops:
+    profiles: ["authzed-ops"]
+    image: ghcr.io/formbricks/formbricks:latest
+    entrypoint: ["formbricks-authzed"]
+    command: ["health"]
+    environment:
+      # Backfill is the only operation that reads Formbricks PostgreSQL. The other required values are
+      # inert placeholders for the shared server environment validator and are not application secrets.
+      <<: *formbricks-database
+      ENCRYPTION_KEY: authzed-ops-unused
+      CUBEJS_API_SECRET: authzed-ops-unused
+      CUBEJS_API_URL: http://localhost
+      HUB_API_KEY: authzed-ops-unused
+      HUB_API_URL: http://localhost
+      REDIS_URL: redis://localhost
+      LOG_LEVEL: fatal
+      AUTHZED_ENABLED: ${AUTHZED_ENABLED:-true}
+      AUTHZED_ENDPOINT: ${AUTHZED_ENDPOINT:-spicedb:50051}
+      AUTHZED_TOKEN: ${AUTHZED_TOKEN:?AUTHZED_TOKEN is required}
+      AUTHZED_SYSTEM_KEY: ${AUTHZED_SYSTEM_KEY:-formbricks}
+      AUTHZED_INSECURE: ${AUTHZED_INSECURE:-true}
+      AUTHZED_CONSISTENCY: ${AUTHZED_CONSISTENCY:-fully_consistent}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spicedb:
+        condition: service_healthy
+
+  # Idempotently prepares a fresh authorization datastore without making Formbricks startup, health,
+  # readiness, or liveness depend on SpiceDB. Existing installations are gated by formbricks.sh and
+  # the explicit v6 migration acknowledgement before this release is started.
+  authzed-initialize:
+    image: ghcr.io/formbricks/formbricks:latest
+    restart: "no"
+    entrypoint: ["formbricks-authzed"]
+    command: ["upgrade", "prepare"]
+    environment:
+      <<: *formbricks-database
+      ENCRYPTION_KEY: authzed-initialize-unused
+      CUBEJS_API_SECRET: authzed-initialize-unused
+      CUBEJS_API_URL: http://localhost
+      HUB_API_KEY: authzed-initialize-unused
+      HUB_API_URL: http://localhost
+      REDIS_URL: redis://localhost
+      LOG_LEVEL: fatal
+      AUTHZED_ENABLED: ${AUTHZED_ENABLED:-true}
+      AUTHZED_ENDPOINT: ${AUTHZED_ENDPOINT:-spicedb:50051}
+      AUTHZED_TOKEN: ${AUTHZED_TOKEN:?AUTHZED_TOKEN is required}
+      AUTHZED_SYSTEM_KEY: ${AUTHZED_SYSTEM_KEY:-formbricks}
+      AUTHZED_INSECURE: ${AUTHZED_INSECURE:-true}
+      AUTHZED_CONSISTENCY: ${AUTHZED_CONSISTENCY:-fully_consistent}
+    depends_on:
+      formbricks-migrate:
+        condition: service_completed_successfully
+      spicedb:
+        condition: service_healthy
+
+  # Run Hub DB migrations (goose + river) before the API starts. Uses same image; migrations are idempotent.
+  # Default tracks :latest so self-host updates (compose pull) advance Hub alongside the app image.
+  # Operators who want an immutable pin can set HUB_IMAGE_REF in docker/.env to either ":<tag>"
+  # (e.g. ":0.3.0") or "@sha256:<digest>". hub, hub-worker, and hub-migrate share the same value — no drift.
+  hub-migrate:
+    image: ghcr.io/formbricks/hub${HUB_IMAGE_REF:-:latest}
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      [
+        'if [ -x /usr/local/bin/goose ] && [ -x /usr/local/bin/river ]; then /usr/local/bin/goose -dir /app/migrations postgres "$$DATABASE_URL" up && /usr/local/bin/river migrate-up --database-url "$$DATABASE_URL"; else echo ''Migration tools (goose/river) not in image.''; exit 1; fi',
+      ]
+    environment:
+      DATABASE_URL: ${HUB_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD_URL_ENCODED:-${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}}@postgres:5432/formbricks?sslmode=disable}
+    depends_on:
+      formbricks-migrate:
+        condition: service_completed_successfully
+
+  # Formbricks Hub API (ghcr.io/formbricks/hub). Set HUB_API_KEY. By default shares the Formbricks database; set HUB_DATABASE_URL to use a separate DB.
+  hub:
+    restart: always
+    image: ghcr.io/formbricks/hub${HUB_IMAGE_REF:-:latest}
+    depends_on:
+      hub-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *hub-runtime-environment
+      API_KEY: ${HUB_API_KEY:-}
+
+  # Hub worker processes every asynchronous Hub job, including webhooks and configured enrichments.
+  hub-worker:
+    restart: always
+    image: ghcr.io/formbricks/hub${HUB_IMAGE_REF:-:latest}
+    depends_on:
+      hub-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/app/hub-worker"]
+    healthcheck:
+      disable: true
+    environment: *hub-runtime-environment
+
+  # Optional AI taxonomy beta service. Enable with COMPOSE_PROFILES=taxonomy.
+  taxonomy:
+    restart: always
+    profiles: ["taxonomy"]
+    image: ghcr.io/formbricks/taxonomy${TAXONOMY_IMAGE_REF:-:latest}
+    depends_on:
+      hub:
+        condition: service_started
+    environment:
+      APP_ENV: production
+      TAXONOMY_SERVICE_TOKEN: ${TAXONOMY_SERVICE_TOKEN:-}
+      HUB_INTERNAL_API_URL: http://hub:8080
+      HUB_INTERNAL_API_TOKEN: ${HUB_INTERNAL_API_TOKEN:-}
+      TAXONOMY_LLM_PROVIDER: ${TAXONOMY_LLM_PROVIDER:-openai-compatible}
+      TAXONOMY_LLM_MODEL: ${TAXONOMY_LLM_MODEL:-}
+      TAXONOMY_LLM_BASE_URL: ${TAXONOMY_LLM_BASE_URL:-}
+      TAXONOMY_LLM_API_KEY: ${TAXONOMY_LLM_API_KEY:-}
+      TAXONOMY_VERTEX_PROJECT: ${TAXONOMY_VERTEX_PROJECT:-}
+      TAXONOMY_VERTEX_LOCATION: ${TAXONOMY_VERTEX_LOCATION:-}
+      TAXONOMY_GOOGLE_CLOUD_CREDENTIALS_JSON: ${TAXONOMY_GOOGLE_CLOUD_CREDENTIALS_JSON:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Optional bundled Qwen/vLLM OpenAI-compatible runtime. Enable with COMPOSE_PROFILES=qwen.
+  vllm:
+    restart: always
+    profiles: ["qwen"]
+    image: ${QWEN_VLLM_IMAGE:-vllm/vllm-openai:v0.14.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - vllm
+      - serve
+      - ${QWEN_MODEL_ID:-Qwen/Qwen3-14B-AWQ}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --no-enable-prefix-caching
+      - --max-model-len
+      - ${QWEN_MAX_MODEL_LEN:-8192}
+      - --dtype
+      - ${QWEN_DTYPE:-float16}
+      - --tensor-parallel-size
+      - ${QWEN_TENSOR_PARALLEL_SIZE:-1}
+      - --max-num-seqs
+      - ${QWEN_MAX_NUM_SEQS:-8}
+      - --gpu_memory_utilization
+      - ${QWEN_GPU_MEMORY_UTILIZATION:-0.9}
+      - --served-model-name
+      - ${QWEN_SERVED_MODEL_NAME:-qwen3-14b-awq}
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+    environment:
+      HF_HOME: /data
+    volumes:
+      - qwen-model-cache:/data
+    ports:
+      - "${QWEN_VLLM_HOST:-127.0.0.1}:${QWEN_VLLM_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 40
+      start_period: 10m
+
+  # Cube semantic-layer API used by Formbricks analytics dashboards.
+  cube:
+    restart: always
+    image: cubejs/cube:v1.6.6
+    command:
+      - sh
+      - -c
+      - |
+        if [ -z "$$CUBEJS_API_SECRET" ]; then
+          echo "CUBEJS_API_SECRET is required for Cube JWT authentication" >&2
+          exit 1
+        fi
+        exec cubejs server
+    depends_on:
+      hub-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      CUBEJS_DB_TYPE: postgres
+      CUBEJS_DB_HOST: ${CUBEJS_DB_HOST:-postgres}
+      CUBEJS_DB_NAME: ${CUBEJS_DB_NAME:-formbricks}
+      CUBEJS_DB_USER: ${CUBEJS_DB_USER:-postgres}
+      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS:-${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}}
+      CUBEJS_DB_PORT: ${CUBEJS_DB_PORT:-5432}
+      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET:-}
+      CUBEJS_JWT_ISSUER: ${CUBEJS_JWT_ISSUER:-formbricks-web}
+      CUBEJS_JWT_AUDIENCE: ${CUBEJS_JWT_AUDIENCE:-formbricks-cube}
+      CUBEJS_DEFAULT_API_SCOPES: meta,data
+      CUBEJS_EXTERNAL_DEFAULT: ${CUBEJS_EXTERNAL_DEFAULT:-false}
+      CUBEJS_CACHE_AND_QUEUE_DRIVER: memory
+    volumes:
+      - ./cube/cube.js:/cube/conf/cube.js:ro
+      - ./cube/schema:/cube/conf/model:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:4000/readyz', (res) => { res.resume(); process.exit(res.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  postgres:
+    driver: local
+  redis:
+    driver: local
+  qwen-model-cache:
+    driver: local

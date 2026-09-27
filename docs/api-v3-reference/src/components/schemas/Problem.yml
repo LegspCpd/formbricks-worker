@@ -1,0 +1,63 @@
+type: object
+description: >-
+  RFC 9457 Problem Details for HTTP APIs (`application/problem+json`). Responses
+  typically include a machine-readable `code` field alongside `title`, `status`,
+  `detail`, and `requestId`.
+
+
+  Branch on `code`, not on `detail` or `title`: `code` is stable and
+  locale-independent, whereas `detail` is prose that may be reworded. No problem
+  sets `type`, so per RFC 9457 §4.2.1 `title` is always the HTTP reason phrase
+  for `status` and carries no information of its own.
+
+
+  Member naming is frozen as published, mixed conventions included
+  (`requestId` alongside `invalid_params` and `details.resource_type`):
+  renaming any of them would break every client that reads them.
+required:
+  - title
+  - status
+  - detail
+  - requestId
+properties:
+  type:
+    type: string
+    format: uri
+  title:
+    type: string
+  status:
+    type: integer
+  detail:
+    type: string
+  instance:
+    type: string
+  code:
+    type: string
+    enum:
+      - ai_features_not_enabled
+      - ai_generated_payload_invalid
+      - ai_instance_not_configured
+      - ai_output_too_long
+      - ai_smart_tools_disabled
+      - bad_gateway
+      - bad_request
+      - conflict
+      - forbidden
+      - internal_server_error
+      - invalid_workflow_state
+      - not_authenticated
+      - not_found
+      - payload_too_large
+      - service_unavailable
+      - stored_survey_invalid
+      - too_many_requests
+      - unprocessable_content
+      - workflow_not_executable
+  requestId:
+    type: string
+  details:
+    type: object
+  invalid_params:
+    type: array
+    items:
+      $ref: ./InvalidParam.yml

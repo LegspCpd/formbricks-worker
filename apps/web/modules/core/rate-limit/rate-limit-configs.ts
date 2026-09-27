@@ -1,0 +1,122 @@
+export const rateLimitConfigs = {
+  // Authentication endpoints - stricter limits for security
+  auth: {
+    login: { interval: 900, allowedPerInterval: 10, namespace: "auth:login" }, // 10 per 15 minutes
+    signup: { interval: 3600, allowedPerInterval: 30, namespace: "auth:signup" }, // 30 per hour
+    forgotPassword: { interval: 3600, allowedPerInterval: 5, namespace: "auth:forgot" }, // 5 per hour
+    // Keep redemption independent so requesting an email cannot exhaust the budget to use its token.
+    resetPassword: { interval: 3600, allowedPerInterval: 5, namespace: "auth:reset-password" }, // 5 per hour
+    verifyEmail: { interval: 3600, allowedPerInterval: 10, namespace: "auth:verify" }, // 10 per hour
+    emailToken: { interval: 3600, allowedPerInterval: 10, namespace: "auth:email-token" }, // 10 per hour — unauthenticated, tells the caller whether an email is registered
+  },
+
+  // API endpoints - higher limits for legitimate usage
+  api: {
+    v1: { interval: 60, allowedPerInterval: 100, namespace: "api:v1" }, // 100 per minute (Management API)
+    v2: { interval: 60, allowedPerInterval: 100, namespace: "api:v2" }, // 100 per minute
+    v3: { interval: 60, allowedPerInterval: 100, namespace: "api:v3" }, // 100 per minute
+    mcpAuth: { interval: 60, allowedPerInterval: 30, namespace: "api:mcp:auth" }, // 30 per minute
+    v3SurveyGenerate: {
+      interval: 60,
+      allowedPerInterval: 10,
+      namespace: "api:v3:surveys:generate",
+    }, // 10 per minute (AI survey generation)
+    internalDatasetPurge: {
+      interval: 3600,
+      allowedPerInterval: 5,
+      namespace: "api:internal:feedback-datasets:purge",
+    }, // 5 per hour — irreversible and dataset-wide; nobody legitimately purges more often than that
+    client: { interval: 60, allowedPerInterval: 100, namespace: "api:client" }, // 100 per minute (Client API)
+    clientEnvironment: {
+      interval: 60,
+      allowedPerInterval: 1000,
+      namespace: "api:client:environment",
+    }, // 1000 per minute per environment (Client API)
+  },
+
+  // Server actions - varies by action type
+  actions: {
+    emailUpdate: { interval: 3600, allowedPerInterval: 3, namespace: "action:email" }, // 3 per hour
+    accountDeletion: { interval: 3600, allowedPerInterval: 5, namespace: "action:account-delete" }, // 5 per hour
+    surveyFollowUp: { interval: 3600, allowedPerInterval: 50, namespace: "action:followup" }, // 50 per hour
+    sendLinkSurveyEmail: {
+      interval: 3600,
+      allowedPerInterval: 10,
+      namespace: "action:send-link-survey-email",
+    }, // 10 per hour
+    validateSurveyPin: {
+      interval: 60,
+      allowedPerInterval: 10,
+      namespace: "action:validate-survey-pin",
+    }, // 10 per minute — prevents brute-force PIN guessing
+    licenseRecheck: { interval: 60, allowedPerInterval: 5, namespace: "action:license-recheck" }, // 5 per minute
+    unsplash: { interval: 60, allowedPerInterval: 30, namespace: "action:unsplash" }, // 30 per minute per user — bounds one account exhausting the instance-wide UNSPLASH_ACCESS_KEY quota
+    inviteMember: { interval: 3600 * 24, allowedPerInterval: 50, namespace: "action:invite-member" }, // 50 recipients per day per org; trusted limits are resolved per organization
+    generateExampleResponses: {
+      interval: 60,
+      allowedPerInterval: 1,
+      namespace: "action:generate-example-responses",
+    }, // 1 per minute per user — closes the multi-click race and bounds LLM spend
+    aiChartGeneration: {
+      interval: 60,
+      allowedPerInterval: 1,
+      namespace: "action:ai-chart-generation",
+    }, // 1 per minute per user — bounds concurrent and repeated LLM-backed chart generations
+    integrationMutation: {
+      interval: 60,
+      allowedPerInterval: 30,
+      namespace: "action:integration-mutation",
+    }, // 30 per minute per user — one save or delete per UI interaction, so this bounds a readWrite
+    // member churning integration rows (each write hits the provider config and the audit log) without
+    // getting in the way of legitimate mapping edits
+    feedbackSourceMutation: {
+      interval: 60,
+      allowedPerInterval: 60,
+      namespace: "action:feedback-source-mutation",
+    }, // 60 per minute per user
+    historicalResponseImport: {
+      interval: 3600,
+      allowedPerInterval: 10,
+      namespace: "action:historical-response-import",
+    }, // 10 per hour per user — bounds repeated full-survey imports
+    chartCreation: {
+      interval: 60,
+      allowedPerInterval: 60,
+      namespace: "action:chart-creation",
+    }, // 60 per minute per user
+    feedbackDirectoryMutation: {
+      interval: 60,
+      allowedPerInterval: 60,
+      namespace: "action:feedback-directory-mutation",
+    }, // 60 per minute per user
+    feedbackRecordDeletion: {
+      interval: 60,
+      allowedPerInterval: 100,
+      namespace: "action:feedback-record-deletion",
+    }, // 100 per minute per user — supports deliberate bulk deletion while bounding abuse
+    stateMutation: {
+      interval: 60,
+      allowedPerInterval: 120,
+      namespace: "action:state-mutation",
+    }, // 120 per minute per organization/workspace — shared guard for authenticated settings writes
+  },
+
+  storage: {
+    upload: { interval: 60, allowedPerInterval: 5, namespace: "storage:upload" }, // 5 per minute
+    uploadPerWorkspace: {
+      interval: 60,
+      allowedPerInterval: 100,
+      namespace: "storage:upload:workspace",
+    }, // 100 per minute per workspace
+    delete: { interval: 60, allowedPerInterval: 5, namespace: "storage:delete" }, // 5 per minute
+    // One attachment export streams thousands of objects out of S3, so it is bounded far more tightly
+    // than a CSV download. Charged inside the route's handler, on the download path only, so the
+    // client's dryRun pre-flight does not spend a download's allowance — see the route for why that
+    // cannot go through the wrapper's customRateLimitConfig.
+    attachmentsExport: {
+      interval: 600,
+      allowedPerInterval: 3,
+      namespace: "storage:attachments-export",
+    }, // 3 downloads per 10 minutes
+  },
+} as const;

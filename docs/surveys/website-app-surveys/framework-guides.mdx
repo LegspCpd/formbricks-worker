@@ -1,0 +1,766 @@
+---
+title: "Framework Guides"
+description: "Easily add the Formbricks App Survey SDK to your app with guides for different frameworks."
+icon: "book"
+---
+
+Integrate the **Formbricks App Survey SDK** into your app using multiple options. Explore the available choices below. If you need something else, open a [**GitHub Discussion**](https://github.com/formbricks/formbricks/discussions), and we’ll be happy to help!
+
+<Info>
+  **Important for Self-Hosted Setups:**
+
+**Multi-Domain Setup:** If you are using the multi-domain setup, the `appUrl` parameter in all SDK configurations should point to your **public domain** (PUBLIC_URL environment variable). This is the domain where surveys and public-facing content are served, which may be different from your admin interface domain (WEBAPP_URL).
+
+**Single Domain Setup:** If you are using the single domain setup, the `appUrl` parameter in all SDK configurations should point to your **admin domain** (WEBAPP_URL environment variable).
+
+  </Info>
+
+<CardGroup cols={2}>
+  <Card title="HTML" icon="html5" color="orange" href="#html">
+   All you need to do is add three lines of code to your HTML script, and that's it!
+  </Card>
+
+<Card title="React.js" icon="react" color="lightblue" href="#react-js">
+  Load our JavaScript library with your Workspace ID, and you're ready to
+  go!
+</Card>
+
+<Card title="Next.js" icon="react" href="#next-js">
+  Natively add us to your Next.js app, with support for both App Router and Pages Router setups.
+</Card>
+
+<Card title="Vue.js" icon="vuejs" href="#vue-js">
+  Learn how to use Formbricks' Vue.js SDK to integrate your surveys into Vue.js applications.
+</Card>
+
+<Card title="React Native" icon="react" color="lightblue" href="#react-native">
+  Easily integrate our SDK with your React Native app for seamless survey
+  support.
+</Card>
+
+<Card title="Swift" icon="swift" color="orange" href="#swift">
+  Use our iOS SDK to quickly integrate surveys into your iOS
+  applications.
+</Card>
+
+<Card title="Android" icon="android" color="green" href="#android">
+  Integrate surveys into your Android applications using our native Kotlin
+  SDK.
+</Card>
+
+<Card title="Flutter" icon="flutter" color="lightblue" href="#flutter">
+  Add surveys to your Flutter app on iOS and Android with our Dart SDK.
+</Card>
+
+</CardGroup>
+
+## Prerequisites
+
+Before getting started, make sure you have:
+
+- A running web application with user authentication in your chosen framework.
+
+- A Formbricks account with your **Workspace ID** and **SDK Connection URL** (the `appUrl` in every snippet below), available under **Settings → Workspace → Web & Mobile SDK**, on the **Workspace details** card.
+
+## HTML
+
+All you need to do is copy a `<script>` tag to your HTML head:
+
+```javascript
+<!-- START Formbricks Surveys -->
+<script type="text/javascript">
+!function(){
+    var appUrl = "https://app.formbricks.com"; // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+    var workspaceId = "<your-workspace-id>";
+var t=document.createElement("script");t.type="text/javascript",t.async=!0,t.src=appUrl+"/js/formbricks.umd.cjs";t.onload=function(){window.formbricks.setup({workspaceId: workspaceId, appUrl: appUrl})};var e=document.getElementsByTagName("script")[0];e.parentNode.insertBefore(t,e)}();
+</script>
+<!-- END Formbricks Surveys -->
+```
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+Now, visit the [Validate Your Setup](#validate-your-setup) section to verify your setup!
+
+## React.js
+
+Install the Formbricks SDK using one of the following package managers: `npm`, `pnpm`, or `yarn`. &#x20;
+Note that **`zod`** is required as a peer dependency and must also be installed in your app.
+
+```javascript npm
+npm install @formbricks/js zod
+```
+
+```bash pnpm
+pnpm add @formbricks/js zod
+```
+
+```bash yarn
+yarn add @formbricks/js zod
+```
+
+Update your `App.js/ts` file to initialize Formbricks.
+
+```javascript src/App.js
+// other imports
+import formbricks from "@formbricks/js";
+
+if (typeof window !== "undefined") {
+  formbricks.setup({
+    workspaceId: "<workspace-id>",
+    appUrl: "<app-url>", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+  });
+}
+
+function App() {
+  // your own app
+}
+
+export default App;
+```
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+Now, visit the [Validate Your Setup](#validate-your-setup) section to verify your setup!
+
+## Next.js
+
+Next.js apps use either the **App Directory** or the **Pages Directory**. Since the Formbricks SDK runs on the client side, follow these steps based on your setup:
+
+- **App Directory**: Create a new component in `app/formbricks.tsx` and call it in `app/layout.tsx`.
+
+- **Pages Directory**: Initialize Formbricks directly in `_app.tsx`.
+
+Code snippets for the integration for both conventions are provided to further assist you.
+
+```bash npm
+npm install @formbricks/js zod
+```
+
+```bash pnpm
+pnpm add @formbricks/js zod
+```
+
+```bash yarn
+yarn add @formbricks/js zod
+```
+
+### App directory
+
+```typescript app/formbricks.tsx
+"use client";
+
+import { usePathname, useSearchParams } from "next/navigation";
+import { useEffect } from "react";
+import formbricks from "@formbricks/js";
+
+export default function FormbricksProvider() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    formbricks.setup({
+      workspaceId: "<workspace-id>",
+      appUrl: "<app-url>", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+    });
+  }, []);
+
+  useEffect(() => {
+    formbricks?.registerRouteChange();
+  }, [pathname, searchParams]);
+
+  return null;
+}
+```
+
+```typescript app/layout.tsx
+// other imports
+import FormbricksProvider from "./formbricks";
+import { Suspense } from "react";
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <Suspense>
+        <FormbricksProvider />
+      </Suspense>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+### Pages directory
+
+```javascript src/pages/_app.tsx
+// other import
+import { useRouter } from "next/router";
+import { useEffect } from "react";
+import formbricks from "@formbricks/js";
+
+if (typeof window !== "undefined") {
+  formbricks.setup({
+    workspaceId: "<workspace-id>",
+    appUrl: "<app-url>", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+  });
+}
+
+export default function App({ Component, pageProps }: AppProps) {
+  const router = useRouter();
+
+  useEffect(() => {
+    // Connect next.js router to Formbricks
+    const handleRouteChange = formbricks?.registerRouteChange;
+    router.events.on("routeChangeComplete", handleRouteChange);
+
+    return () => {
+      router.events.off("routeChangeComplete", handleRouteChange);
+    };
+  }, []);
+  return <Component {...pageProps} />;
+}
+```
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+First, initialize the Formbricks SDK to run only on the client side. To track page changes, register the route change event with the Next.js router.
+
+Next, go to the [**Validate Your Setup**](#validate-your-setup) section to verify your setup!
+
+## Vue.js
+
+Integrating the Formbricks SDK with Vue.js is easy. We'll ensure the SDK is only loaded and used on the client side, as it's not meant for server-side use.
+
+```bash npm
+npm install @formbricks/js
+```
+
+```bash pnpm
+pnpm add @formbricks/js
+```
+
+```bash yarn
+yarn add @formbricks/js
+```
+
+```javascript src/formbricks.js
+import formbricks from "@formbricks/js";
+
+if (typeof window !== "undefined") {
+  formbricks.setup({
+    workspaceId: "<workspace-id>",
+    appUrl: "<app-url>", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+  });
+}
+
+export default formbricks;
+```
+
+```javascript src/main.js
+// other imports
+import formbricks from "@/formbricks";
+
+const app = createApp(App);
+
+app.use(router);
+
+app.mount("#app");
+
+router.afterEach((to, from) => {
+  if (typeof formbricks !== "undefined") {
+    formbricks.registerRouteChange();
+  }
+});
+```
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+Now, visit the [Validate Your Setup](#validate-your-setup) section to verify your setup!
+
+## React Native
+
+<Info>
+  **Interaction-based Segments:** targeting users by whether they have seen, started or completed a survey requires **@formbricks/react-native 3.1.0** or higher. See [Survey Display Logic](/surveys/website-app-surveys/survey-display-logic#level-4-interaction-based-segments).
+</Info>
+
+Install the Formbricks React Native SDK using one of the package managers, i.e., npm, pnpm, or yarn.
+
+```bash npm
+npm install @formbricks/react-native
+```
+
+```bash pnpm
+pnpm add @formbricks/react-native
+```
+
+```bash yarn
+yarn add @formbricks/react-native
+```
+
+Now, update your `App.js/App.tsx` file to initialize Formbricks:
+
+```javascript src/App.js
+// other imports
+import Formbricks from "@formbricks/react-native";
+
+const config = {
+  workspaceId: "<workspace-id>",
+  appUrl: "<app-url>", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+};
+
+export default function App() {
+  return (
+    <>
+      {/* Your app content */}
+      <Formbricks initConfig={config} />
+    </>
+  );
+}
+```
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+Drive the SDK through its named exports from anywhere:
+
+```javascript
+import { track, setUserId, setAttributes, setEmbeddedData, logout } from "@formbricks/react-native";
+
+await track("button_clicked");
+await setUserId("user_123");
+setEmbeddedData({ screen: "checkout", plan: "pro" });
+```
+
+<Note>
+  `setEmbeddedData` attaches context to whichever survey is displayed next, without tying it to a trigger.
+  See [Mobile SDKs](/surveys/embedded-data/mobile-sdks) for the full Embedded Data reference.
+</Note>
+
+Now, visit the [Validate Your Setup](#validate-your-setup) section to verify your setup!
+
+## Swift
+
+<Info>**Minimum iOS Version:** The Formbricks iOS SDK requires **iOS 16.4** or higher.</Info>
+
+<Info>
+  **Interaction-based Segments:** targeting users by whether they have seen, started or completed a survey requires **FormbricksSDK 2.1.0** or higher. See [Survey Display Logic](/surveys/website-app-surveys/survey-display-logic#level-4-interaction-based-segments).
+</Info>
+
+Install the Formbricks iOS SDK using the following steps:
+
+**Swift Package Manager**
+
+1. In Xcode choose **File → Add Packages…**
+2. Enter your repo URL (e.g. `https://github.com/formbricks/ios.git`)
+3. Choose version rule (e.g. "Up to Next Major" starting at `2.1.0`).
+4. Import in your code:
+
+   ```swift
+   import FormbricksSDK
+   ```
+
+**CocoaPods**
+
+1. Add the following to your `Podfile`:
+
+   ```ruby
+   platform :ios, '16.4'
+   use_frameworks! :linkage => :static
+
+   target 'YourTargetName' do
+     pod 'FormbricksSDK', '~> 2.1'
+   end
+   ```
+
+2. Run `pod install` in your app directory
+3. Import in your code:
+   ```swift
+   import FormbricksSDK
+   ```
+
+Now start using FormbricksSDK
+
+```swift
+import FormbricksSDK
+
+// 1. Build your config (you can also inject userId + attributes here)
+let config = FormbricksConfig.Builder(
+        appUrl: "https://your‑app.bricks.com", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+        workspaceId: "YOUR_WORKSPACE_ID"
+    )
+    .setLogLevel(.debug)
+    .build()
+
+// 2. Initialize the SDK (once per launch)
+Formbricks.setup(with: config)
+
+// 3. Identify the user
+Formbricks.setUserId("user‑123")
+
+// 4. Track events
+Formbricks.track("button_pressed")
+
+// 5. Set or add user attributes
+Formbricks.setAttribute("blue", forKey: "favoriteColor")
+Formbricks.setAttributes([
+    "plan": "pro",
+    "tier": "gold"
+])
+
+// 6. Change language (no userId required):
+Formbricks.setLanguage("de")
+
+// 7. Attach Embedded Data to future responses
+Formbricks.setEmbeddedData(["screen": "checkout", "plan": "pro"])
+
+// 8. Log out (no userId required):
+Formbricks.logout()
+
+// 9. Clean up SDK state (optional):
+Formbricks.cleanup(waitForOperations: true) {
+    print("SDK torn down")
+}
+```
+
+<Note>
+  `setEmbeddedData` attaches context to whichever survey is displayed next, without tying it to a trigger.
+  See [Mobile SDKs](/surveys/embedded-data/mobile-sdks) for the value types and for the `nil` caveat that is
+  specific to Swift.
+</Note>
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+Now, visit the [Validate Your Setup](#validate-your-setup) section to verify your setup!
+
+## Android
+
+<Info>
+  **Minimum Android Version:** The Formbricks Android SDK requires **Android 10 (API level 29)** or higher.
+</Info>
+
+<Info>
+  **Interaction-based Segments:** targeting users by whether they have seen, started or completed a survey requires **com.formbricks:android 2.1.0** or higher. See [Survey Display Logic](/surveys/website-app-surveys/survey-display-logic#level-4-interaction-based-segments).
+</Info>
+
+Install the Formbricks Android SDK using the following steps:
+
+### Installation
+
+Add the Maven Central repository and the Formbricks SDK dependency to your application's `build.gradle.kts`:
+
+```kotlin
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation("com.formbricks:android:2.1.0") // or a later version
+}
+```
+
+Enable DataBinding in your app's module build.gradle.kts:
+
+```kotlin
+android {
+  buildFeatures {
+    dataBinding = true
+  }
+}
+```
+
+### Usage
+
+```kotlin
+// 1. Initialize the SDK
+val config = FormbricksConfig.Builder(
+    "https://your-formbricks-server.com",
+    "YOUR_WORKSPACE_ID"
+)
+  .setLoggingEnabled(true)
+  .setFragmentManager(supportFragmentManager)
+  .build()
+
+// 2. Setup Formbricks
+Formbricks.setup(this, config)
+
+// 3. Identify the user
+Formbricks.setUserId("user‑123")
+
+// 4. Track events
+Formbricks.track("button_pressed")
+
+// 5. Set or add user attributes
+Formbricks.setAttribute("test@web.com", "email")
+Formbricks.setAttributes(mapOf(Pair("attr1", "val1"), Pair("attr2", "val2")))
+
+// 6. Change language (no userId required):
+Formbricks.setLanguage("de")
+
+// 7. Attach Embedded Data to future responses
+Formbricks.setEmbeddedData(mapOf(
+  "screen" to EmbeddedDataValue.string("checkout"),
+  "plan" to EmbeddedDataValue.string("pro")
+))
+
+// 8. Log out:
+Formbricks.logout()
+```
+
+<Note>
+  `setEmbeddedData` attaches context to whichever survey is displayed next, without tying it to a trigger.
+  See [Mobile SDKs](/surveys/embedded-data/mobile-sdks) for the value types and clearing semantics.
+</Note>
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+## Flutter
+
+<Info>
+  **Platform Support:** The Formbricks Flutter SDK targets **iOS and Android only**. Flutter Web and desktop are not supported.
+</Info>
+
+<Info>
+  **Interaction-based Segments:** targeting users by whether they have seen, started or completed a survey requires **formbricks 1.1.0** or higher. See [Survey Display Logic](/surveys/website-app-surveys/survey-display-logic#level-4-interaction-based-segments).
+</Info>
+
+Install the Formbricks Flutter SDK from [pub.dev](https://pub.dev/packages/formbricks):
+
+```bash
+flutter pub add formbricks
+```
+
+### Usage
+
+Mount the `Formbricks` widget once, high in your widget tree (e.g. alongside your app's home). It initializes the SDK on mount and renders any triggered survey in a modal overlay:
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:formbricks/formbricks.dart';
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Stack(
+        children: [
+          const HomePage(),
+          // Initializes the SDK and hosts the survey overlay.
+          Formbricks(
+            appUrl: "<app-url>", // use PUBLIC_URL if you are using multi-domain setup, otherwise use WEBAPP_URL
+            workspaceId: "<workspace-id>",
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+Then drive the SDK through its static API from anywhere:
+
+```dart
+// 1. Trigger a code action — shows a matching, eligible survey.
+await Formbricks.track("button_clicked");
+
+// 2. Identify the current user.
+await Formbricks.setUserId("user_123");
+
+// 3. Set or add user attributes.
+await Formbricks.setAttribute("plan", "pro");
+await Formbricks.setAttributes({"plan": "pro", "mrr": 99, "signup_date": DateTime.now()});
+
+// 4. Set the survey language.
+await Formbricks.setLanguage("de");
+
+// 5. Attach Embedded Data to future responses (synchronous, no queue).
+Formbricks.setEmbeddedData({"screen": "checkout", "plan": "pro"});
+
+// 6. Reset to an anonymous session on sign-out.
+await Formbricks.logout();
+```
+
+<Note>
+  Prefer to initialize before any UI mounts? Call `Formbricks.setup(appUrl: ..., workspaceId: ...)` directly — the widget still needs to be in the tree to render surveys, but it won't re-run setup (setup is idempotent). `setup`, `track`, `setUserId`, `setAttribute`, `setAttributes`, `setLanguage` and `logout` are sequenced through an internal command queue, so they run in submission order and return a `Future<Result<void, FormbricksError>>`. `setEmbeddedData` and `clearEmbeddedData` are the exceptions: they are synchronous and return `void`, so a context push at launch is not dropped while setup is still running.
+</Note>
+
+### Public API
+
+| Method                                              | Description                                                              |
+| --------------------------------------------------- | ------------------------------------------------------------------------ |
+| `Formbricks(appUrl:, workspaceId:, logLevel:)`      | Host widget — initializes the SDK and renders triggered surveys.         |
+| `Formbricks.setup({appUrl, workspaceId, logLevel})` | Imperative initialization. Idempotent.                                   |
+| `Formbricks.track(String name)`                     | Fire a code action; shows a matching eligible survey.                    |
+| `Formbricks.setUserId(String userId)`               | Identify the contact. Switching ids resets the prior user's state first. |
+| `Formbricks.setAttribute(String key, Object value)` | Set one attribute (`String` / `num` / `DateTime`).                       |
+| `Formbricks.setAttributes(Map<String, Object>)`     | Set several attributes at once.                                          |
+| `Formbricks.setLanguage(String language)`           | Set the survey language.                                                 |
+| `Formbricks.setEmbeddedData(Map<String, Object?>)`  | Attach [Embedded Data](/surveys/embedded-data/mobile-sdks) to future responses. Synchronous. |
+| `Formbricks.clearEmbeddedData('key')`               | Remove one Embedded Data key. With no argument, clears all of them.      |
+| `Formbricks.logout()`                               | Reset to an anonymous session.                                           |
+
+Attribute keys must be lowercase letters, numbers, and underscores, and start with a letter. `DateTime` values are sent as UTC ISO-8601 strings; numbers stay numbers. Identity and attribute changes are debounced (~500 ms) and coalesced into a single backend request.
+
+### Required Customizations
+
+| Name           | Type   | Description                            |
+| -------------- | ------ | -------------------------------------- |
+| workspaceId    | string | Formbricks Workspace ID.               |
+| appUrl         | string | URL of the hosted Formbricks instance. |
+
+<Note>
+  Surveys render by loading `{appUrl}/js/surveys.umd.cjs` in a WebView, so that URL must be reachable from the device. Formbricks Cloud and standard self-hosted instances serve this script automatically. Config is persisted with `shared_preferences` and is **not encrypted at rest** — avoid putting sensitive PII in attribute values.
+</Note>
+
+Now, visit the [Validate Your Setup](#validate-your-setup) section to verify your setup!
+
+## Validate your setup
+
+Once you've completed the steps above, load your app so the SDK sends its first request, then open the **Connection status** card under **Settings → Workspace → Web & Mobile SDK** and hit **Re-check**. The card reads the status on load and on **Re-check** only, so it will not turn green while you watch it. It should change from this:
+
+![The Connection status card, grey, reading "Formbricks SDK is not yet connected."](/images/surveys/website-app-surveys/framework-guides/widget-status-not-connected.webp)
+
+To this:
+
+![The Connection status card, green, reading "Receiving data" and "Formbricks SDK is connected"](/images/surveys/website-app-surveys/framework-guides/widget-status-connected.webp)
+
+## Content Security Policy
+
+If your app serves a strict `Content-Security-Policy` header, the browser can block the Formbricks widget before anything renders. Three directives are involved.
+
+<Note>
+  This applies to the JavaScript SDK only. Link surveys are served by Formbricks itself, and the mobile
+  SDKs render surveys in a WebView, so neither is affected by your app's CSP.
+</Note>
+
+### Allowing scripts and API calls
+
+The SDK loads two scripts from your Formbricks instance: `formbricks.umd.cjs` (the SDK) and `surveys.umd.cjs` (the survey renderer, fetched the first time a survey is shown). It then talks to the client API on the same host. Both directives need to point at your `appUrl`:
+
+```text
+script-src 'self' https://app.formbricks.com;
+connect-src 'self' https://app.formbricks.com;
+```
+
+The SDK does not put a nonce on the script tags it creates, so allowlisting the host is what makes them load. `'strict-dynamic'` works instead of a host allowlist, but only if the script that loads the SDK carries a matching nonce or hash of its own — both bundles are inserted programmatically, so they inherit trust from that root. Without a trusted root, `'strict-dynamic'` blocks the SDK before it ever reaches `surveys.umd.cjs`.
+
+### Passing a nonce for survey styles
+
+Surveys are styled by two `<style>` elements the renderer appends to `<head>`: `formbricks__css` for the base stylesheet and `formbricks__css__custom` for your workspace and survey theme. `style-src` treats an injected `<style>` element as inline CSS, so a policy without `'unsafe-inline'` blocks both and surveys appear unstyled.
+
+Instead of loosening the policy, hand the SDK the nonce your server already generated for the request. `setNonce` stamps it onto both style elements, which satisfies `style-src 'nonce-...'`:
+
+```javascript Setting the CSP nonce
+formbricks.setNonce("<your-request-nonce>");
+
+formbricks.setup({
+  workspaceId: "<workspace-id>",
+  appUrl: "<app-url>",
+});
+```
+
+The matching header side, with the nonce in both style directives:
+
+```text
+style-src 'self' 'nonce-<your-request-nonce>';
+style-src-elem 'self' 'nonce-<your-request-nonce>';
+```
+
+`style-src-elem` is what the browser consults for `<style>` elements whenever it is present, and it does not fall back to `style-src` — so a nonce listed only under `style-src` leaves surveys unstyled on any policy that sets both. If your policy has no `style-src-elem`, the first line alone is enough.
+
+Pass the raw value only — not the `nonce-` prefix that appears in the header. Passing `undefined` stops the SDK nonce-ing style elements it creates from then on; elements already in the page keep the attribute they were given.
+
+<Note>
+  **Note**: call `setNonce` before `setup`. The SDK stores the nonce and applies it when the survey
+  renderer loads, so setting it early covers every survey in the page's lifetime. A nonce must be
+  regenerated per response and match the one in the header, so read it from wherever your framework
+  exposes it rather than hardcoding a value.
+</Note>
+
+## Debugging Formbricks Integration
+
+<Note>
+  The debug mode is only available in the JavaScript SDK and works exclusively in the browser. It is not
+  supported in mobile SDKs such as React Native, iOS, Android, or Flutter.
+</Note>
+
+Enabling debug mode in your browser can help troubleshoot issues with Formbricks. Here's how to activate it and what to look for in the logs.
+
+### Activate Debug Mode
+
+To enable debug mode, add `?formbricksDebug=true` to your app's URL (e.g., [`https://example.com?formbricksDebug=true)`](<https://example.com?formbricksDebug=true)>).&#x20;
+
+#### View Debug Logs
+
+1. Open your browser's developer tools:
+
+- **Google Chrome/Edge**: Press `F12` or right-click and select "**Inspect" > "Console**".
+
+- **Firefox**: Press `F12` or right-click and select "**Inspect Element" > "Console**".
+
+- **Safari**: Press `Option + Command + C` to open developer tools and go to the "**Console**" tab.
+
+#### Common Use Cases
+
+Debug mode is helpful for:
+
+- Verifying Formbricks initialization.
+
+- Identifying issues with survey triggers.
+
+- Troubleshooting unexpected behavior.
+
+#### Debug Log Messages
+
+Logs provide insights into:
+
+- API calls and responses.
+
+- Survey triggers and form interactions.
+
+- Initialization errors.
+
+If you're stuck, visit [**GitHub Discussions**](https://github.com/formbricks/formbricks/discussions) for assistance.
+
+```
+
+```

@@ -1,0 +1,35 @@
+import { prisma } from "@formbricks/database";
+import { type TIngestFlag } from "@formbricks/types/embedded-data-ingest";
+import { TResponseWithQuotaFull } from "@formbricks/types/quota";
+import { TResponseUpdateInput } from "@formbricks/types/responses";
+import { updateResponse } from "@/lib/response/service";
+import { evaluateResponseQuotas } from "@/modules/ee/quotas/lib/evaluation-service";
+
+export const updateResponseWithQuotaEvaluation = async (
+  responseId: string,
+  responseInput: TResponseUpdateInput,
+  ingestFlags?: readonly TIngestFlag[]
+): Promise<TResponseWithQuotaFull> => {
+  const txResponse = await prisma.$transaction(async (tx) => {
+    const response = await updateResponse(responseId, responseInput, tx, ingestFlags);
+
+    const quotaResult = await evaluateResponseQuotas({
+      surveyId: response.surveyId,
+      responseId: response.id,
+      data: response.data,
+      variables: response.variables,
+      language: response.language || "default",
+      responseFinished: response.finished,
+      // The row just written, so `reserved` quota operands resolve (ENG-1840).
+      response,
+      tx,
+    });
+
+    return {
+      ...response,
+      ...(quotaResult.quotaFull && { quotaFull: quotaResult.quotaFull }),
+    };
+  });
+
+  return txResponse;
+};

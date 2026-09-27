@@ -1,0 +1,306 @@
+"use client";
+
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TChartQuery } from "@formbricks/types/analysis";
+import { DimensionsPanel } from "@/modules/ee/analysis/charts/components/dimensions-panel";
+import { FiltersPanel } from "@/modules/ee/analysis/charts/components/filters-panel";
+import { MeasuresPanel } from "@/modules/ee/analysis/charts/components/measures-panel";
+import { TimeDimensionPanel } from "@/modules/ee/analysis/charts/components/time-dimension-panel";
+import { useChartQuery } from "@/modules/ee/analysis/charts/hooks/use-chart-query";
+import { prepareQueryForChartType } from "@/modules/ee/analysis/charts/lib/big-number";
+import { supportsTimeGrouping } from "@/modules/ee/analysis/charts/lib/chart-display";
+import {
+  type ChartBuilderState,
+  type FilterRow,
+  type TimeDimensionConfig,
+  buildCubeQuery,
+  parseQueryToState,
+} from "@/modules/ee/analysis/lib/query-builder";
+import { FEEDBACK_FIELDS } from "@/modules/ee/analysis/lib/schema-definition";
+import type { AnalyticsResponse, TChartType } from "@/modules/ee/analysis/types/analysis";
+import { AdvancedOptionToggle } from "@/modules/ui/components/advanced-option-toggle";
+
+export interface ChartQueryState {
+  isLoading: boolean;
+  error: string | null;
+  isPending: boolean;
+}
+
+interface AdvancedChartBuilderProps {
+  workspaceId: string;
+  chartType: TChartType;
+  initialQuery?: TChartQuery;
+  onChartGenerated?: (data: AnalyticsResponse) => void;
+  onQueryStateChange?: (state: ChartQueryState) => void;
+  feedbackDirectoryId: string | null;
+}
+
+const AUTO_RUN_DEBOUNCE_MS = 500;
+
+const ACTION = {
+  SET_MEASURES: "SET_MEASURES",
+  SET_DIMENSIONS: "SET_DIMENSIONS",
+  SET_FILTERS: "SET_FILTERS",
+  SET_FILTER_LOGIC: "SET_FILTER_LOGIC",
+  SET_TIME_DIMENSION: "SET_TIME_DIMENSION",
+  INIT_FROM_QUERY: "INIT_FROM_QUERY",
+} as const;
+
+type Action =
+  | { type: typeof ACTION.SET_MEASURES; payload: string[] }
+  | { type: typeof ACTION.SET_DIMENSIONS; payload: string[] }
+  | { type: typeof ACTION.SET_FILTERS; payload: FilterRow[] }
+  | { type: typeof ACTION.SET_FILTER_LOGIC; payload: "and" | "or" }
+  | { type: typeof ACTION.SET_TIME_DIMENSION; payload: TimeDimensionConfig | null }
+  | { type: typeof ACTION.INIT_FROM_QUERY; payload: Partial<ChartBuilderState> };
+
+const initialState: ChartBuilderState = {
+  selectedMeasures: [],
+  selectedDimensions: [],
+  filters: [],
+  filterLogic: "and",
+  timeDimension: null,
+};
+
+const chartBuilderReducer = (state: ChartBuilderState, action: Action): ChartBuilderState => {
+  switch (action.type) {
+    case ACTION.SET_MEASURES:
+      return { ...state, selectedMeasures: action.payload };
+    case ACTION.SET_DIMENSIONS:
+      return { ...state, selectedDimensions: action.payload };
+    case ACTION.SET_FILTERS:
+      return { ...state, filters: action.payload };
+    case ACTION.SET_FILTER_LOGIC:
+      return { ...state, filterLogic: action.payload };
+    case ACTION.SET_TIME_DIMENSION:
+      return { ...state, timeDimension: action.payload };
+    case ACTION.INIT_FROM_QUERY:
+      return { ...state, ...action.payload };
+    default:
+      return state;
+  }
+};
+
+const toComparableQueryJson = (query: TChartQuery, chartType: TChartType): string =>
+  JSON.stringify(
+    prepareQueryForChartType(buildCubeQuery({ ...initialState, ...parseQueryToState(query) }), chartType)
+  );
+
+export function AdvancedChartBuilder({
+  workspaceId,
+  chartType,
+  initialQuery,
+  onChartGenerated,
+  onQueryStateChange,
+  feedbackDirectoryId,
+}: Readonly<AdvancedChartBuilderProps>) {
+  const { t } = useTranslation();
+  const parsedInitial = initialQuery ? parseQueryToState(initialQuery) : null;
+
+  const [state, dispatch] = useReducer(
+    chartBuilderReducer,
+    initialQuery ? { ...initialState, ...parsedInitial } : initialState
+  );
+
+  const { isLoading, error, runQuery } = useChartQuery(workspaceId, feedbackDirectoryId, initialQuery);
+  const [isConfigDirty, setIsConfigDirty] = useState(false);
+  const chartTypeRef = useRef(chartType);
+
+  useEffect(() => {
+    chartTypeRef.current = chartType;
+  }, [chartType]);
+
+  useEffect(() => {
+    onQueryStateChange?.({ isLoading, error, isPending: isConfigDirty || isLoading });
+  }, [isLoading, error, isConfigDirty, onQueryStateChange]);
+
+  const [dimensionsOpen, setDimensionsOpen] = useState(
+    () => (parsedInitial?.selectedDimensions?.length ?? 0) > 0
+  );
+  const timeDimensionOpen = state.timeDimension != null;
+  const filtersOpen = state.filters.length > 0;
+  const timeGroupingSupported = supportsTimeGrouping(chartType);
+
+  // Switching to a chart type that doesn't support time grouping (Big Number, Pie) drops the
+  // granularity left over from a previous type, matching how sanitizeChartDisplay drops other
+  // per-type display settings rather than saving them as dead values. The time dimension itself is
+  // kept: with no granularity it is the chart's date-range filter (see TimeDimensionConfig), not a
+  // grouping, and stripping it would silently widen the chart to all-time.
+  useEffect(() => {
+    if (!timeGroupingSupported && state.timeDimension?.granularity) {
+      const { granularity: _granularity, ...rest } = state.timeDimension;
+      dispatch({ type: ACTION.SET_TIME_DIMENSION, payload: rest });
+    }
+  }, [timeGroupingSupported, state.timeDimension]);
+
+  // The executed query depends on the chart type as well as the form: a big number has nowhere to
+  // put groups, so its query drops them (see prepareQueryForChartType). Switching the chart type
+  // therefore changes the query and re-runs it, rather than re-rendering stale grouped rows.
+  const currentQuery = useMemo(
+    () => prepareQueryForChartType(buildCubeQuery(state), chartType),
+    [state, chartType]
+  );
+  const currentQueryJson = JSON.stringify(currentQuery);
+
+  // The last query that was executed (or arrived pre-executed via initialQuery, e.g. from the
+  // AI section or a saved chart). Auto-run only fires when the form drifts away from it.
+  const lastRunQueryJsonRef = useRef<string | null>(
+    initialQuery ? toComparableQueryJson(initialQuery, chartType) : null
+  );
+
+  const appliedInitialQueryRef = useRef<TChartQuery | null>(null);
+  useEffect(() => {
+    if (!initialQuery) return;
+    if (appliedInitialQueryRef.current === initialQuery) return;
+    appliedInitialQueryRef.current = initialQuery;
+    const parsed = parseQueryToState(initialQuery);
+    lastRunQueryJsonRef.current = JSON.stringify(
+      prepareQueryForChartType(buildCubeQuery({ ...initialState, ...parsed }), chartType)
+    );
+    dispatch({ type: ACTION.INIT_FROM_QUERY, payload: parsed });
+    setDimensionsOpen((parsed.selectedDimensions?.length ?? 0) > 0);
+    // chartType only feeds the baseline above; a later switch is caught by the guard and left to
+    // drift detection, which is what re-runs the query for the new type.
+  }, [initialQuery, chartType]);
+
+  // Incomplete configs (no measure yet, half-filled filter row) are skipped silently instead of
+  // surfacing validation toasts on every keystroke; the preview keeps its last valid state.
+  const isConfigComplete = useMemo(() => {
+    if (state.selectedMeasures.length === 0) return false;
+    if (dimensionsOpen && state.selectedDimensions.length === 0) return false;
+    return !state.filters.some(
+      (f) => f.operator !== "set" && f.operator !== "notSet" && (f.values === null || f.values.length === 0)
+    );
+  }, [state, dimensionsOpen]);
+
+  // Latest-value ref so the debounce timer is not reset by parent re-renders or
+  // identity changes of runQuery/onChartGenerated.
+  const executeQueryRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    executeQueryRef.current = () => {
+      lastRunQueryJsonRef.current = currentQueryJson;
+      setIsConfigDirty(false);
+      void runQuery(currentQuery).then((result) => {
+        if (result) {
+          onChartGenerated?.({ ...result, chartType: chartTypeRef.current });
+        }
+      });
+    };
+  });
+
+  useEffect(() => {
+    const hasDrift = currentQueryJson !== lastRunQueryJsonRef.current;
+    setIsConfigDirty(hasDrift);
+
+    if (!feedbackDirectoryId || !isConfigComplete || !hasDrift) return;
+
+    const timeout = setTimeout(() => {
+      executeQueryRef.current();
+    }, AUTO_RUN_DEBOUNCE_MS);
+    return () => clearTimeout(timeout);
+  }, [currentQueryJson, isConfigComplete, feedbackDirectoryId]);
+
+  return (
+    <div className="space-y-2">
+      {/* Flat, like every other control in the rail: a filled box here read as a card inside a card. */}
+      <MeasuresPanel
+        hideTitle
+        selectedMeasures={state.selectedMeasures}
+        onMeasuresChange={(measures) => dispatch({ type: ACTION.SET_MEASURES, payload: measures })}
+      />
+
+      <AdvancedOptionToggle
+        isChecked={filtersOpen}
+        onToggle={() => {
+          if (filtersOpen) {
+            dispatch({ type: ACTION.SET_FILTERS, payload: [] });
+          } else if (state.filters.length === 0) {
+            const firstField = FEEDBACK_FIELDS.dimensions[0] ?? FEEDBACK_FIELDS.measures[0];
+            dispatch({
+              type: ACTION.SET_FILTERS,
+              payload: [
+                {
+                  id: crypto.randomUUID(),
+                  field: firstField?.id ?? "",
+                  operator: "equals" as const,
+                  values: null,
+                },
+              ],
+            });
+          }
+        }}
+        htmlId="chart-filters-toggle"
+        title={t("workspace.analysis.charts.filter_data")}
+        description={t("workspace.analysis.charts.filters_toggle_description")}
+        customContainerClass="mt-2 px-0"
+        childrenContainerClass="flex-col gap-3 p-4"
+        childBorder>
+        <FiltersPanel
+          hideTitle
+          workspaceId={workspaceId}
+          feedbackDirectoryId={feedbackDirectoryId}
+          filters={state.filters}
+          filterLogic={state.filterLogic}
+          onFiltersChange={(filters) => dispatch({ type: ACTION.SET_FILTERS, payload: filters })}
+          onFilterLogicChange={(logic) => dispatch({ type: ACTION.SET_FILTER_LOGIC, payload: logic })}
+        />
+      </AdvancedOptionToggle>
+
+      <AdvancedOptionToggle
+        isChecked={dimensionsOpen}
+        onToggle={(checked) => {
+          setDimensionsOpen(checked);
+          if (!checked) dispatch({ type: ACTION.SET_DIMENSIONS, payload: [] });
+        }}
+        htmlId="chart-dimensions-toggle"
+        title={t("workspace.analysis.charts.group_data")}
+        description={t("workspace.analysis.charts.dimensions_toggle_description")}
+        customContainerClass="mt-2 px-0"
+        childrenContainerClass="flex-col gap-3 p-4"
+        childBorder>
+        <DimensionsPanel
+          hideTitle
+          selectedDimensions={state.selectedDimensions}
+          onDimensionsChange={(dimensions) => dispatch({ type: ACTION.SET_DIMENSIONS, payload: dimensions })}
+        />
+      </AdvancedOptionToggle>
+
+      <AdvancedOptionToggle
+        isChecked={timeDimensionOpen}
+        onToggle={() => {
+          if (timeDimensionOpen) dispatch({ type: ACTION.SET_TIME_DIMENSION, payload: null });
+          else if (!state.timeDimension) {
+            dispatch({
+              type: ACTION.SET_TIME_DIMENSION,
+              payload: {
+                dimension: "FeedbackRecords.collectedAt",
+                dateRange: "last 30 days",
+              },
+            });
+          }
+        }}
+        htmlId="chart-time-dimension-toggle"
+        title={
+          timeGroupingSupported
+            ? t("workspace.analysis.charts.time_dimension_title")
+            : t("workspace.analysis.charts.time_dimension_title_range_only")
+        }
+        description={
+          timeGroupingSupported
+            ? t("workspace.analysis.charts.time_dimension_toggle_description")
+            : t("workspace.analysis.charts.time_dimension_toggle_description_range_only")
+        }
+        customContainerClass="mt-2 px-0"
+        childrenContainerClass="flex-col gap-3 p-4"
+        childBorder>
+        <TimeDimensionPanel
+          hideTitle
+          hideGranularity={!timeGroupingSupported}
+          timeDimension={state.timeDimension}
+          onTimeDimensionChange={(config) => dispatch({ type: ACTION.SET_TIME_DIMENSION, payload: config })}
+        />
+      </AdvancedOptionToggle>
+    </div>
+  );
+}

@@ -1,0 +1,424 @@
+/* =============================================================================
+   Survey UI - Global Styles
+   
+   This file contains:
+   1. Tailwind CSS setup and configuration
+   2. Base design tokens (colors, radius)
+   3. Survey-specific theming tokens (--fb-* variables)
+   
+   All tokens are designed to be overridden by consumers for custom theming.
+   Components use Tailwind utilities backed by these CSS variables.
+   ============================================================================= */
+
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) important;
+
+/* NOSONAR: Tailwind CSS v4 directives - @config and @source are valid at-rules */
+@config "../../tailwind.config.ts";
+/* NOSONAR */
+@source "../../src/**/*.{ts,tsx,js,jsx}";
+/* NOSONAR */
+
+/* =============================================================================
+   Design Tokens
+   ============================================================================= */
+
+#fbjs {
+  /* ---------------------------------------------------------------------------
+     Base Primitives
+     These are the foundation tokens used throughout the design system.
+     --------------------------------------------------------------------------- */
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-muted: oklch(0.97 0.02 27.325);
+  --border: oklch(0.922 0 0);
+  --input: black;
+  --slate-50: rgb(248, 250, 252);
+  --slate-100: rgb(241 245 249);
+  --slate-200: rgb(226 232 240);
+  --slate-700: rgb(51 65 85);
+  --slate-900: rgb(15 23 42);
+
+  /* ---------------------------------------------------------------------------
+     Theming Tokens (--fb-*)
+
+     Color values MUST match the output of getSuggestedColors("#1e40af") in
+     apps/web/lib/styling/constants.ts.  Non-color values MUST match
+     STYLE_DEFAULTS in the same file.
+
+     At runtime styles.ts always overrides these from the JS object, but the
+     CSS values below act as the initial / fallback state so the survey looks
+     correct before JS executes.
+
+     Derived colour palette for brand #1e40af:
+       questionColor  = #142a72   (brand mixed with black @ 0.35)
+       inputBg        = #edf0f9   (brand mixed with white @ 0.92)
+       inputBorder    = #a5b3df   (brand mixed with white @ 0.60)
+       cardBg         = #f8f9fd   (brand mixed with white @ 0.97)
+       cardBorder     = #d2d9ef   (brand mixed with white @ 0.80)
+       progressTrack  = #d2d9ef   (brand mixed with white @ 0.80)
+     --------------------------------------------------------------------------- */
+
+  /* ── Brand ─────────────────────────────────────────────────────────── */
+  --fb-survey-brand-color: #1e40af;
+  --fb-accent-background-color: #d2d9ef;
+  --fb-accent-background-color-selected: #bcc6e7;
+
+  /* ── Headlines ─────────────────────────────────────────────────────── */
+  --fb-element-headline-font-family: inherit;
+  --fb-element-headline-font-weight: 500;
+  --fb-element-headline-font-size: 16px;
+  --fb-element-headline-color: #142a72;
+  --fb-element-headline-opacity: 1;
+
+  /* ── Descriptions ──────────────────────────────────────────────────── */
+  --fb-element-description-font-family: inherit;
+  --fb-element-description-font-weight: 400;
+  --fb-element-description-font-size: 14px;
+  --fb-element-description-color: #142a72;
+  --fb-element-description-opacity: 1;
+
+  /* ── Upper Labels ("Required" + rating/matrix scale labels) ────────────
+     Brand-tinted text at full opacity. The opacity is the WCAG 1.4.3 fix: the
+     previous 0.6 opacity diluted the color into the card and failed the 4.5:1
+     contrast for this small text. The hue stays configurable and brand-derived
+     (see getSuggestedColors().elementUpperLabelColor in
+     apps/web/lib/styling/constants.ts). */
+  --fb-element-upper-label-font-family: inherit;
+  --fb-element-upper-label-font-weight: 400;
+  --fb-element-upper-label-font-size: 12px;
+  --fb-element-upper-label-color: #142a72;
+  --fb-element-upper-label-opacity: 1;
+
+  /* ── Labels ────────────────────────────────────────────────────────── */
+  --fb-label-font-family: inherit;
+  --fb-label-font-weight: 400;
+  --fb-label-font-size: 14px;
+  --fb-label-color: #142a72;
+  --fb-label-opacity: 1;
+
+  /* ── Buttons ───────────────────────────────────────────────────────── */
+  --fb-button-height: auto;
+  --fb-button-width: auto;
+  --fb-button-font-family: inherit;
+  --fb-button-font-size: 16px;
+  --fb-button-font-weight: 500;
+  --fb-button-border-radius: 8px;
+  --fb-button-bg-color: #1e40af;
+  --fb-button-text-color: #ffffff;
+  --fb-button-padding-x: 12px;
+  --fb-button-padding-y: 12px;
+
+  /* ── Inputs ────────────────────────────────────────────────────────── */
+  --fb-input-bg-color: #edf0f9;
+  --fb-input-border-color: #a5b3df;
+  --fb-input-border-radius: 8px;
+  --fb-input-font-family: inherit;
+  --fb-input-font-size: 14px;
+  --fb-input-font-weight: 400;
+  --fb-input-color: #142a72;
+  --fb-input-placeholder-color: var(--fb-input-text-color, var(--fb-input-color));
+  --fb-input-placeholder-opacity: 0.5;
+  --fb-input-width: 100%;
+  --fb-input-height: 20px;
+  --fb-input-padding-x: 8px;
+  --fb-input-padding-y: 8px;
+  --fb-input-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+
+  /* ── Progress Bar ──────────────────────────────────────────────────── */
+  --fb-progress-track-height: 8px;
+  --fb-progress-track-bg-color: #d2d9ef;
+  --fb-progress-track-border-radius: 8px;
+  --fb-progress-indicator-bg-color: #1e40af;
+  --fb-progress-indicator-border-radius: 8px;
+
+  /* ── Options (radio / checkbox / multi-select) ─────────────────────── */
+  --fb-option-bg-color: #edf0f9;
+  --fb-option-label-color: #142a72;
+  --fb-option-border-radius: 8px;
+  --fb-option-padding-x: 16px;
+  --fb-option-padding-y: 16px;
+  --fb-option-font-family: inherit;
+  --fb-option-font-size: 14px;
+  --fb-option-font-weight: 400;
+
+  /* ── Page backdrop ─────────────────────────────────────────────────── */
+  /* The gray the link-survey shell paints behind the widget when no survey
+     background is configured (MediaBackground's default, slate-200). The
+     cardless layout blends its scroll fades into it; the shell can override
+     this token if its default ever changes. */
+  --fb-page-bg-color: #e2e8f0;
+}
+
+#fbjs .button-custom {
+  width: var(--fb-button-width);
+  height: var(--fb-button-height);
+  background-color: var(--fb-button-bg-color);
+  border-radius: var(--fb-button-border-radius);
+  font-family: var(--fb-button-font-family);
+  font-weight: var(--fb-button-font-weight);
+  padding-left: var(--fb-button-padding-x);
+  padding-right: var(--fb-button-padding-x);
+  padding-top: var(--fb-button-padding-y);
+  padding-bottom: var(--fb-button-padding-y);
+  color: var(--fb-button-text-color);
+  font-size: var(--fb-button-font-size);
+}
+
+/*
+ * Element prompts are wrapped in a real heading for WCAG 2.4.6 (see element-header.tsx). The
+ * heading is a semantic wrapper only — the visible text is still the <Label> inside it — so the
+ * UA's own heading typography and margins have to be neutralised or the prompt gains size and
+ * spacing it never had. `packages/surveys/preflight.css` already does this for the bundled
+ * survey, but that preflight ships with the surveys package and this stylesheet is consumed on
+ * its own too (Storybook, and any standalone React consumer), so survey-ui declares it itself.
+ */
+#fbjs h1,
+#fbjs h2,
+#fbjs h3,
+#fbjs h4,
+#fbjs h5,
+#fbjs h6 {
+  font-size: inherit;
+  font-weight: inherit;
+  margin: 0;
+}
+
+#fbjs .label-headline,
+#fbjs .label-headline * {
+  font-family: var(--fb-element-headline-font-family);
+  font-weight: var(--fb-element-headline-font-weight);
+  font-size: var(--fb-element-headline-font-size);
+  color: var(--fb-element-headline-color);
+  opacity: var(--fb-element-headline-opacity);
+}
+
+#fbjs .label-description,
+#fbjs .label-description *,
+#fbjs .text-subheading,
+#fbjs .text-subheading * {
+  font-family: var(--fb-element-description-font-family);
+  font-weight: var(--fb-element-description-font-weight);
+  font-size: var(--fb-element-description-font-size);
+  color: var(--fb-element-description-color);
+  opacity: var(--fb-element-description-opacity);
+}
+
+/*
+ * Keep bold (<strong>/<b>) inside rich text actually bold. The headline /
+ * description weight rules above target every descendant (`* `), which would
+ * otherwise flatten bold spans to the base weight and erase the contrast
+ * between bold and non-bold text. Higher specificity + !important wins over
+ * those rules (and the equivalent runtime rules injected by styles.ts).
+ */
+#fbjs .label-headline strong,
+#fbjs .label-headline b,
+#fbjs .label-description strong,
+#fbjs .label-description b,
+#fbjs .text-subheading strong,
+#fbjs .text-subheading b,
+#fbjs .htmlbody strong,
+#fbjs .htmlbody b {
+  font-weight: 700 !important;
+}
+
+#fbjs .label-default,
+#fbjs .label-default * {
+  font-family: var(--fb-label-font-family);
+  font-weight: var(--fb-label-font-weight);
+  font-size: var(--fb-label-font-size);
+  color: var(--fb-label-color);
+  opacity: var(--fb-label-opacity);
+}
+
+#fbjs .label-card,
+#fbjs .label-card * {
+  font-family: var(--fb-element-upper-label-font-family);
+  font-weight: var(--fb-element-upper-label-font-weight);
+  font-size: var(--fb-element-upper-label-font-size);
+  color: var(--fb-element-upper-label-color);
+  opacity: var(--fb-element-upper-label-opacity);
+}
+
+#fbjs .progress-track {
+  height: var(--fb-progress-track-height);
+  background-color: var(--fb-progress-track-bg-color);
+  border-radius: var(--fb-progress-track-border-radius);
+}
+
+#fbjs .progress-indicator {
+  --fb-progress-translate-x: -100%;
+  background-color: var(--fb-progress-indicator-bg-color);
+  border-radius: var(--fb-progress-indicator-border-radius);
+}
+
+/* =============================================================================
+   Focus Visibility (WCAG 2.4.7)
+
+   One uniform focus indicator for every focusable element in the survey: a
+   white inner halo + brand-colored outer ring. The halo separates the ring
+   from the control and keeps it visible on dark or saturated backgrounds,
+   while the outer ring follows the theme's brand color so the indicator stays
+   visually cohesive with the rest of the palette.
+
+   This lives in the `components` layer with !important on purpose: the
+   per-component Tailwind `focus-visible:ring-*` utilities are emitted in the
+   later `utilities` layer as !important, and for important declarations an
+   earlier layer wins the cascade. That lets this single rule replace every
+   ad-hoc focus style uniformly.
+
+   Colors are exposed as tokens so a consumer can re-theme the ring if needed.
+   ============================================================================= */
+@layer components {
+  #fbjs {
+    --fb-focus-ring-inner-color: #ffffff;
+    --fb-focus-ring-outer-color: var(--fb-survey-brand-color, #1e40af);
+    --fb-focus-ring-inner-width: 2px;
+    --fb-focus-ring-outer-width: 2px;
+  }
+
+  /* Tailwind v4's transition-colors includes outline-color, and the focus rule
+     below sets a transparent outline (upgraded under forced-colors). Without a
+     transparent resting value, every focus would animate the outline from its
+     default (black) to transparent — a dark ring flashing outside the control.
+     Keep the resting outline-color transparent so that transition is a no-op. */
+  #fbjs a,
+  #fbjs button,
+  #fbjs input,
+  #fbjs select,
+  #fbjs textarea,
+  #fbjs summary,
+  #fbjs [tabindex],
+  #fbjs label:has(input[type="radio"]),
+  #fbjs label:has(input[type="checkbox"]),
+  #fbjs [data-fb-focus-ring],
+  #fbjs [role="menuitem"],
+  #fbjs [role="menuitemradio"],
+  #fbjs [role="menuitemcheckbox"] {
+    outline-color: transparent;
+  }
+
+  #fbjs a:focus-visible,
+  #fbjs button:focus-visible,
+  #fbjs input:focus-visible,
+  #fbjs select:focus-visible,
+  #fbjs textarea:focus-visible,
+  #fbjs summary:focus-visible,
+  /* tabindex="-1" targets are script-focus-only (e.g. the ending card container focused
+     for screen-reader announcement) — not operable controls, so no indicator. :where()
+     keeps the exclusion at zero specificity so later same-specificity overrides (the
+     inset menu-item ring below) still win the cascade. */
+  #fbjs [tabindex]:where(:not([tabindex="-1"])):focus-visible,
+  /* A visually-hidden radio/checkbox drives a visible label: paint the ring on the label. */
+  #fbjs label:has(input[type="radio"]:focus-visible),
+  #fbjs label:has(input[type="checkbox"]:focus-visible),
+  #fbjs [data-fb-focus-ring]:has(:focus-visible),
+  /* Ring carrier as the hidden input's direct sibling (e.g. the matrix's round indicator),
+     for controls where the wrapping label is not the right shape to ring. */
+  #fbjs input:focus-visible + [data-fb-focus-ring] {
+    /* Transparent outline is upgraded to the system focus color under forced-colors. */
+    outline: 2px solid transparent !important;
+    outline-offset: 2px !important;
+    box-shadow:
+      0 0 0 var(--fb-focus-ring-inner-width) var(--fb-focus-ring-inner-color),
+      0 0 0 calc(var(--fb-focus-ring-inner-width) + var(--fb-focus-ring-outer-width))
+        var(--fb-focus-ring-outer-color) !important;
+  }
+
+  /* Matrix cells: the label spans the whole cell, so a label-level ring renders as a wide
+     sharp rectangle around a 16px circle. Suppress it; the round indicator (the input's
+     direct sibling, tagged data-fb-focus-ring) carries the ring and matches the control's
+     shape (WCAG 2.4.7 stays satisfied by the indicator ring). */
+  #fbjs table label:has(input[type="radio"]:focus-visible) {
+    box-shadow: none !important;
+    outline: none !important;
+  }
+
+  /* The hidden input is 1px and clipped; its visible label paints the ring instead.
+     outline:none also prevents a stray Highlight ring on it under forced-colors. */
+  #fbjs input.sr-only:focus-visible {
+    box-shadow: none !important;
+    outline: none !important;
+  }
+
+  /* Scale cells (NPS / rating numbers) sit flush together and against the card's
+     scroll edge, so the default outer ring is clipped (WCAG 2.4.11). Paint a single
+     brand ring inset instead and raise the focused cell. The negative outline-offset
+     keeps it inset under forced-colors too, where box-shadows drop and the base
+     rule's positive-offset outline would otherwise reintroduce the clipping. */
+  #fbjs label[data-fb-scale-cell]:has(input[type="radio"]:focus-visible) {
+    z-index: 20;
+    outline-offset: calc(-1 * var(--fb-focus-ring-outer-width)) !important;
+    box-shadow: inset 0 0 0 var(--fb-focus-ring-outer-width) var(--fb-focus-ring-outer-color) !important;
+  }
+
+  /* Dropdown menu options: the menu content clips overflowing shadows (overflow-hidden
+     for its rounded corners), which cut the sides off the default outer ring. Paint the
+     ring inset for menu items as well (same forced-colors offset rationale as above). */
+  #fbjs [role="menuitem"]:focus-visible,
+  #fbjs [role="menuitemradio"]:focus-visible,
+  #fbjs [role="menuitemcheckbox"]:focus-visible {
+    outline-offset: calc(-1 * var(--fb-focus-ring-outer-width)) !important;
+    box-shadow: inset 0 0 0 var(--fb-focus-ring-outer-width) var(--fb-focus-ring-outer-color) !important;
+  }
+
+  @media (forced-colors: active) {
+    #fbjs a:focus-visible,
+    #fbjs button:focus-visible,
+    #fbjs input:focus-visible,
+    #fbjs select:focus-visible,
+    #fbjs textarea:focus-visible,
+    #fbjs summary:focus-visible,
+    #fbjs [tabindex]:where(:not([tabindex="-1"])):focus-visible,
+    #fbjs label:has(input[type="radio"]:focus-visible),
+    #fbjs label:has(input[type="checkbox"]:focus-visible),
+    #fbjs [data-fb-focus-ring]:has(:focus-visible),
+    #fbjs input:focus-visible + [data-fb-focus-ring] {
+      outline-color: Highlight !important;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Textarea Scrollbar Styling
+   Smaller, more subtle scrollbars for textarea elements.
+   --------------------------------------------------------------------------- */
+#fbjs textarea {
+  /* Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: hsl(215.4 16.3% 46.9% / 0.3) transparent;
+}
+
+/* Chrome, Edge, and Safari */
+#fbjs textarea::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+#fbjs textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#fbjs textarea::-webkit-scrollbar-thumb {
+  background-color: hsl(215.4 16.3% 46.9% / 0.3);
+  border-radius: 2px;
+}
+
+#fbjs textarea::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(215.4 16.3% 46.9% / 0.5);
+}

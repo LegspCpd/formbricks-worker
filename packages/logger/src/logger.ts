@@ -1,0 +1,232 @@
+import Pino, { type Logger, type LoggerOptions, symbols as pinoSymbols, stdSerializers } from "pino";
+import { type TLogLevel, ZLogLevel } from "./types/logger";
+
+const IS_PRODUCTION = !process.env.NODE_ENV || process.env.NODE_ENV === "production";
+const IS_BUILD = process.env.NEXT_PHASE === "phase-production-build";
+const PROCESS_GLOBAL_KEY = "process";
+const PROCESS_HANDLERS_ATTACHED_KEY = Symbol.for("@formbricks/logger/process-handlers-attached");
+const NEXT_STANDALONE_APP_DIR_PATTERN = /[/\\]apps[/\\]web$/;
+const OTEL_TRANSPORT_PACKAGE_PATH =
+  "node_modules/pino-opentelemetry-transport/lib/pino-opentelemetry-transport.js";
+
+interface TransportStream {
+  on?: (event: "error", listener: (error: unknown) => void) => void;
+}
+
+const getNodeProcess = (): typeof process => globalThis[PROCESS_GLOBAL_KEY];
+
+const getOtelTransportTarget = (): string => {
+  const runtimeRoot = getNodeProcess().cwd().replace(NEXT_STANDALONE_APP_DIR_PATTERN, "");
+  return `${runtimeRoot}/${OTEL_TRANSPORT_PACKAGE_PATH}`;
+};
+
+const getLogLevel = (): TLogLevel => {
+  let logLevel: TLogLevel = "info";
+
+  if (IS_PRODUCTION) logLevel = "warn";
+  if (IS_BUILD) logLevel = "error"; // Only show errors during build
+
+  const envLogLevel = process.env.LOG_LEVEL;
+
+  const logLevelResult = ZLogLevel.safeParse(envLogLevel);
+  if (logLevelResult.success) logLevel = logLevelResult.data;
+
+  return logLevel;
+};
+
+const baseLoggerConfig: LoggerOptions = {
+  level: getLogLevel(),
+  serializers: {
+    err: stdSerializers.err,
+    req: stdSerializers.req,
+    res: stdSerializers.res,
+  },
+  customLevels: {
+    debug: 20,
+    info: 30,
+    warn: 40,
+    error: 50,
+    fatal: 60,
+    audit: 90,
+  },
+  useOnlyCustomLevels: true,
+  timestamp: true,
+  name: "formbricks",
+};
+
+/**
+ * Build transport configuration based on environment.
+ * - Development: pino-pretty for readable console output
+ * - Production: JSON to stdout (default Pino behavior)
+ * - Both: optional pino-opentelemetry-transport for SigNoz logs when OTEL_LOGS_ENABLED=1
+ */
+const buildTransport = (): LoggerOptions["transport"] => {
+  const isEdgeRuntime = process.env.NEXT_RUNTIME === "edge";
+
+  const hasOtelLogTransport =
+    process.env.NEXT_RUNTIME === "nodejs" &&
+    process.env.OTEL_LOGS_ENABLED === "1" &&
+    Boolean(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+
+  const serviceName = process.env.OTEL_SERVICE_NAME ?? "formbricks";
+  const serviceVersion = process.env.npm_package_version ?? "0.0.0";
+
+  const buildOtelTarget = (): Pino.TransportTargetOptions => ({
+    target: getOtelTransportTarget(),
+    options: {
+      loggerName: serviceName,
+      serviceVersion,
+      resourceAttributes: {
+        "service.name": serviceName,
+        "service.version": serviceVersion,
+        "deployment.environment": process.env.ENVIRONMENT ?? process.env.NODE_ENV ?? "development",
+      },
+    },
+    level: getLogLevel(),
+  });
+
+  const prettyTarget = {
+    target: "pino-pretty",
+    options: {
+      colorize: true,
+      levelFirst: true,
+      translateTime: "SYS:standard",
+      ignore: "pid,hostname,ip,requestId",
+      customLevels: "trace:10,debug:20,info:30,warn:40,error:50,fatal:60,audit:90",
+      useOnlyCustomProps: true,
+    },
+    level: getLogLevel(),
+  };
+
+  if (!IS_PRODUCTION) {
+    // Edge Runtime does not support worker_threads — skip pino-pretty to avoid crashes
+    if (isEdgeRuntime) {
+      return undefined;
+    }
+
+    // Development: pretty print + optional OTEL
+    if (hasOtelLogTransport) {
+      return { targets: [prettyTarget, buildOtelTarget()] };
+    }
+    return { target: prettyTarget.target, options: prettyTarget.options };
+  }
+
+  // Production: stdout JSON + optional OTEL
+  if (hasOtelLogTransport) {
+    const fileTarget = {
+      target: "pino/file",
+      options: { destination: 1 }, // stdout
+      level: getLogLevel(),
+    };
+    return { targets: [fileTarget, buildOtelTarget()] };
+  }
+
+  return undefined; // Default JSON to stdout
+};
+
+const transport = buildTransport();
+
+// Pino does not allow custom `formatters` (functions) when using multi-target transports
+// because targets run in worker threads and functions cannot be serialized.
+// Only attach the level formatter when we're NOT using `{ targets: [...] }`.
+const useMultiTransport = transport !== undefined && "targets" in transport;
+
+const loggerConfig: LoggerOptions = {
+  ...baseLoggerConfig,
+  transport,
+  ...(!useMultiTransport && {
+    formatters: {
+      level: (label) => ({ level: label }),
+    },
+  }),
+};
+
+const pinoLogger: Logger = Pino(loggerConfig);
+
+const reportTransportError = (error: unknown): void => {
+  const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  getNodeProcess().stderr.write(`[logger] Pino transport error: ${message}\n`);
+};
+
+const attachTransportErrorHandler = (logger: Logger): void => {
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+
+  const stream = (logger as unknown as Record<symbol, TransportStream | undefined>)[pinoSymbols.streamSym];
+  stream?.on?.("error", reportTransportError);
+};
+
+attachTransportErrorHandler(pinoLogger);
+
+// Ensure all log levels are properly bound
+const boundLogger = {
+  debug: pinoLogger.debug.bind(pinoLogger),
+  info: pinoLogger.info.bind(pinoLogger),
+  audit: (pinoLogger as Logger & { audit: typeof pinoLogger.info }).audit.bind(pinoLogger),
+  warn: pinoLogger.warn.bind(pinoLogger),
+  error: pinoLogger.error.bind(pinoLogger),
+  fatal: pinoLogger.fatal.bind(pinoLogger),
+};
+
+const extendedLogger = {
+  ...boundLogger,
+  withContext: (context: Record<string, unknown>) => pinoLogger.child(context),
+  request: (req: Request) =>
+    pinoLogger.child({
+      method: req.method,
+      url: req.url,
+    }),
+};
+
+export type ExtendedLogger = typeof extendedLogger;
+export const logger: ExtendedLogger = extendedLogger;
+
+const handleShutdown = (event: string, err?: Error): void => {
+  if (err) {
+    logger.error(err, `Error during shutdown (${event})`);
+  }
+  logger.info({ event }, "Process is exiting");
+
+  pinoLogger.flush();
+};
+
+// Create a separate function for attaching Node.js process handlers
+const attachNodeProcessHandlers = (): void => {
+  if (process.env.NEXT_RUNTIME !== "nodejs") return;
+
+  // Resolved through `getNodeProcess()` so the Edge bundler cannot statically see the
+  // `process.on` / `process.off` calls below and warn about unsupported Node.js APIs.
+  const nodeProcess = getNodeProcess() as typeof process & { [key: symbol]: boolean | undefined };
+
+  // Next.js can evaluate bundled copies of this module in one process.
+  if (nodeProcess[PROCESS_HANDLERS_ATTACHED_KEY]) return;
+
+  nodeProcess[PROCESS_HANDLERS_ATTACHED_KEY] = true;
+  const removeAttachedHandlers: Array<() => void> = [];
+  const handleUncaughtException = (err: Error): void => handleShutdown("uncaughtException", err);
+  const handleUnhandledRejection = (err: unknown): void => handleShutdown("unhandledRejection", err as Error);
+  const handleSigterm = (): void => handleShutdown("SIGTERM");
+  const handleSigint = (): void => handleShutdown("SIGINT");
+
+  try {
+    nodeProcess.on("uncaughtException", handleUncaughtException);
+    removeAttachedHandlers.push(() => nodeProcess.off("uncaughtException", handleUncaughtException));
+    nodeProcess.on("unhandledRejection", handleUnhandledRejection);
+    removeAttachedHandlers.push(() => nodeProcess.off("unhandledRejection", handleUnhandledRejection));
+    nodeProcess.on("SIGTERM", handleSigterm);
+    removeAttachedHandlers.push(() => nodeProcess.off("SIGTERM", handleSigterm));
+    nodeProcess.on("SIGINT", handleSigint);
+    removeAttachedHandlers.push(() => nodeProcess.off("SIGINT", handleSigint));
+  } catch (error) {
+    removeAttachedHandlers.reverse().forEach((removeHandler) => removeHandler());
+    Reflect.deleteProperty(nodeProcess, PROCESS_HANDLERS_ATTACHED_KEY);
+    throw error;
+  }
+};
+
+if (process.env.NEXT_RUNTIME === "nodejs") {
+  try {
+    attachNodeProcessHandlers();
+  } catch (e) {
+    logger.error(e, "Error attaching process event handlers");
+  }
+}

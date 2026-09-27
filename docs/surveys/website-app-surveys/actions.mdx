@@ -1,0 +1,153 @@
+---
+title: "Actions"
+description: "Actions are predefined events within your app that prompt Formbricks to display a survey when triggered. These are detected by the Formbricks widget, which then presents the appropriate survey based on your predefined settings."
+icon: "code"
+---
+
+## How do Actions work?
+
+<Steps>
+  <Step title="User performs action">
+    The user performs an action in your application.
+  </Step>
+
+<Step title="Formbricks widget detects action">
+  The embedded widget (SDK) detects the action, if you set up a [No Code
+  Action](/surveys/website-app-surveys/actions#setting-up-no-code-actions) or a [Code
+  Action](/surveys/website-app-surveys/actions#setting-up-code-actions) to do so.
+</Step>
+
+<Step title="Check for survey trigger">
+  If a survey is set to trigger on that action, Formbricks checks if the user or visitor qualifies.
+</Step>
+
+  <Step title="Check for user or visitor qualification">
+    If a [Cooldown Period](/surveys/website-app-surveys/cooldown-period) applies and the user or visitor was **shown** a survey inside it, this one will not be shown, to prevent survey fatigue. Three things about that gate are easy to get wrong: the interval is whatever you configured, not a fixed one; a survey can set its own, which overrides the workspace value, and a survey set to ignore the cooldown skips the check entirely; and it counts displays of **any** survey, not answers to this one — so declining to answer, or being shown a different survey, still starts the clock.
+
+    Also, if this user or visitor has seen this specific survey before, Formbricks might not show it as this is dependent on the [Recontact Options](/surveys/website-app-surveys/recontact).
+
+  </Step>
+
+  <Step title="Show survey">
+    If all conditions match, the survey is shown.
+  </Step>
+</Steps>
+
+<Tip>
+  Tying surveys to specific user actions enables **context-aware surveying**: You make sure that your user
+  research is relevant to the current user context which leads to sign**ificantly higher response and
+  completions rates** as well as lower survey fatigue.
+</Tip>
+
+<Note>
+  **Important**: Any changes to actions, surveys, or environment configuration will take **up to 1 minute** to
+  reflect in your app/website due to server-side caching. This includes new actions, modified action 
+  configurations, and survey trigger updates.
+</Note>
+
+## Setting up no-code Actions
+
+Formbricks offers an intuitive No-Code interface that allows you to configure actions without needing to write any code.
+
+<Note>
+  No Code Actions are **not available for surveys in mobile apps**. No Code Action tracking are heavily
+  dependent on JavaScript and most mobile apps are compiled into a different programming language. To track
+  user actions in mobile apps use [Code
+  Actions.](/surveys/website-app-surveys/actions#setting-up-code-actions)
+</Note>
+
+<Steps>
+  <Step title="Open Settings → Workspace → User Actions">
+    Every action in the workspace is listed here, no-code and code alike.
+
+    ![The User Actions list](/images/surveys/website-app-surveys/actions/user-actions.webp "The User Actions list")
+  </Step>
+
+  <Step title="Click Add action">
+    Name the action, say what the user is doing, and — optionally — limit it to certain pages.
+
+    ![The Track New User Action dialog](/images/surveys/website-app-surveys/actions/add-action.webp "The Track New User Action dialog")
+  </Step>
+</Steps>
+
+There are five types of no-code action.
+
+### 1. Click
+
+Fires when a user clicks a specific element. Define the element by its **CSS Selector**, its **Inner Text**, or both — with both switched on, the click has to match both to count.
+
+- **Inner Text**: matches the text of the clicked element, such as a button label.
+
+- **CSS Selector**: matches a class, an id, or any other CSS selector.
+
+### 2. Page View
+
+Fires when a user opens a page. On its own it fires on every page; combine it with a page filter to narrow it down.
+
+### 3. Exit Intent
+
+Fires when a user looks about to leave — the pointer leaves the viewport. It is how you catch someone before they abandon a form.
+
+### 4. 50% Scroll
+
+Fires once a user has scrolled halfway down a page. A rough proxy for "read it".
+
+### 5. Time on Page
+
+Fires after a user has stayed on a page for a number of seconds that you set.
+
+### Page filter
+
+Every no-code action can be limited to certain pages. Leave it on **On all pages**, or switch to **Limit to specific pages** and add one or more URL rules:
+
+- **exactMatch**: Triggers the action when the URL exactly matches the specified string.
+
+- **contains**: Activates when the URL contains the specified substring.
+
+- **startsWith**: Fires when the URL starts with the specified string.
+
+- **endsWith**: Executes when the URL ends with the specified string.
+
+- **notMatch**: Triggers when the URL does not match the specified condition.
+
+- **notContains**: Activates when the URL does not contain the specified substring.
+
+- **matchesRegex**: Activates when the URL matches the pattern from the specified string.
+
+## Triggering a survey with an Action
+
+An action does nothing until a survey listens for it. In the survey editor, open **Settings → Survey Trigger** and add one. A survey can listen for several actions; any one of them is enough to show it.
+
+![The Survey Trigger section with one action attached](/images/surveys/website-app-surveys/actions/survey-trigger.webp "The Survey Trigger section with one action attached")
+
+## Setting up code Actions
+
+For more granular control, you can implement actions directly in your code:
+
+<Steps>
+  <Step title="Configure action in Formbricks">
+    First, add the action via the Formbricks web interface to make it available for survey configuration. Switch the dialog to **Code** and give the action a key — that key is the string your code will send.
+
+![The Track New User Action dialog on its Code tab](/images/surveys/website-app-surveys/actions/code-action.webp "The Track New User Action dialog on its Code tab")
+
+  </Step>
+
+  <Step title="Add action tracking to your code">
+    Use formbricks.track() to send an action event to Formbricks:
+
+    ```
+    formbricks.track("action");
+    ```
+
+    Here is an example of how to fire an action when a user clicks a button:
+
+    ```javascript
+    const handleClick = () => {
+      formbricks.track("Button Clicked");
+    };
+
+    return <button onClick={handleClick}>Click Me</button>;
+    ```
+
+  </Step>
+</Steps>

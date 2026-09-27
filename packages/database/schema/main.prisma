@@ -1,0 +1,1790 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [pgvector(map: "vector")]
+}
+
+generator client {
+  provider        = "prisma-client"
+  output          = "../generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+generator json {
+  provider = "prisma-json-types-generator"
+}
+
+enum PipelineTriggers {
+  responseCreated
+  responseUpdated
+  responseFinished
+}
+
+enum WebhookSource {
+  user
+  zapier
+  make
+  n8n
+  activepieces
+}
+
+/// Represents a webhook endpoint for receiving survey-related events.
+/// Webhooks can be configured to receive notifications about response creation, updates, and completion.
+///
+/// @property id - Unique identifier for the webhook
+/// @property name - Optional display name for the webhook
+/// @property url - The endpoint URL where events will be sent
+/// @property source - Origin of the webhook (user, zapier, make, etc.)
+/// @property workspace - Associated workspace
+/// @property triggers - Types of events that trigger this webhook
+/// @property surveyIds - List of surveys this webhook is monitoring
+model Webhook {
+  id          String             @id @default(cuid())
+  name        String?
+  createdAt   DateTime           @default(now()) @map(name: "created_at")
+  updatedAt   DateTime           @default(now()) @updatedAt @map(name: "updated_at")
+  url         String
+  source      WebhookSource      @default(user)
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  triggers    PipelineTriggers[]
+  surveyIds   String[]
+  secret      String?
+
+  @@index([workspaceId])
+}
+
+/// Represents an attribute value associated with a contact.
+/// Used to store custom properties and characteristics of contacts.
+///
+/// @property id - Unique identifier for the attribute
+/// @property attributeKey - Reference to the attribute definition
+/// @property contact - The contact this attribute belongs to
+/// @property value - The string value of the attribute (used for string type + backwards compatibility)
+/// @property valueNumber - Native numeric storage for number type attributes
+/// @property valueDate - Native date storage for date type attributes
+model ContactAttribute {
+  id             String              @id @default(cuid())
+  createdAt      DateTime            @default(now()) @map(name: "created_at")
+  updatedAt      DateTime            @updatedAt @map(name: "updated_at")
+  attributeKey   ContactAttributeKey @relation(fields: [attributeKeyId], references: [id], onDelete: Cascade)
+  attributeKeyId String
+  contact        Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contactId      String
+  value          String
+  valueNumber    Float?
+  valueDate      DateTime?
+
+  @@unique([contactId, attributeKeyId])
+  @@index([attributeKeyId, value])
+  @@index([attributeKeyId, valueNumber])
+  @@index([attributeKeyId, valueDate])
+}
+
+enum ContactAttributeType {
+  default
+  custom
+}
+
+enum ContactAttributeDataType {
+  string
+  number
+  date
+}
+
+/// Defines the possible attributes that can be assigned to contacts.
+/// Acts as a schema for contact attributes within a workspace.
+///
+/// @property id - Unique identifier for the attribute key
+/// @property isUnique - Whether the attribute must have unique values across contacts
+/// @property key - The attribute identifier used in the system
+/// @property name - Display name for the attribute
+/// @property type - Whether this is a default or custom attribute
+/// @property dataType - The data type of the attribute (string, number, date)
+/// @property workspace - The workspace this attribute belongs to
+model ContactAttributeKey {
+  id               String                   @id @default(cuid())
+  createdAt        DateTime                 @default(now()) @map(name: "created_at")
+  updatedAt        DateTime                 @updatedAt @map(name: "updated_at")
+  isUnique         Boolean                  @default(false)
+  key              String
+  name             String?
+  description      String?
+  type             ContactAttributeType     @default(custom)
+  dataType         ContactAttributeDataType @default(string)
+  workspace        Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId      String
+  attributes       ContactAttribute[]
+  attributeFilters SurveyAttributeFilter[]
+
+  @@unique([key, workspaceId])
+  @@index([workspaceId, createdAt])
+}
+
+/// Represents a person or user who can receive and respond to surveys.
+/// Contacts are workspace-specific and can have multiple attributes and responses.
+///
+/// @property id - Unique identifier for the contact
+/// @property workspace - The workspace this contact belongs to
+/// @property responses - Survey responses from this contact
+/// @property attributes - Custom attributes associated with this contact
+/// @property displays - Record of surveys shown to this contact
+model Contact {
+  id          String             @id @default(cuid())
+  createdAt   DateTime           @default(now()) @map(name: "created_at")
+  updatedAt   DateTime           @updatedAt @map(name: "updated_at")
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  responses   Response[]
+  attributes  ContactAttribute[]
+  displays    Display[]
+
+  @@index([workspaceId])
+}
+
+/// Stores a user's response to a survey, including their answers and metadata.
+/// Each response is linked to a specific survey and optionally to a contact.
+///
+/// @property id - Unique identifier for the response
+/// @property finished - Whether the survey was completed
+/// @property survey - The associated survey
+/// @property contact - The optional contact who provided the response
+/// @property data - JSON object containing the actual response data
+/// @property variables - Custom variables used in the response
+/// @property ttc - Time to completion metrics
+/// @property meta - Additional metadata about the response
+model Response {
+  id                String              @id @default(cuid())
+  createdAt         DateTime            @default(now()) @map(name: "created_at")
+  updatedAt         DateTime            @default(now()) @updatedAt @map(name: "updated_at")
+  finished          Boolean             @default(false)
+  survey            Survey              @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  surveyId          String
+  contact           Contact?            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contactId         String?
+  endingId          String?
+  /// [ResponseData]
+  data              Json                @default("{}")
+  /// [ResponseVariables]
+  variables         Json                @default("{}")
+  /// [ResponseTtc]
+  ttc               Json                @default("{}")
+  /// [ResponseMeta]
+  meta              Json                @default("{}")
+  /// Why a value in `data` will not read back as its declared Embedded Data type — a failed coercion
+  /// or a truncated oversize value (ENG-1845). Server-computed on every ingest and never accepted
+  /// from the client. Null means no ingest boundary has written it, which is not the same claim as
+  /// an empty list: without this column a wrong-typed value is indistinguishable from an absent one,
+  /// and surfacing that in the UI (v2) would have nothing to read.
+  /// [ResponseIngestFlags]
+  ingestFlags       Json?               @map(name: "ingest_flags")
+  tags              TagsOnResponses[]
+  quotaLinks        ResponseQuotaLink[]
+  /// [ResponseContactAttributes]
+  contactAttributes Json?
+  // singleUseId, used to prevent multiple responses
+  singleUseId       String?
+  language          String?
+  displayId         String?             @unique
+  display           Display?            @relation(fields: [displayId], references: [id])
+  workflowRuns      WorkflowRun[]
+
+  @@unique([surveyId, singleUseId])
+  // `id` is the keyset tie-breaker for `GET /api/v3/responses`. It has to be in the index for the
+  // row-constructor page predicate `(created_at, id) < ($1, $2)` to land in the Index Cond; without it
+  // the planner filters and rescans the range on every page.
+  //
+  // The three narrow indexes below each remain alongside their wider replacement, deliberately and
+  // temporarily. Measured: the planner picks the wide one when both are present, so keeping them costs
+  // write amplification rather than a slow plan. ENG-3120 drops them once production confirms that
+  // choice — a drop is the half that cannot be undone by reverting a migration.
+  @@index([createdAt]) // superseded by ([createdAt, id]); pending removal
+  @@index([createdAt, id])
+  @@index([surveyId, createdAt]) // superseded; also the monthly response count
+  @@index([surveyId, createdAt, id])
+  @@index([contactId, createdAt]) // superseded; also the monthly identified users (persons)
+  @@index([contactId, createdAt, id])
+  @@index([surveyId, finished]) // survey list's (surveyId, finished) count aggregation — keeps it an index-only scan
+}
+
+/// Represents a label that can be applied to survey responses.
+/// Used for categorizing and organizing responses within a workspace.
+///
+/// @property id - Unique identifier for the tag
+/// @property name - Display name of the tag
+/// @property responses - Survey responses tagged with this label
+/// @property workspace - The workspace this tag belongs to
+model Tag {
+  id          String            @id @default(cuid())
+  createdAt   DateTime          @default(now()) @map(name: "created_at")
+  updatedAt   DateTime          @updatedAt @map(name: "updated_at")
+  name        String
+  responses   TagsOnResponses[]
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+/// Junction table linking tags to responses.
+/// Enables many-to-many relationship between tags and responses.
+///
+/// @property response - The tagged response
+/// @property tag - The tag applied to the response
+model TagsOnResponses {
+  responseId String
+  response   Response @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  tagId      String
+  tag        Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([responseId, tagId])
+}
+
+enum SurveyStatus {
+  draft
+  inProgress
+  paused
+  completed
+}
+
+/// Records when a survey is shown to a user.
+/// Tracks survey display history and response status.
+///
+/// @property id - Unique identifier for the display event
+/// @property survey - The survey that was displayed
+/// @property contact - The contact who saw the survey
+/// @property response - The associated response if one exists
+model Display {
+  id        String    @id @default(cuid())
+  createdAt DateTime  @default(now()) @map(name: "created_at")
+  updatedAt DateTime  @updatedAt @map(name: "updated_at")
+  survey    Survey    @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  surveyId  String
+  contact   Contact?  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contactId String?
+  response  Response?
+
+  @@index([surveyId])
+  @@index([contactId, createdAt])
+}
+
+/// Links surveys to specific trigger actions.
+/// Defines which user actions should cause a survey to be displayed.
+/// This is the connection table between Surveys and ActionClasses that determines
+/// when and under what conditions a survey should be triggered.
+///
+/// @property id - Unique identifier for the trigger
+/// @property survey - The survey to be triggered
+/// @property actionClass - The action that triggers the survey
+/// @property createdAt - When the trigger was created
+/// @property updatedAt - When the trigger was last modified
+model SurveyTrigger {
+  id            String      @id @default(cuid())
+  createdAt     DateTime    @default(now()) @map(name: "created_at")
+  updatedAt     DateTime    @updatedAt @map(name: "updated_at")
+  survey        Survey      @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  surveyId      String
+  actionClass   ActionClass @relation(fields: [actionClassId], references: [id], onDelete: Cascade)
+  actionClassId String
+
+  @@unique([surveyId, actionClassId])
+}
+
+enum SurveyAttributeFilterCondition {
+  equals
+  notEquals
+}
+
+enum SurveyQuotaAction {
+  endSurvey
+  continueSurvey
+}
+
+enum ResponseQuotaLinkStatus {
+  screenedIn
+  screenedOut
+}
+
+/// Defines targeting rules for surveys based on contact attributes.
+/// Used to show surveys only to contacts matching specific criteria.
+///
+/// @property id - Unique identifier for the filter
+/// @property attributeKey - The contact attribute to filter on
+/// @property survey - The survey being filtered
+/// @property condition - The comparison operator to use
+/// @property value - The value to compare against
+model SurveyAttributeFilter {
+  id             String                         @id @default(cuid())
+  createdAt      DateTime                       @default(now()) @map(name: "created_at")
+  updatedAt      DateTime                       @updatedAt @map(name: "updated_at")
+  attributeKey   ContactAttributeKey            @relation(fields: [attributeKeyId], references: [id], onDelete: Cascade)
+  attributeKeyId String
+  survey         Survey                         @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  surveyId       String
+  condition      SurveyAttributeFilterCondition
+  value          String
+
+  @@unique([surveyId, attributeKeyId])
+  @@index([attributeKeyId])
+}
+
+enum SurveyType {
+  link
+  app
+}
+
+enum displayOptions {
+  displayOnce
+  displayMultiple
+  displaySome
+  respondMultiple
+}
+
+enum SurveyScriptMode {
+  add
+  replace
+}
+
+/// Represents a complete survey configuration including questions, styling, and display rules.
+/// Core model for the survey functionality in Formbricks.
+///
+/// @property id - Unique identifier for the survey
+/// @property name - Display name of the survey
+/// @property type - Survey delivery method (link, web, website, app)
+/// @property status - Current state of the survey (draft, active, completed, etc)
+/// @property workspace - The workspace this survey belongs to
+/// @property questions - JSON array containing survey questions configuration
+/// @property displayOption - Rules for how often the survey can be shown
+/// @property triggers - Actions that can trigger this survey
+/// @property attributeFilters - Rules for targeting specific contacts
+/// @property customHeadScripts - Survey-specific custom HTML scripts (self-hosted only)
+/// @property customHeadScriptsMode - "add" (merge with workspace) or "replace" (override workspace)
+model Survey {
+  id                  String                  @id @default(cuid())
+  createdAt           DateTime                @default(now()) @map(name: "created_at")
+  updatedAt           DateTime                @updatedAt @map(name: "updated_at")
+  name                String
+  redirectUrl         String?
+  type                SurveyType              @default(app)
+  workspace           Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId         String
+  creator             User?                   @relation(fields: [createdBy], references: [id])
+  createdBy           String?
+  status              SurveyStatus            @default(draft)
+  /// [SurveyWelcomeCard]
+  welcomeCard         Json                    @default("{\"enabled\": false}")
+  /// [SurveyQuestions]
+  questions           Json                    @default("[]")
+  /// [SurveyBlocks]
+  blocks              Json[]                  @default([])
+  /// [SurveyEnding]
+  endings             Json[]                  @default([])
+  /// [SurveyHiddenFields]
+  hiddenFields        Json                    @default("{\"enabled\": false}")
+  /// [SurveyVariables]
+  variables           Json                    @default("[]")
+  responses           Response[]
+  quotas              SurveyQuota[]
+  displayOption       displayOptions          @default(displayOnce)
+  recontactDays       Int?
+  displayLimit        Int?
+  triggers            SurveyTrigger[]
+  /// [SurveyInlineTriggers]
+  inlineTriggers      Json?
+  attributeFilters    SurveyAttributeFilter[]
+  displays            Display[]
+  autoClose           Int?
+  autoComplete        Int?
+  delay               Int                     @default(0)
+  publishOn           DateTime?
+  closeOn             DateTime?
+  archivedAt          DateTime?
+  /// [SurveyClosedMessage]
+  surveyClosedMessage Json?
+  segmentId           String?
+  segment             Segment?                @relation(fields: [segmentId], references: [id])
+
+  /// [SurveyWorkspaceOverwrites]
+  workspaceOverwrites Json?
+
+  /// [SurveyStyling]
+  styling Json?
+
+  /// [SurveySingleUse]
+  singleUse Json? @default("{\"enabled\": false, \"isEncrypted\": true}")
+
+  isVerifyEmailEnabled        Boolean                           @default(false)
+  isBackButtonHidden          Boolean                           @default(false)
+  isAutoProgressingEnabled    Boolean                           @default(false)
+  isCaptureIpEnabled          Boolean                           @default(false)
+  // Survey-level "Anonymize responses". A column of its own rather than a reading of
+  // `isCaptureIpEnabled`: that flag also defaults to false, so deriving anonymize from
+  // `!isCaptureIpEnabled` would switch every survey that exists to anonymized and silently stop
+  // capturing country and userAgent.
+  isAnonymizeResponsesEnabled Boolean                           @default(false) @map("is_anonymize_responses_enabled")
+  pin                         String?
+  displayPercentage           Decimal?
+  languages                   SurveyLanguage[]
+  embeddedData                EmbeddedData[]
+  embeddedDataLinks           SurveyEmbeddedData[]
+  showLanguageSwitch          Boolean?
+  followUps                   SurveyFollowUp[]
+  /// [SurveyRecaptcha]
+  recaptcha                   Json?                             @default("{\"enabled\": false, \"threshold\":0.1}")
+  /// [SurveyLinkMetadata]
+  metadata                    Json                              @default("{}")
+  feedbackSourceMappings      FeedbackSourceFormbricksMapping[]
+
+  slug String? @unique
+
+  customHeadScripts     String?
+  customHeadScriptsMode SurveyScriptMode? @default(add)
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, updatedAt])
+  @@index([segmentId])
+  @@index([status, publishOn])
+  @@index([status, closeOn])
+  @@index([archivedAt])
+}
+
+/// Represents a quota configuration for a survey.
+/// Defines response limits and conditions for quota management.
+///
+/// @property id - Unique identifier for the quota
+/// @property survey - The survey this quota belongs to
+/// @property name - Display name for the quota
+/// @property limit - Maximum number of responses allowed
+/// @property conditions - JSON object containing quota conditions
+/// @property action - Action to take when quota is reached
+/// @property endingCardId - Optional ending card to show when quota is reached
+model SurveyQuota {
+  id                      String              @id @default(cuid())
+  createdAt               DateTime            @default(now()) @map(name: "created_at")
+  updatedAt               DateTime            @updatedAt @map(name: "updated_at")
+  survey                  Survey              @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  surveyId                String
+  name                    String
+  limit                   Int
+  /// [SurveyQuotaLogic]
+  logic                   Json                @default("{}")
+  action                  SurveyQuotaAction
+  endingCardId            String?
+  quotaLinks              ResponseQuotaLink[]
+  countPartialSubmissions Boolean             @default(false)
+
+  @@unique([surveyId, name])
+}
+
+/// Junction table linking responses to quotas.
+/// Tracks which responses counted towards specific quotas and their status.
+///
+/// @property response - The response that counted towards the quota
+/// @property quota - The quota this response counted towards
+/// @property status - Whether the response was screened in or out
+model ResponseQuotaLink {
+  response   Response                @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  responseId String
+  quota      SurveyQuota             @relation(fields: [quotaId], references: [id], onDelete: Cascade)
+  quotaId    String
+  status     ResponseQuotaLinkStatus
+
+  @@id([responseId, quotaId])
+  @@index([quotaId, status])
+}
+
+/// Defines follow-up actions for survey responses.
+/// Enables automated actions based on specific survey response conditions.
+///
+/// @property id - Unique identifier for the follow-up
+/// @property survey - The associated survey
+/// @property name - Display name for the follow-up
+/// @property trigger - Conditions that activate the follow-up
+/// @property action - Actions to take when triggered
+model SurveyFollowUp {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now()) @map(name: "created_at")
+  updatedAt DateTime @updatedAt @map(name: "updated_at")
+  survey    Survey   @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  surveyId  String
+  name      String
+  /// [SurveyFollowUpTrigger]
+  trigger   Json
+  /// [SurveyFollowUpAction]
+  action    Json
+}
+
+enum ActionType {
+  code
+  noCode
+}
+
+/// Represents a user action that can trigger surveys.
+/// Used to define points in the user journey where surveys can be shown.
+///
+/// @property id - Unique identifier for the action
+/// @property name - Display name of the action
+/// @property type - Whether this is a code or no-code action
+/// @property key - Unique identifier used in code implementation
+/// @property noCodeConfig - Configuration for no-code setup
+/// @property workspace - The workspace this action belongs to
+model ActionClass {
+  id             String          @id @default(cuid())
+  createdAt      DateTime        @default(now()) @map(name: "created_at")
+  updatedAt      DateTime        @updatedAt @map(name: "updated_at")
+  name           String
+  description    String?
+  type           ActionType
+  key            String?
+  /// [ActionClassNoCodeConfig]
+  noCodeConfig   Json?
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  surveyTriggers SurveyTrigger[]
+
+  @@unique([key, workspaceId])
+  @@unique([name, workspaceId])
+  @@index([workspaceId, createdAt])
+}
+
+enum IntegrationType {
+  googleSheets
+  notion
+  airtable
+  slack
+}
+
+/// Represents third-party service integrations.
+/// Enables data flow between Formbricks and external services.
+///
+/// @property id - Unique identifier for the integration
+/// @property type - The service being integrated (Google Sheets, Notion, etc.)
+/// @property workspace - The workspace this integration belongs to
+/// @property config - Service-specific configuration details
+model Integration {
+  id          String          @id @default(cuid())
+  type        IntegrationType
+  /// [IntegrationConfig]
+  config      Json
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+
+  @@unique([type, workspaceId])
+  @@index([workspaceId])
+}
+
+enum DataMigrationStatus {
+  pending
+  applied
+  failed
+}
+
+/// Tracks database schema migrations.
+/// Used to manage and track the state of data structure changes.
+///
+/// @property id - Unique identifier for the migration
+/// @property name - Name of the migration
+/// @property status - Current state of the migration (pending, applied, failed)
+/// @property startedAt - When the migration began
+/// @property finishedAt - When the migration completed
+model DataMigration {
+  id         String              @id @default(cuid())
+  startedAt  DateTime            @default(now()) @map(name: "started_at")
+  finishedAt DateTime?           @map(name: "finished_at")
+  name       String              @unique
+  status     DataMigrationStatus
+}
+
+enum WidgetPlacement {
+  bottomLeft
+  bottomRight
+  topLeft
+  topRight
+  center
+}
+
+enum SurveyOverlay {
+  none
+  light
+  dark
+}
+
+/// Main grouping mechanism for resources in Formbricks.
+/// Each organization can have multiple workspaces to separate different applications or products.
+///
+/// @property id - Unique identifier for the workspace
+/// @property name - Display name of the workspace
+/// @property organization - Reference to parent organization
+/// @property surveys - Collection of surveys in this workspace
+/// @property styling - Workspace-wide styling configuration
+/// @property config - Workspace-specific configuration
+/// @property recontactDays - Default recontact delay for surveys
+/// @property placement - Default widget placement for in-app surveys
+model Workspace {
+  id                          String                       @id @default(cuid())
+  createdAt                   DateTime                     @default(now()) @map(name: "created_at")
+  updatedAt                   DateTime                     @updatedAt @map(name: "updated_at")
+  name                        String
+  legacyEnvironmentId         String?                      @unique
+  organization                Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId              String
+  /// [Styling]
+  styling                     Json                         @default("{\"allowStyleOverwrite\":true}")
+  /// [WorkspaceConfig]
+  config                      Json                         @default("{}")
+  recontactDays               Int                          @default(7)
+  linkSurveyBranding          Boolean                      @default(true) // Determines if the survey branding should be displayed in link surveys
+  inAppSurveyBranding         Boolean                      @default(true) // Determines if the survey branding should be displayed in in-app surveys
+  placement                   WidgetPlacement              @default(bottomRight)
+  clickOutsideClose           Boolean                      @default(true)
+  overlay                     SurveyOverlay                @default(none)
+  languages                   Language[]
+  embeddedData                EmbeddedData[]
+  /// [Logo]
+  logo                        Json?
+  workspaceTeams              WorkspaceTeam[]
+  appSetupCompleted           Boolean                      @default(false)
+  customHeadScripts           String? // Custom HTML scripts for link surveys (self-hosted only)
+  feedbackDirectoryWorkspaces FeedbackDirectoryWorkspace[]
+  charts                      Chart[]
+  dashboards                  Dashboard[]
+
+  surveys              Survey[]
+  contacts             Contact[]
+  actionClasses        ActionClass[]
+  contactAttributeKeys ContactAttributeKey[]
+  webhooks             Webhook[]
+  tags                 Tag[]
+  segments             Segment[]
+  integrations         Integration[]
+  apiKeyWorkspaces     ApiKeyWorkspace[]
+  feedbackSources      FeedbackSource[]
+  workflows            Workflow[]
+  workflowRuns         WorkflowRun[]
+
+  @@unique([organizationId, name])
+}
+
+/// Represents the top-level organizational hierarchy in Formbricks.
+/// Self-hosting instances typically have a single organization, while Formbricks Cloud
+/// supports multiple organizations with multi-tenancy.
+///
+/// @property id - Unique identifier for the organization
+/// @property name - Display name of the organization
+/// @property memberships - User memberships within the organization
+/// @property workspaces - Collection of workspaces owned by the organization
+/// @property billing - JSON field containing billing information
+/// @property whitelabel - Whitelabel configuration for the organization
+/// @property isAISmartToolsEnabled - Controls access to AI smart tools (e.g. translations) that never touch collected data
+/// @property displayTimeZone - Optional IANA time zone used for human-facing response timestamps (exports, integrations) and for the calendar days behind the analytics date filters (survey summary, charts, dashboards); null means UTC
+model Organization {
+  id                    String               @id @default(cuid())
+  createdAt             DateTime             @default(now()) @map(name: "created_at")
+  updatedAt             DateTime             @updatedAt @map(name: "updated_at")
+  name                  String
+  memberships           Membership[]
+  workspaces            Workspace[]
+  billing               OrganizationBilling?
+  /// [OrganizationWhitelabel]
+  whitelabel            Json                 @default("{}")
+  invites               Invite[]
+  isAISmartToolsEnabled Boolean              @default(false)
+  displayTimeZone       String?
+  teams                 Team[]
+  apiKeys               ApiKey[]
+  feedbackDirectories   FeedbackDirectory[]
+}
+
+/// Stores billing and Stripe synchronization data for an organization.
+///
+/// @property organizationId - Reference to the organization
+/// @property stripeCustomerId - Stripe customer ID for cloud billing
+/// @property limits - Plan limits used by feature and quota checks
+/// @property usageCycleAnchor - Stable anchor used to derive the current monthly usage cycle
+/// @property stripe - Stripe synchronization snapshot data
+model OrganizationBilling {
+  organizationId   String       @id @map(name: "organization_id")
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  stripeCustomerId String?      @unique @map(name: "stripe_customer_id")
+  /// [OrganizationBillingPlanLimits]
+  limits           Json
+  usageCycleAnchor DateTime?    @map(name: "usage_cycle_anchor")
+  /// [OrganizationStripeBilling]
+  stripe           Json?
+  createdAt        DateTime     @default(now()) @map(name: "created_at")
+  updatedAt        DateTime     @updatedAt @map(name: "updated_at")
+}
+
+/// The bootstrap marker's only value (ENG-2247). A one-variant enum rather than a boolean on
+/// purpose: a unique index over a nullable boolean has a slot for `true` AND one for `false`, so the
+/// first `false` ever written would take the second slot and break every later sign-up. There is no
+/// `false` to write here, which is the same guarantee without a CHECK constraint Prisma cannot model.
+enum BootstrapAdminMarker {
+  bootstrapAdmin
+}
+
+enum OrganizationRole {
+  owner
+  manager
+  member
+  billing
+}
+
+/// Links users to organizations with specific roles.
+/// Manages organization membership and permissions.
+/// Core model for managing user access within organizations.
+///
+/// @property organization - The organization the user belongs to
+/// @property user - The member user
+/// @property accepted - Whether the user has accepted the membership
+/// @property role - User's role within the organization (owner, manager, member, billing)
+model Membership {
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  accepted       Boolean          @default(false)
+  role           OrganizationRole @default(member)
+
+  @@id([userId, organizationId])
+  @@index([organizationId])
+}
+
+/// Represents pending invitations to join an organization.
+/// Used to manage the process of adding new users to an organization.
+/// Once accepted, invites are converted into memberships.
+///
+/// @property id - Unique identifier for the invite
+/// @property email - Email address of the invited user
+/// @property name - Optional display name for the invited user
+/// @property organization - The organization sending the invite
+/// @property creator - The user who created the invite
+/// @property acceptor - The user who accepted the invite (if accepted)
+/// @property expiresAt - When the invite becomes invalid
+/// @property role - Intended role for the invited user
+/// @property teamIds - Teams the user will be added to upon acceptance
+model Invite {
+  id             String           @id @default(uuid())
+  email          String
+  name           String?
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organizationId String
+  creator        User             @relation("inviteCreatedBy", fields: [creatorId], references: [id])
+  creatorId      String
+  acceptor       User?            @relation("inviteAcceptedBy", fields: [acceptorId], references: [id], onDelete: Cascade)
+  acceptorId     String?
+  createdAt      DateTime         @default(now())
+  expiresAt      DateTime
+  role           OrganizationRole @default(member)
+  teamIds        String[]         @default([])
+
+  @@index([email, organizationId])
+  @@index([organizationId])
+}
+
+/// Represents enhanced API authentication keys with organization-level ownership.
+/// Used for authenticating API requests to Formbricks with more granular permissions.
+///
+/// @property id - Unique identifier for the API key
+/// @property label - Optional descriptive name for the key
+/// @property hashedKey - Securely stored API key
+/// @property organization - The organization this key belongs to
+/// @property createdBy - User ID who created this key
+/// @property lastUsedAt - Timestamp of last usage
+/// @property apiKeyWorkspaces - Workspaces this key has access to
+model ApiKey {
+  id                 String            @id @default(cuid())
+  createdAt          DateTime          @default(now())
+  createdBy          String?
+  lastUsedAt         DateTime?
+  label              String
+  hashedKey          String
+  lookupHash         String?           @unique
+  organizationId     String
+  organization       Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  apiKeyWorkspaces   ApiKeyWorkspace[]
+  /// [OrganizationAccess]
+  organizationAccess Json              @default("{}")
+
+  @@index([organizationId])
+}
+
+/// Defines permission levels for API keys.
+/// Controls what operations an API key can perform.
+enum ApiKeyPermission {
+  read
+  write
+  manage
+}
+
+/// Links API keys to workspaces with specific permissions.
+/// Enables granular access control for API keys across workspaces.
+///
+/// @property id - Unique identifier for the workspace access entry
+/// @property apiKey - The associated API key
+/// @property workspace - The workspace being accessed
+/// @property permission - Level of access granted
+model ApiKeyWorkspace {
+  id          String           @id @default(cuid())
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  apiKeyId    String
+  apiKey      ApiKey           @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  permission  ApiKeyPermission
+
+  @@unique([apiKeyId, workspaceId])
+  @@index([workspaceId])
+}
+
+enum IdentityProvider {
+  email
+  github
+  google
+  azuread
+  openid
+  saml
+}
+
+/// Stores third-party authentication account information.
+/// Enables OAuth and other external authentication methods.
+///
+/// @property id - Unique identifier for the account
+/// @property user - The Formbricks user who owns this account
+/// @property provider - The authentication provider (GitHub, Google, etc.)
+/// @property providerAccountId - User ID from the provider
+/// @property access_token - OAuth access token
+/// @property refresh_token - OAuth refresh token
+model Account {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now()) @map(name: "created_at")
+  updatedAt         DateTime @updatedAt @map(name: "updated_at")
+  user              User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId            String
+  type              String?
+  provider          String
+  providerAccountId String
+  access_token      String?  @db.Text
+  refresh_token     String?  @db.Text
+  expires_at        Int?
+  ext_expires_in    Int?
+  token_type        String?
+  scope             String?
+  id_token          String?  @db.Text
+  session_state     String?
+
+  // Better Auth (ENG-1054): credential password hash + OAuth token expiry timestamps.
+  // BA maps providerId←provider, accountId←providerAccountId, accessToken←access_token,
+  // refreshToken←refresh_token, idToken←id_token via account.fields in auth.ts.
+  password              String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+
+  /// Better Auth 1.7 (ENG-2343): the account's identity namespace. 1.7 keys accounts on
+  /// (issuer, accountId) and filters EVERY lookup on it — findAccountByKey, findAccountOwnerByKey,
+  /// findCredentialAccount and updatePassword. A null here is not cosmetic: password sign-in stops
+  /// finding the credential row (rejects as if the password were wrong) and a password reset matches
+  /// zero rows, so it silently succeeds while changing nothing.
+  ///
+  /// NULLABLE on purpose, even though better-auth declares it required. A NOT NULL column would fail
+  /// every INSERT from a 1.6 pod still serving during a rolling deploy. The migration backfills every
+  /// existing row; see the migration SQL for the value derivation.
+  issuer String?
+
+  // Kept alongside the new (issuer, accountId) key rather than replaced: it is what 1.6 matched on,
+  // so it keeps a rollback to 1.6 working and guards against a backfill that collapses two providers
+  // onto one issuer.
+  @@unique([provider, providerAccountId])
+  @@unique([issuer, providerAccountId])
+  @@index([userId])
+}
+
+/// Stores active authentication sessions for revocable server-side login state.
+///
+/// @property sessionToken - Opaque token stored in the browser cookie
+/// @property user - The Formbricks user who owns this session
+/// @property expires - Hard expiry for the session
+model Session {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now()) @map(name: "created_at")
+  updatedAt    DateTime @updatedAt @map(name: "updated_at")
+  sessionToken String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       String
+  expires      DateTime
+
+  // Better Auth (ENG-1054): token←sessionToken, expiresAt←expires (mapped via session.fields); ipAddress + userAgent below are new BA columns.
+  ipAddress String?
+  userAgent String?
+
+  oauthAccessTokens  oauthAccessToken[]  @relation("OAuthAccessTokenSession")
+  oauthRefreshTokens oauthRefreshToken[] @relation("OAuthRefreshTokenSession")
+
+  @@index([userId])
+}
+
+/// Stores one-time verification tokens used by Auth.js adapter flows.
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+/// Better Auth (ENG-1054) two-factor secrets. Supersedes the legacy User.twoFactorSecret /
+/// User.backupCodes columns (kept until cutover). `secret` and `backupCodes` are encrypted
+/// at rest by Better Auth using BETTER_AUTH_SECRET.
+model TwoFactor {
+  id                      String    @id @default(cuid())
+  secret                  String
+  backupCodes             String
+  userId                  String
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verified                Boolean   @default(true)
+  /// Better Auth 1.6.23+ two-factor brute-force lockout: consecutive failed verification attempts.
+  failedVerificationCount Int       @default(0)
+  /// Better Auth 1.6.23+ two-factor brute-force lockout: set once failedVerificationCount trips the limit.
+  lockedUntil             DateTime?
+
+  @@unique([userId])
+}
+
+/// Better Auth JWT signing keys for OAuth/OIDC access and ID tokens.
+model jwks {
+  id         String    @id @default(cuid())
+  publicKey  String
+  privateKey String
+  createdAt  DateTime
+  expiresAt  DateTime?
+  /// Better Auth 1.7 (ENG-2343): the JWS algorithm this key signs with, so a keyring can hold more
+  /// than one alg and `getLatestKeyByAlg` can pick the right key per resource.
+  ///
+  /// NOT optional upstream in practice, despite being declared `required: false`: `createJwk` always
+  /// puts `alg` in the row it writes (defaulting to EdDSA), so without this column every key mint is
+  /// rejected by Prisma as an unknown argument — which breaks JWT signing, and with it the whole MCP
+  /// OAuth flow, on any deployment that has yet to mint a key. Nullable because rows written before
+  /// 1.7 have no value; upstream reads treat `alg: null` as the configured default alg, so existing
+  /// keys keep working untouched.
+  alg        String?
+  /// Better Auth 1.7 (ENG-2343): the curve for EC/OKP keys. Written whenever it can be derived from
+  /// the generated key, which it can for the default EdDSA/Ed25519 config we run, so it is on the
+  /// same always-written path as `alg` above.
+  crv        String?
+}
+
+/// Better Auth OAuth 2.1 client registrations for MCP and future OAuth clients.
+model oauthClient {
+  id                      String    @id @default(cuid())
+  clientId                String    @unique
+  clientSecret            String?
+  disabled                Boolean?  @default(false)
+  skipConsent             Boolean?
+  enableEndSession        Boolean?
+  subjectType             String?
+  scopes                  String[]  @default([])
+  userId                  String?
+  user                    User?     @relation("OAuthClientUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdAt               DateTime?
+  updatedAt               DateTime?
+  name                    String?
+  uri                     String?
+  icon                    String?
+  contacts                String[]  @default([])
+  tos                     String?
+  policy                  String?
+  softwareId              String?
+  softwareVersion         String?
+  softwareStatement       String?
+  redirectUris            String[]
+  postLogoutRedirectUris  String[]  @default([])
+  tokenEndpointAuthMethod String?
+  grantTypes              String[]  @default([])
+  responseTypes           String[]  @default([])
+  /// Unwritten by Better Auth 1.7 (it dropped both from its schema), kept deliberately: they are
+  /// nullable, so keeping them makes the 1.7 migration purely additive and a rollback to 1.6 needs no
+  /// down-migration. Drop them in a separate cleanup after a bake period.
+  public                  Boolean?
+  type                    String?
+  requirePKCE             Boolean?
+  referenceId             String?
+  metadata                Json?
+
+  /// Better Auth 1.7 (ENG-2343).
+  clientDiscoveryId                String?
+  clientCredentialsScopes          String[] @default([])
+  backchannelLogoutUri             String?
+  backchannelLogoutSessionRequired Boolean?
+  applicationType                  String?
+  jwks                             String?
+  jwksUri                          String?
+  dpopBoundAccessTokens            Boolean? @default(false)
+
+  accessTokens  oauthAccessToken[]
+  refreshTokens oauthRefreshToken[]
+  consents      oauthConsent[]
+  resources     oauthClientResource[]
+
+  @@index([userId])
+}
+
+/// Better Auth opaque access token records. The token column stores Better Auth's hashed lookup value.
+/// JWT access tokens are verified through JWKS and bounded by the configured short lifetime.
+model oauthAccessToken {
+  id          String             @id @default(cuid())
+  token       String             @unique
+  clientId    String
+  client      oauthClient        @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  sessionId   String?
+  session     Session?           @relation("OAuthAccessTokenSession", fields: [sessionId], references: [id], onDelete: SetNull)
+  userId      String?
+  user        User?              @relation("OAuthAccessTokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  referenceId String?
+  refreshId   String?
+  refresh     oauthRefreshToken? @relation(fields: [refreshId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  createdAt   DateTime
+  scopes      String[]
+
+  /// Better Auth 1.7 (ENG-2343). `resources` is the RFC 8707 resource set the grant approved — the
+  /// binding this whole upgrade exists to get (GHSA-p2fr-6hmx-4528).
+  authorizationCodeId     String?
+  resources               String[]  @default([])
+  requestedUserInfoClaims String[]  @default([])
+  revoked                 DateTime?
+  confirmation            Json?
+
+  @@index([clientId])
+  @@index([sessionId])
+  @@index([userId])
+  @@index([refreshId])
+  @@index([authorizationCodeId])
+}
+
+/// Better Auth OAuth refresh tokens used by delegated MCP clients. The token column stores a hashed lookup value.
+model oauthRefreshToken {
+  id           String             @id @default(cuid())
+  token        String             @unique
+  clientId     String
+  client       oauthClient        @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  sessionId    String?
+  session      Session?           @relation("OAuthRefreshTokenSession", fields: [sessionId], references: [id], onDelete: SetNull)
+  userId       String
+  user         User               @relation("OAuthRefreshTokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  referenceId  String?
+  expiresAt    DateTime
+  createdAt    DateTime
+  revoked      DateTime?
+  authTime     DateTime?
+  scopes       String[]
+  accessTokens oauthAccessToken[]
+
+  /// Better Auth 1.7 (ENG-2343). `resources` carries the full original grant so a refresh can narrow
+  /// the resource set but never widen it.
+  authorizationCodeId     String?
+  resources               String[]  @default([])
+  requestedUserInfoClaims String[]  @default([])
+  rotatedAt               DateTime?
+  rotationReplayResponse  String?
+  rotationReplayExpiresAt DateTime?
+  confirmation            Json?
+
+  @@index([clientId])
+  @@index([sessionId])
+  @@index([userId])
+  @@index([authorizationCodeId])
+}
+
+/// Better Auth OAuth user consent grants for delegated clients.
+model oauthConsent {
+  id          String      @id @default(cuid())
+  clientId    String
+  client      oauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  userId      String?
+  user        User?       @relation("OAuthConsentUser", fields: [userId], references: [id], onDelete: Cascade)
+  referenceId String?
+  scopes      String[]
+  createdAt   DateTime
+  updatedAt   DateTime
+
+  /// Better Auth 1.7 (ENG-2343). /authorize compares the requested resources against these; without
+  /// them every pre-existing connection is forced back through the consent screen.
+  resources               String[] @default([])
+  requestedUserInfoClaims String[] @default([])
+
+  @@index([clientId])
+  @@index([userId])
+}
+
+/// Better Auth 1.7 (ENG-2343): a protected resource the authorization server issues tokens for, with
+/// its own token lifetimes, scope allow-list and claims. Replaces the flat `validAudiences` option —
+/// a token is now bound to the resource it was approved for instead of to a static allow-list.
+/// `identifier` is the RFC 8707 `resource` value and is the natural key other rows point at.
+model oauthResource {
+  id                            String                @id @default(cuid())
+  identifier                    String                @unique
+  name                          String
+  accessTokenTtl                Int?
+  refreshTokenTtl               Int?
+  signingAlgorithm              String?
+  signingKeyId                  String?
+  allowedScopes                 String[]              @default([])
+  customClaims                  Json?
+  dpopBoundAccessTokensRequired Boolean?              @default(false)
+  disabled                      Boolean?              @default(false)
+  createdAt                     DateTime?
+  updatedAt                     DateTime?
+  policyVersion                 Int?                  @default(1)
+  metadata                      Json?
+  clients                       oauthClientResource[]
+}
+
+/// Better Auth 1.7 (ENG-2343): links a client to the resources it may request tokens for. With
+/// `enforcePerClientResources` (the default) a missing row means `invalid_target` at the token
+/// endpoint, which is why the migration backfills one row per existing client.
+/// Both sides reference natural keys, matching the other oauth child tables.
+model oauthClientResource {
+  id         String        @id @default(cuid())
+  clientId   String
+  client     oauthClient   @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  resourceId String
+  resource   oauthResource @relation(fields: [resourceId], references: [identifier], onDelete: Cascade)
+  metadata   Json?
+  createdAt  DateTime?
+
+  // No separate @@index([clientId]): the composite unique above is a btree led by clientId, so it
+  // already serves every lookup and range scan on clientId alone. The sibling oauthClient* models do
+  // carry one, but none of them has a composite unique starting with clientId.
+  @@unique([clientId, resourceId])
+  @@index([resourceId])
+}
+
+/// Better Auth 1.7 (ENG-2343): replay store for `private_key_jwt` client assertions (the row id is the
+/// assertion jti). We use no private_key_jwt client authentication today, but the plugin declares the
+/// table, so omitting it risks an adapter error on a code path we do not control.
+model oauthClientAssertion {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+/// Stores the active password reset token for a user.
+/// Tokens are opaque, hashed at rest, revocable, and single-use.
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now()) @map(name: "created_at")
+  updatedAt DateTime @updatedAt @map(name: "updated_at")
+  tokenHash String   @unique @map(name: "token_hash")
+  expiresAt DateTime @map(name: "expires_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String   @unique
+
+  @@index([expiresAt])
+}
+
+/// Represents a user in the Formbricks system.
+/// Central model for user authentication and profile management.
+///
+/// @property id - Unique identifier for the user
+/// @property name - Display name of the user
+/// @property email - User's email address
+/// @property twoFactorEnabled - Whether 2FA is active
+/// @property memberships - Organizations the user belongs to
+/// @property notificationSettings - User's notification preferences
+model User {
+  id                    String    @id @default(cuid())
+  createdAt             DateTime  @default(now()) @map(name: "created_at")
+  updatedAt             DateTime  @updatedAt @map(name: "updated_at")
+  name                  String
+  email                 String    @unique
+  emailVerified         Boolean   @default(false) @map(name: "email_verified")
+  // Temporary representation of the orphaned rollback column until ENG-1826 removes it; keep it out of Prisma Client.
+  legacyEmailVerifiedAt DateTime? @map(name: "email_verified_at") @ignore
+
+  twoFactorSecret           String?
+  twoFactorEnabled          Boolean             @default(false)
+  backupCodes               String?
+  password                  String?
+  identityProvider          IdentityProvider    @default(email)
+  identityProviderAccountId String?
+  memberships               Membership[]
+  accounts                  Account[]
+  sessions                  Session[]
+  twoFactor                 TwoFactor?
+  oauthClients              oauthClient[]       @relation("OAuthClientUser")
+  oauthAccessTokens         oauthAccessToken[]  @relation("OAuthAccessTokenUser")
+  oauthRefreshTokens        oauthRefreshToken[] @relation("OAuthRefreshTokenUser")
+  oauthConsents             oauthConsent[]      @relation("OAuthConsentUser")
+  passwordResetToken        PasswordResetToken?
+  groupId                   String?
+  invitesCreated            Invite[]            @relation("inviteCreatedBy")
+  invitesAccepted           Invite[]            @relation("inviteAcceptedBy")
+  /// [UserNotificationSettings]
+  notificationSettings      Json                @default("{}")
+  /// [Locale]
+  locale                    String              @default("en-US")
+  surveys                   Survey[]
+  charts                    Chart[]             @relation("chartCreatedBy")
+  dashboards                Dashboard[]         @relation("dashboardCreatedBy")
+  feedbackSources           FeedbackSource[]
+  teamUsers                 TeamUser[]
+  workflows                 Workflow[]          @relation("workflowCreatedBy")
+  workflowVersionsPublished WorkflowVersion[]   @relation("workflowVersionPublishedBy")
+  lastLoginAt               DateTime?
+  isActive                  Boolean             @default(true)
+
+  // ENG-2247: marks the ONE account admitted by the fresh-instance exception (closed instance, no
+  // invite, zero users). The unique index is the serialization: two concurrent uninvited sign-ups
+  // both read `user.count() === 0`, but only one INSERT can carry the marker, so the second loses on
+  // the constraint instead of the race.
+  isBootstrapAdmin BootstrapAdminMarker? @unique
+}
+
+/// Defines a segment of contacts based on attributes.
+/// Used for targeting surveys to specific user groups.
+///
+/// @property id - Unique identifier for the segment
+/// @property title - Display name of the segment
+/// @property filters - Rules defining the segment
+/// @property isPrivate - Whether the segment is private
+/// @property workspace - The workspace this segment belongs to
+model Segment {
+  id          String    @id @default(cuid())
+  createdAt   DateTime  @default(now()) @map(name: "created_at")
+  updatedAt   DateTime  @updatedAt @map(name: "updated_at")
+  title       String
+  description String?
+  isPrivate   Boolean   @default(true)
+  /// [SegmentFilter]
+  filters     Json      @default("[]")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  surveys     Survey[]
+
+  @@unique([workspaceId, title])
+  @@index([workspaceId])
+}
+
+/// Represents a supported language in the system.
+/// Used for multilingual survey support.
+///
+/// @property id - Unique identifier for the language
+/// @property code - Language code (e.g., 'en-US')
+/// @property alias - Optional friendly name
+/// @property workspace - The workspace this language is enabled for
+model Language {
+  id              String           @id @default(cuid())
+  createdAt       DateTime         @default(now()) @map(name: "created_at")
+  updatedAt       DateTime         @updatedAt @map(name: "updated_at")
+  code            String
+  alias           String?
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId     String
+  surveyLanguages SurveyLanguage[]
+
+  @@unique([workspaceId, code])
+}
+
+/// Links surveys to their supported languages.
+/// Manages which languages are available for each survey.
+///
+/// @property language - The supported language
+/// @property survey - The associated survey
+/// @property default - Whether this is the default language
+/// @property enabled - Whether this language is currently active
+model SurveyLanguage {
+  language   Language @relation(fields: [languageId], references: [id], onDelete: Cascade)
+  languageId String
+  surveyId   String
+  survey     Survey   @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  default    Boolean  @default(false)
+  enabled    Boolean  @default(true)
+
+  @@id([languageId, surveyId])
+  @@index([surveyId])
+}
+
+/// Where an Embedded Data field's value comes from.
+/// `computed` is set by survey logic, `ingested` arrives from a URL param or the SDK, and
+/// `reserved` is auto-captured system metadata. Reserved fields are never stored as rows —
+/// they are a static catalog in code — but the value exists so every layer shares one type.
+enum EmbeddedDataSource {
+  computed
+  ingested
+  reserved
+}
+
+/// The declared type of an Embedded Data field's value.
+enum EmbeddedDataType {
+  string
+  number
+  boolean
+  date
+}
+
+/// Defines one Embedded Data field: the extra context stored on a response that isn't an
+/// answer to a question (brand, plan, page type, a computed score, ...).
+///
+/// A field is either **local** — used by a single survey, which is how existing variables and
+/// hidden fields are migrated — or **shared**, meaning it is part of the workspace library and can
+/// be linked by many surveys. There is no stored flag for that: `surveyId` is the owner and `key`
+/// is the library name, so a local field has `surveyId` set and `key` null, and a shared field the
+/// other way round. Deriving it rather than storing a boolean removes a column that could drift
+/// out of step with the two fields it stands for.
+///
+/// @property key - Library name, unique per workspace and immutable. Null for local fields
+/// @property name - Human-readable display label
+/// @property source - Where the value comes from (computed | ingested). `reserved` is part of the
+/// shared enum but never stored as a row: those fields are a static catalog in code
+/// @property dataType - Declared value type, used for coercion at ingest
+/// @property defaultValue - Initial value (computed) or fallback when nothing arrives (ingested)
+/// @property locked - Ingested only: ignore external writes and use the default instead
+/// @property survey - The owning survey for a local field; cascades so nothing is orphaned
+model EmbeddedData {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now()) @map(name: "created_at")
+  updatedAt   DateTime @updatedAt @map(name: "updated_at")
+  key         String?
+  name        String
+  description String?
+
+  source       EmbeddedDataSource
+  dataType     EmbeddedDataType   @default(string)
+  /// [EmbeddedDataDefaultValue]
+  defaultValue Json?
+  locked       Boolean            @default(false)
+
+  // Composite for the same reason SurveyEmbeddedData's are: on its own, `surveyId` would let a
+  // local field name a survey from a different workspace. `surveyId` is nullable and Postgres
+  // skips a multi-column foreign key when any of its columns is NULL, so shared fields (no owning
+  // survey) are unaffected.
+  survey      Survey?              @relation(fields: [surveyId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  surveyId    String?
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  surveyLinks SurveyEmbeddedData[]
+
+  // Only shared fields carry a key, and Postgres treats NULLs as distinct, so any number of
+  // local fields can coexist in a workspace while the library itself stays de-duplicated.
+  @@unique([workspaceId, key])
+  // Target for SurveyEmbeddedData's composite foreign key, which is what stops a survey linking
+  // a field definition from another workspace.
+  @@unique([id, workspaceId])
+  @@index([surveyId])
+}
+
+/// Links a survey to an Embedded Data field and records the key that field's value is stored
+/// under inside that survey.
+///
+/// `workspaceId` is part of both foreign keys on purpose: `surveyId` and `embeddedDataId` alone are
+/// independent, so nothing would stop a survey in one workspace linking a field defined in another.
+/// Referencing `(id, workspaceId)` on both sides makes a cross-workspace pair unrepresentable, and
+/// puts the workspace scope every query needs on the row instead of behind a join through Survey.
+///
+/// @property storageKey - The key the value lives under: a cuid for computed fields, the field
+/// name for ingested ones. Migrated fields keep their original key, which is what lets existing
+/// recall tokens, logic conditions and stored responses keep resolving untouched.
+///
+/// @property order - Position within this survey's field list, dense from 0. Lives on the link
+/// rather than on `EmbeddedData` because a shared definition sits at a different position in each
+/// survey that links it. Deliberately has no default: every writer knows the position it is writing,
+/// so a missing one should be a type error rather than a row that silently sorts to the front.
+model SurveyEmbeddedData {
+  id             String @id @default(cuid())
+  workspaceId    String
+  surveyId       String
+  embeddedDataId String
+  storageKey     String
+  order          Int
+
+  survey       Survey       @relation(fields: [surveyId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  embeddedData EmbeddedData @relation(fields: [embeddedDataId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([surveyId, embeddedDataId])
+  @@unique([surveyId, storageKey])
+  @@index([embeddedDataId])
+  @@index([surveyId, order])
+}
+
+/// Represents a team within an organization.
+/// Enables group-based access control and collaboration.
+///
+/// @property id - Unique identifier for the team
+/// @property name - Display name of the team
+/// @property organization - The parent organization
+/// @property teamUsers - Users who are part of this team
+/// @property workspaceTeams - Workspaces this team has access to
+model Team {
+  id             String          @id @default(cuid())
+  createdAt      DateTime        @default(now()) @map(name: "created_at")
+  updatedAt      DateTime        @updatedAt @map(name: "updated_at")
+  name           String
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  teamUsers      TeamUser[]
+  workspaceTeams WorkspaceTeam[]
+
+  @@unique([organizationId, name])
+}
+
+enum TeamUserRole {
+  admin
+  contributor
+}
+
+/// Links users to teams with specific roles.
+/// Manages team membership and permissions.
+///
+/// @property team - The associated team
+/// @property user - The team member
+/// @property role - User's role within the team
+model TeamUser {
+  createdAt DateTime     @default(now()) @map(name: "created_at")
+  updatedAt DateTime     @updatedAt @map(name: "updated_at")
+  teamId    String
+  team      Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      TeamUserRole
+
+  @@id([teamId, userId])
+  @@index([userId])
+}
+
+enum WorkspaceTeamPermission {
+  read
+  readWrite
+  manage
+}
+
+/// Defines team access to specific workspaces.
+/// Manages workspace-level permissions for teams.
+///
+/// @property workspace - The accessed workspace
+/// @property team - The team receiving access
+/// @property permission - Level of access granted
+model WorkspaceTeam {
+  createdAt   DateTime                @default(now()) @map(name: "created_at")
+  updatedAt   DateTime                @updatedAt @map(name: "updated_at")
+  workspaceId String
+  workspace   Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  teamId      String
+  team        Team                    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  permission  WorkspaceTeamPermission @default(read)
+
+  @@id([workspaceId, teamId])
+  @@index([teamId])
+}
+
+enum ChartType {
+  area
+  bar
+  pie
+  big_number
+}
+
+/// Represents a chart/visualization that can be used in multiple dashboards.
+/// Charts are reusable components that query analytics data.
+///
+/// @property id - Unique identifier for the chart
+/// @property name - Display name of the chart
+/// @property type - Type of visualization (bar, line, pie, etc.)
+/// @property workspace - The workspace this chart belongs to
+/// @property query - Cube.js query configuration (JSON)
+/// @property config - Chart-specific configuration (colors, labels, etc.)
+/// @property createdBy - User who created the chart
+/// @property dashboards - Dashboards that use this chart
+model Chart {
+  id                  String            @id @default(cuid())
+  createdAt           DateTime          @default(now()) @map(name: "created_at")
+  updatedAt           DateTime          @updatedAt @map(name: "updated_at")
+  name                String
+  type                ChartType
+  workspace           Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId         String
+  /// [ChartQuery] - Cube.js query configuration
+  query               Json              @default("{}")
+  /// [ChartConfig] - Visualization configuration (colors, labels, formatting)
+  config              Json              @default("{}")
+  creator             User?             @relation("chartCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdBy           String?
+  feedbackDirectory   FeedbackDirectory @relation(fields: [feedbackDirectoryId], references: [id])
+  feedbackDirectoryId String
+  widgets             DashboardWidget[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, createdAt])
+  @@index([feedbackDirectoryId])
+}
+
+/// Represents a dashboard containing multiple charts.
+/// Dashboards aggregate analytics insights at the workspace level.
+///
+/// @property id - Unique identifier for the dashboard
+/// @property name - Display name of the dashboard
+/// @property workspace - The workspace this dashboard belongs to
+/// @property widgets - Charts on this dashboard
+/// @property createdBy - User who created the dashboard
+model Dashboard {
+  id          String            @id @default(cuid())
+  createdAt   DateTime          @default(now()) @map(name: "created_at")
+  updatedAt   DateTime          @updatedAt @map(name: "updated_at")
+  name        String
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceId String
+  creator     User?             @relation("dashboardCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdBy   String?
+  widgets     DashboardWidget[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, createdAt])
+}
+
+/// Represents a chart widget on a dashboard.
+/// Widgets are positioned using a grid layout system.
+///
+/// @property id - Unique identifier for the widget
+/// @property dashboard - The dashboard this widget belongs to
+/// @property chart - The chart displayed in this widget (chart name is used for display)
+/// @property layout - Grid layout configuration (x, y, width, height)
+/// @property order - Display order within the dashboard
+model DashboardWidget {
+  id          String    @id @default(cuid())
+  createdAt   DateTime  @default(now()) @map(name: "created_at")
+  updatedAt   DateTime  @updatedAt @map(name: "updated_at")
+  dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
+  dashboardId String
+  chart       Chart     @relation(fields: [chartId], references: [id], onDelete: Cascade)
+  chartId     String
+  /// [WidgetLayout] - Grid layout: { x, y, w, h }
+  layout      Json      @default("{\"x\":0,\"y\":0,\"w\":4,\"h\":3}")
+  order       Int       @default(0)
+
+  @@unique([dashboardId, chartId])
+  @@index([dashboardId, order])
+}
+
+enum FeedbackSourceType {
+  formbricks_survey
+  csv
+}
+
+enum FeedbackSourceStatus {
+  active
+  paused
+  error
+}
+
+/// Which survey responses a Formbricks feedback source imports into Hub.
+/// completedOnly matches the live ingestion path, which only runs on responseFinished.
+/// all additionally imports partial responses — answers a respondent typed but never submitted.
+enum FeedbackSourceImportMode {
+  completedOnly
+  all
+}
+
+/// Whether a formbricks_survey source tracks every supported element of the surveys it maps, or an
+/// explicit subset the operator curated. Ignored by csv sources, which map fields instead.
+///
+/// Orthogonal to FeedbackSourceImportMode: that decides which responses are imported, this decides
+/// which questions a response is imported for.
+///
+/// This exists because a question added to a survey after the source was connected is
+/// indistinguishable, from stored state alone, from a question the operator deliberately excluded —
+/// survey elements carry no timestamps. Recording the intent at write time (where the full candidate
+/// set IS known) is the same approach webhooks take with `surveyIds: []` meaning "all surveys", and
+/// segment survey-interaction filters with `surveyScope: "any" | "specific"`.
+///
+/// Defaults to `specific` so sources that predate the column keep their current behaviour: they gain
+/// no mappings on their own until the operator next saves the source, at which point the scope is
+/// derived from the selection they submit.
+enum FeedbackSourceElementScope {
+  all
+  specific
+}
+
+enum HubFieldType {
+  text
+  categorical
+  nps
+  csat
+  ces
+  rating
+  number
+  boolean
+  date
+}
+
+/// A feedback source — connects external data into Unify Feedback for record creation.
+/// Naming note: "FeedbackSource" is the Unify Feedback domain term; the word "Connector"
+/// is reserved for the Workflows domain (see docs/development/standards/practices/naming-conventions.mdx).
+///
+/// @property id - Unique identifier for the feedback source
+/// @property name - Display name for the feedback source
+/// @property type - Type of feedback source (formbricks_survey, csv, …)
+/// @property status - Current state of the feedback source (active, paused, error)
+/// @property workspace - The workspace this feedback source belongs to
+/// @property feedbackDirectory - Hub directory the feedback source writes into
+/// @property formbricksMappings - Element mappings for Formbricks feedback sources
+/// @property fieldMappings - Field mappings for other feedback source types
+model FeedbackSource {
+  id                  String                            @id @default(cuid())
+  createdAt           DateTime                          @default(now()) @map(name: "created_at")
+  updatedAt           DateTime                          @updatedAt @map(name: "updated_at")
+  name                String
+  type                FeedbackSourceType
+  status              FeedbackSourceStatus              @default(active)
+  /// Defaults to completedOnly so a new source agrees with the live ingestion path, which only
+  /// fires on responseFinished. Existing rows take the default; nothing is re-imported.
+  importMode          FeedbackSourceImportMode          @default(completedOnly) @map(name: "import_mode")
+  elementScope        FeedbackSourceElementScope        @default(specific)
+  workspaceId         String
+  workspace           Workspace                         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  feedbackDirectoryId String
+  feedbackDirectory   FeedbackDirectory                 @relation(fields: [feedbackDirectoryId], references: [id], onDelete: Cascade)
+  formbricksMappings  FeedbackSourceFormbricksMapping[]
+  fieldMappings       FeedbackSourceFieldMapping[]
+  lastSyncAt          DateTime?                         @map(name: "last_sync_at")
+  createdBy           String?                           @map(name: "created_by")
+  creator             User?                             @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  // Composite FK anchoring the source to an actual directory<->workspace assignment.
+  // Defense-in-depth on top of the action-layer check: the DB refuses any (directory, workspace)
+  // pair that is not assigned. onDelete: NoAction (checked at statement end) lets the direct
+  // workspace/feedbackDirectory Cascade FKs delete the source first when their parent is removed.
+  feedbackDirectoryWorkspace FeedbackDirectoryWorkspace @relation(fields: [feedbackDirectoryId, workspaceId], references: [feedbackDirectoryId, workspaceId], onDelete: NoAction, onUpdate: Cascade)
+
+  @@unique([id, workspaceId])
+  @@unique([workspaceId, name])
+  @@index([type])
+  @@index([feedbackDirectoryId, workspaceId])
+}
+
+/// Maps survey elements to Hub FeedbackRecords for Formbricks feedback sources.
+/// Each row represents one element that will create FeedbackRecords when answered.
+///
+/// @property id - Unique identifier for the mapping
+/// @property feedbackSource - The parent feedback source
+/// @property survey - The survey containing the element
+/// @property elementId - The element ID within the survey (from blocks[].elements[].id)
+/// @property hubFieldType - The field_type to use in Hub (text, nps, rating, etc.)
+/// @property customFieldLabel - Optional override for the element headline as field_label in Hub
+model FeedbackSourceFormbricksMapping {
+  id               String         @id @default(cuid())
+  createdAt        DateTime       @default(now()) @map(name: "created_at")
+  feedbackSourceId String         @map(name: "feedback_source_id")
+  workspaceId      String
+  feedbackSource   FeedbackSource @relation(fields: [feedbackSourceId, workspaceId], references: [id, workspaceId], onDelete: Cascade, map: "FeedbackSourceFormbricksMapping_feedbackSourceId_workspaceId_fk")
+  surveyId         String
+  survey           Survey         @relation(fields: [surveyId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  elementId        String
+  hubFieldType     HubFieldType
+  customFieldLabel String?        @map(name: "custom_field_label")
+
+  @@unique([workspaceId, feedbackSourceId, surveyId, elementId], map: "FeedbackSourceFormbricksMapping_workspaceId_feedbackSourceId_su")
+  @@index([workspaceId, surveyId])
+  @@index([surveyId])
+}
+
+/// Generic field mapping for non-Formbricks feedback sources (CSV today; webhook/email/slack later).
+/// Maps source fields to Hub FeedbackRecord fields.
+///
+/// @property id - Unique identifier for the mapping
+/// @property feedbackSource - The parent feedback source
+/// @property sourceFieldId - Field path for webhook (e.g., "user.id"), column name for CSV
+/// @property targetFieldId - Hub field (collected_at, field_id, value_text, etc.)
+/// @property staticValue - If set, use this value instead of reading from sourceFieldId
+model FeedbackSourceFieldMapping {
+  id               String         @id @default(cuid())
+  createdAt        DateTime       @default(now()) @map(name: "created_at")
+  feedbackSourceId String         @map(name: "feedback_source_id")
+  workspaceId      String
+  feedbackSource   FeedbackSource @relation(fields: [feedbackSourceId, workspaceId], references: [id, workspaceId], onDelete: Cascade, map: "FeedbackSourceFieldMapping_feedbackSourceId_workspaceId_fkey")
+  sourceFieldId    String         @map(name: "source_field_id")
+  targetFieldId    String         @map(name: "target_field_id")
+  staticValue      String?        @map(name: "static_value")
+
+  @@unique([workspaceId, feedbackSourceId, sourceFieldId, targetFieldId], map: "FeedbackSourceFieldMapping_workspaceId_feedbackSourceId_sourceF")
+}
+
+/// Represents a feedback directory (Hub tenant) owned by an organization.
+/// Directories group feedback data and are assigned to workspaces for access control.
+///
+/// @property id - Unique identifier for the directory
+/// @property name - Display name of the directory
+/// @property isArchived - Soft delete flag
+/// @property organization - The parent organization
+/// @property workspaces - Workspaces assigned to this directory
+model FeedbackDirectory {
+  id              String                       @id @default(cuid())
+  createdAt       DateTime                     @default(now()) @map(name: "created_at")
+  updatedAt       DateTime                     @updatedAt @map(name: "updated_at")
+  name            String
+  isArchived      Boolean                      @default(false)
+  organizationId  String
+  organization    Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspaces      FeedbackDirectoryWorkspace[]
+  feedbackSources FeedbackSource[]
+  charts          Chart[]
+
+  @@unique([organizationId, name])
+}
+
+/// Links feedback directories to workspaces (workspaces).
+/// Manages which workspaces can access a given directory.
+///
+/// @property feedbackDirectory - The directory being accessed
+/// @property workspace - The workspace receiving access
+model FeedbackDirectoryWorkspace {
+  createdAt           DateTime          @default(now()) @map(name: "created_at")
+  updatedAt           DateTime          @updatedAt @map(name: "updated_at")
+  feedbackDirectoryId String
+  feedbackDirectory   FeedbackDirectory @relation(fields: [feedbackDirectoryId], references: [id], onDelete: Cascade)
+  workspaceId         String
+  workspace           Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  feedbackSources     FeedbackSource[]
+
+  @@id([feedbackDirectoryId, workspaceId])
+  @@index([workspaceId])
+}
+
+/// Durable PostgreSQL queue for rebuilding SpiceDB relationships after an authorization source changes.
+/// Source-table triggers insert these rows in the same transaction as the mutation. Identifiers are
+/// operationally sensitive and must never be included in logs, metrics, or CLI output.
+///
+/// This model declares NO indexes on purpose. All three live in
+/// `migration/20260818120000_add_authzed_projection_outbox/migration.sql`, because each one is
+/// partial (`WHERE "processedAt" IS NULL AND ...`) and Prisma's `@@index` has no `where`. Declaring
+/// approximate non-partial copies here would be worse than declaring none: `prisma db push` would
+/// see a name match with a different definition, drop and recreate them without the predicate, and
+/// the migration's `CREATE INDEX IF NOT EXISTS` would then skip them — leaving a silently wrong
+/// shape that carries a week of delivered rows on every hot-path lookup. Deployments are unaffected
+/// either way (`prisma migrate deploy` never reads this file); a dev who runs `db push` restores
+/// them by rerunning the migration, which is the same contract its triggers already live under.
+model AuthzedProjectionOutbox {
+  id                String    @id @default(uuid())
+  targetType        String
+  primaryId         String
+  secondaryId       String?
+  isRevocation      Boolean   @default(false)
+  /// Total delivery attempts. Drives the retry backoff and reports how hard delivery was tried.
+  attempts          Int       @default(0)
+  /// Non-retryable failures attributable to this event alone. The only input to dead-lettering, so
+  /// that a SpiceDB outage of any duration cannot dead-letter events that were never the problem.
+  permanentFailures Int       @default(0)
+  availableAt       DateTime  @default(now())
+  leasedAt          DateTime?
+  leaseExpiresAt    DateTime?
+  leaseOwner        String?
+  processedAt       DateTime?
+  deadLetteredAt    DateTime?
+  lastAttemptAt     DateTime?
+  lastErrorCode     String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}

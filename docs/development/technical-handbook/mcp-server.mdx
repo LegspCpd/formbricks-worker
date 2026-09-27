@@ -1,0 +1,1763 @@
+---
+title: "MCP Server"
+description: "Configure and use the Formbricks v3 Surveys and Workflows MCP server"
+icon: "robot"
+---
+
+## Overview
+
+The Formbricks MCP server exposes v3 Surveys and Workflows tool surfaces for AI agents. It runs inside
+the Formbricks web app at `/api/mcp` and reuses the same v3 API authentication, authorization,
+rate limiting, response handling, and audit logging paths as the REST routes.
+
+<Note>
+  OAuth 2.1 is the preferred authentication path for MCP clients. Formbricks API keys remain supported as a
+  backwards-compatible fallback for local development, self-hosters, and clients that do not support MCP OAuth
+  yet.
+</Note>
+
+<Note>
+  Looking for step-by-step setup guides for Claude Code, the Claude apps, and Codex? See [Connect AI agents
+  (MCP)](/platform/mcp/overview). This handbook covers the technical internals.
+</Note>
+
+## Endpoint
+
+Use the streamable HTTP MCP endpoint on the Formbricks app:
+
+```text
+https://app.formbricks.com/api/mcp
+```
+
+For local development:
+
+```text
+http://localhost:3000/api/mcp
+```
+
+The route supports `POST` requests, runs with the Next.js Node.js runtime, and sets private no-store
+response headers. Browser-origin MCP requests must come from the configured Formbricks app origin.
+
+### Protocol revisions
+
+The server implements protocol revision **2026-07-28** and keeps serving the 2025 era from the same
+endpoint, so a client on an older revision does not need to change anything. The MCP TypeScript SDK
+answers the legacy `initialize` handshake alongside `server/discover`, and `mcp-handler` serves with
+`legacy: "stateless"`.
+
+Three parts of the revision are handled by the SDK rather than by our code: the `server/discover` RPC,
+the `resultType` field now required on every result, and the `ttlMs` / `cacheScope` cache hints (which
+default conservatively to `ttlMs: 0` and `cacheScope: "private"`).
+
+Notable removals in the revision that used to be configured here: protocol-level sessions and the
+`Mcp-Session-Id` header, the `initialize` handshake as a precondition, and the HTTP+SSE transport. The
+handler therefore takes no `sessionIdGenerator`, `disableSse`, `basePath`, or `maxDuration` option — the
+route this handler is mounted on is the only mount point.
+
+OAuth clients discover the protected resource metadata here:
+
+```text
+https://app.formbricks.com/.well-known/oauth-protected-resource/api/mcp
+```
+
+The metadata advertises `/api/mcp` as the protected resource and points clients to the Better Auth
+issuer under `/api/auth`.
+
+## Authentication
+
+### OAuth 2.1
+
+OAuth clients use Authorization Code + PKCE with Dynamic Client Registration. Registration is open
+(no initial access token — MCP clients self-register), so it accepts only `http` loopback redirect
+URIs: `localhost`, `127.0.0.1` or `[::1]` on any port, which is what every MCP client uses. A
+registration claiming any other redirect URI — including an `https` one — is refused with
+`400 invalid_redirect_uri`, because a remote address is one an attacker could receive an
+authorization code at. The MCP protected resource is:
+
+```text
+https://app.formbricks.com/api/mcp
+```
+
+The authorization server issuer is:
+
+```text
+https://app.formbricks.com/api/auth
+```
+
+Discovery endpoints:
+
+| Endpoint                                           | Purpose                              |
+| -------------------------------------------------- | ------------------------------------ |
+| `/api/auth/.well-known/oauth-authorization-server` | Better Auth authorization metadata   |
+| `/api/auth/.well-known/openid-configuration`       | OpenID Connect metadata              |
+| `/.well-known/oauth-authorization-server/api/auth` | RFC 8414 path-insertion alias        |
+| `/.well-known/openid-configuration/api/auth`       | RFC 8414 OpenID path-insertion alias |
+| `/.well-known/oauth-protected-resource`            | MCP protected resource metadata      |
+| `/.well-known/oauth-protected-resource/api/mcp`    | MCP resource-specific metadata       |
+
+Supported scopes:
+
+| Scope | Use |
+| --- | --- |
+| `surveys:read` | `list_surveys`, `get_survey`, `validate_survey` |
+| `surveys:write` | `create_survey`, `patch_survey`, `edit_survey_blocks`, `set_survey_block_order`, `delete_survey` |
+| `workflows:read` | `list_workflows`, `get_workflow`, `list_workflow_runs`, `get_workflow_run`, `test_workflow` |
+| `workflows:write` | `create_workflow`, `patch_workflow`, `duplicate_workflow`, `delete_workflow`, and the enable/disable/archive/unarchive mutations |
+| `feedbackRecords:read` | `list_feedback_datasets`, `list_feedback_records`, `count_feedback_records`, `get_feedback_record`, `search_feedback_records`, `find_similar_feedback_records` |
+| `feedbackRecords:write` | `create_feedback_record`, `create_feedback_records`, `update_feedback_record`, `delete_feedback_record` |
+| `responses:read` | `list_responses`, `count_responses`, `get_response` |
+| `responses:write` | `validate_response`, `create_response`, `update_response`, `delete_response`, `batch_delete_responses` |
+| `openid` | OpenID Connect subject interoperability |
+| `profile` | User profile claims |
+| `email` | User email claim |
+| `offline_access` | Refresh tokens for MCP clients |
+
+**The rule:** every MCP tool is registered through `registerScopedTool`, which takes the required
+scope(s) as a mandatory argument and runs the gate before the handler. Read tools declare
+`<resource>:read`; every mutating tool declares `<resource>:write`. A tool cannot be registered
+without declaring a scope, so a new tool inherits enforcement by construction — the gate returns a
+`403 insufficient_scope` before the handler touches a v3 operation. Tools that more than one scope
+group legitimately reaches pass `{ anyOf: [...] }` instead of a plain list, which keeps them on the
+same registration path rather than a hand-rolled gate.
+
+**There are no exceptions, and tests are what keep it that way.** The feedback-record tools were one
+for a while — they gated inside their own handler factories and registered through
+`server.registerTool` directly, which meant every handler was checked but a *new* tool added outside
+those factories would have registered unguarded. ENG-2119 moved all ten onto `registerScopedTool` and
+made `guardMcpScopes` / `guardMcpAnyScope` private again, so the guards are no longer reachable from a
+tool module.
+
+Be precise about what that guarantees. Privacy removes the hand-rolled gate, and the compiler stops you
+forgetting `registerScopedTool`'s scope argument — but it cannot stop a module calling
+`server.registerTool(...)` directly, because `server` is an argument to every tool module. No type
+system reaches that. The checks that do: a test pins `registerScopedTool` as the only export of
+`guard-scopes.ts`, and `feedback-records.test.ts` drives all ten tools with the opposite scope, which
+goes red if a tool is registered unguarded *or* wired to the wrong scope.
+
+**`responses:read` / `responses:write` are grantable but not yet advertised.** They are in
+`MCP_OAUTH_SCOPES` and in the resource's `allowedScopes`, so a client that asks for one is granted it —
+but they are deliberately absent from `MCP_RESOURCE_SCOPES`, which is what the protected-resource
+metadata publishes. Advertising a scope to clients that registered before it existed earns them
+`invalid_scope` on their next consent, so the pair is added to that list only once the integrator
+notice has gone out (ENG-2862). Until then the response tools are registered and gated but reachable
+only by a client that requests the scope explicitly.
+
+**There is no single mandatory baseline scope.** Authentication requires *at least one* resource scope
+(`MCP_RESOURCE_SCOPES`), so a workflows-only or `feedbackRecords:read`-only grant is a legitimate MCP
+client. `list_workspaces` — the workspaceId-discovery prerequisite for every resource tool — therefore
+gates on any resource read scope rather than one specific one; its result is derived from the caller's
+own memberships and key grants, so admitting any read scope exposes nothing extra.
+
+The authorization server supports all of the above, but the MCP protected-resource metadata
+(`/.well-known/oauth-protected-resource/api/mcp`) advertises only the resource scopes an MCP client
+needs — `surveys:read`, `surveys:write`, `workflows:read`, `workflows:write`, `feedbackRecords:read`,
+`feedbackRecords:write`, and `offline_access`. Clients derive their Dynamic Client Registration scopes
+from that list, so `offline_access` must be advertised there for clients to be issued refresh tokens
+(`openid`/`profile`/`email` are OIDC scopes the MCP resource does not require).
+
+<Warning>
+  Adding a resource scope breaks already-connected OAuth clients until they re-register. The
+  authorization server validates `/authorize` against the scopes the **client** registered with, so a
+  client registered before the change requests the newly advertised scope and is rejected with
+  `invalid_scope` — it does not fall back to the scopes it already holds, and re-consenting does not help
+  because the same `client_id` is reused. The client has to run Dynamic Client Registration again: remove
+  and re-add the MCP server (for example `claude mcp remove <name>` then `claude mcp add …`), or delete
+  its `oauthClient` row so the next connection re-registers. Ship a release note whenever this list
+  changes.
+</Warning>
+
+OAuth scopes gate MCP tool categories at the token layer. Actual workspace access is still evaluated
+at tool execution through the existing v3 authorization checks for the signed-in Formbricks user, so
+a token scope and a workspace role are independent gates — a call must satisfy both.
+
+Scope groups are **independent**: a token authenticates as long as it holds at least one resource
+scope, so a `feedbackRecords:read`-only grant is valid and simply can't reach the survey tools.
+`list_workspaces` is the shared discovery tool and accepts either read scope.
+
+### API-key fallback
+
+API-key MCP access remains supported. Authenticate with a Formbricks API key in a request header:
+
+```http
+Authorization: Bearer fbk_...
+```
+
+or:
+
+```http
+x-api-key: fbk_...
+```
+
+Do not pass credentials in the query string. The MCP route rejects query credential names such as
+`api_key`, `x-api-key`, `access_token`, `token`, and `authorization` case-insensitively.
+
+API key permissions are enforced through the same workspace access checks as the v3 REST API:
+
+| Tool | Minimum Workspace Permission |
+| --- | --- |
+| `list_responses` | `read` |
+| `count_responses` | `read` |
+| `get_response` | `read` |
+| `validate_response` | `write` or `manage` — a dry run, but it resolves the same references the write does |
+| `create_response` | `write` or `manage` |
+| `update_response` | `write` or `manage` |
+| `delete_response` | `manage` |
+| `batch_delete_responses` | `manage` |
+| `list_surveys` | `read` |
+| `get_survey` | `read` |
+| `create_survey` | `write` or `manage` |
+| `validate_survey` | `read` — a dry run; it validates a create or patch payload without writing |
+| `patch_survey` | `write` or `manage` |
+| `edit_survey_blocks` | `write` or `manage` |
+| `set_survey_block_order` | `write` or `manage` |
+| `delete_survey` | `write` or `manage` |
+| `list_workflows` | `read` |
+| `get_workflow` | `read` |
+| `list_workflow_runs` | `read` |
+| `get_workflow_run` | `read` |
+| `test_workflow` | `read` — a dry run; it validates the definition and resolves its trigger references, creating no run |
+| `create_workflow` | `write` or `manage` |
+| `patch_workflow` | `write` or `manage` |
+| `duplicate_workflow` | `write` or `manage` |
+| `delete_workflow` | `write` or `manage` |
+| `enable_workflow` | `write` or `manage` |
+| `disable_workflow` | `write` or `manage` |
+| `archive_workflow` | `write` or `manage` |
+| `unarchive_workflow` | `write` or `manage` |
+| `list_feedback_datasets` | `read` |
+| `list_feedback_records` | `read` |
+| `count_feedback_records` | `read` |
+| `get_feedback_record` | `read` |
+| `search_feedback_records` | `read` |
+| `find_similar_feedback_records` | `read` |
+| `create_feedback_record` | `write` or `manage` |
+| `create_feedback_records` | `write` or `manage` |
+| `update_feedback_record` | `write` or `manage` |
+| `delete_feedback_record` | `manage` |
+
+Synthesized MCP scopes for an API key: `surveys:read` + `workflows:read` + `feedbackRecords:read`
+always; the matching `:write` scopes when the key has `write` or `manage` on any workspace. The scope
+gate and the per-workspace access check above are independent — a `:write` tool requires **both** the
+`:write` scope on the token and write/manage on the target workspace.
+
+<Warning>
+  Store fallback MCP API keys as environment variables or client secrets. Do not commit API keys into MCP
+  client config files.
+</Warning>
+
+## Local Setup
+
+Start Formbricks and prepare the database:
+
+```bash
+pnpm db:up
+pnpm db:migrate:dev
+pnpm --filter @formbricks/web dev
+```
+
+<Note>
+  Restart the dev server after changing tool registrations. The MCP server is built once at module scope by
+  `createMcpHandler`, so hot reload does not pick up an added, removed or renamed tool — `tools/list` keeps
+  serving the previous set until the process restarts.
+</Note>
+
+Verify OAuth discovery:
+
+```bash
+curl -sS http://localhost:3000/.well-known/oauth-protected-resource/api/mcp
+curl -sS http://localhost:3000/.well-known/oauth-authorization-server/api/auth
+```
+
+OAuth-capable MCP clients should dynamically register a public client and request `resource` equal to
+the MCP URL:
+
+```text
+http://localhost:3000/api/mcp
+```
+
+Manual Dynamic Client Registration smoke test:
+
+```bash
+curl -sS -X POST http://localhost:3000/api/auth/oauth2/register \
+  -H "Content-Type: application/json" \
+  --data '{
+    "client_name": "MCP Inspector",
+    "redirect_uris": ["http://127.0.0.1:6274/oauth/callback"],
+    "token_endpoint_auth_method": "none",
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "scope": "openid profile email offline_access surveys:read surveys:write workflows:read workflows:write feedbackRecords:read feedbackRecords:write"
+  }'
+```
+
+<Note>
+  This passes `scope` explicitly, so it does **not** reproduce a real client's behavior — real MCP clients
+  register with the scopes from the protected-resource metadata's `scopes_supported` (`surveys:read
+  surveys:write workflows:read workflows:write feedbackRecords:read feedbackRecords:write offline_access`).
+  Because the authorization server validates the `/authorize` request against the client's **registered**
+  scopes, a client that registers with a narrower set than it later requests (e.g. it registers surveys-only
+  but requests `offline_access`) is rejected with `invalid_scope`. To smoke-test the real path, omit `scope`
+  and let the client adopt the advertised set, or pass exactly what the metadata advertises.
+</Note>
+
+<Note>
+  For the same reason, the `scope` in the MCP endpoint's 401 `WWW-Authenticate` challenge is exactly
+  the metadata's `scopes_supported`, not a subset — a client that hits the 401 before fetching the
+  metadata uses the challenge string as its registration scope. The two are derived from one constant
+  (`MCP_CHALLENGE_SCOPE`) and a test asserts they stay equal; when they diverged, every new client
+  failed its first connect with `invalid_scope` and only succeeded on retry.
+</Note>
+
+The consent screen is served at `/account/authorize`. Users can revoke approved MCP clients from
+`/account/settings/authorized-apps`.
+
+For API-key fallback, create an API key in the Formbricks app with access to the target workspace.
+Use the least privileged permission needed by the agent workflow.
+
+Verify that the MCP endpoint can list tools:
+
+```bash
+export FORMBRICKS_MCP_API_KEY="fbk_..."
+
+curl -sS -X POST http://localhost:3000/api/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $FORMBRICKS_MCP_API_KEY" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+## Codex Configuration
+
+### OAuth
+
+Add the HTTP MCP server. Include `--oauth-resource` so the OAuth access token is audience-bound to
+the MCP resource URL:
+
+```bash
+codex mcp add formbricks-local \
+  --url http://localhost:3000/api/mcp \
+  --oauth-resource http://localhost:3000/api/mcp
+```
+
+Authenticate and request the scopes the agent needs:
+
+```bash
+codex mcp login formbricks-local \
+  --scopes openid,profile,email,offline_access,surveys:read,surveys:write,workflows:read,workflows:write,feedbackRecords:read,feedbackRecords:write
+```
+
+For read-only usage, omit the `:write` scopes:
+
+```bash
+codex mcp login formbricks-local \
+  --scopes openid,profile,email,offline_access,surveys:read,workflows:read,feedbackRecords:read
+```
+
+Scope groups are independent — a token needs at least one resource scope, but not all of them. To use
+only the feedback-record tools, request `feedbackRecords:read` (plus `feedbackRecords:write` to create)
+and omit the survey scopes.
+
+Codex opens the browser to Formbricks, completes Dynamic Client Registration, and stores the OAuth
+client and tokens in Codex's credential store. The user approves the requested scopes on the
+Formbricks consent screen.
+
+Equivalent Codex config for the server entry:
+
+```toml
+[mcp_servers.formbricks-local]
+url = "http://localhost:3000/api/mcp"
+oauth_resource = "http://localhost:3000/api/mcp"
+```
+
+Verify the registration:
+
+```bash
+codex mcp list
+codex mcp get formbricks-local
+```
+
+Then ask Codex to use the configured server:
+
+```text
+Use the formbricks-local MCP server to list surveys for workspace clxx1234567890123456789012.
+```
+
+### API-key fallback
+
+Store the API key in the shell environment:
+
+```bash
+export FORMBRICKS_MCP_API_KEY="fbk_..."
+```
+
+For Codex Desktop on macOS, persist the value in the launch environment and restart Codex Desktop:
+
+```bash
+launchctl setenv FORMBRICKS_MCP_API_KEY "fbk_..."
+```
+
+Register the local MCP server with a bearer-token environment variable:
+
+```bash
+codex mcp add formbricks-local-api-key \
+  --url http://localhost:3000/api/mcp \
+  --bearer-token-env-var FORMBRICKS_MCP_API_KEY
+```
+
+## Claude Configuration
+
+### Claude Code
+
+#### OAuth
+
+Add the remote HTTP MCP server:
+
+```bash
+claude mcp add --transport http formbricks-local http://localhost:3000/api/mcp
+```
+
+Run `/mcp` and authenticate `formbricks-local`. Claude Code discovers the MCP protected-resource
+metadata, registers a public client whose scopes are taken from that metadata's `scopes_supported`
+(`surveys:read surveys:write workflows:read workflows:write feedbackRecords:read
+feedbackRecords:write offline_access`), and launches the browser-based OAuth flow — there is no
+scope-entry step. You approve the requested scopes on the Formbricks consent screen. A `:write` tool
+requires both the matching `:write` scope on the token and write/manage permission on the target
+workspace at execution time (see [Authentication](#authentication)).
+
+Verify it:
+
+```bash
+claude mcp list
+claude mcp get formbricks-local
+```
+
+For project-shared Claude Code configuration, use `.mcp.json` without static credentials:
+
+```json
+{
+  "mcpServers": {
+    "formbricks-local": {
+      "type": "http",
+      "url": "http://localhost:3000/api/mcp"
+    }
+  }
+}
+```
+
+If the installed Claude Code version does not start the OAuth flow for remote HTTP servers, use the
+API-key fallback below until that client is updated.
+
+#### API-key fallback
+
+Set the API key:
+
+```bash
+export FORMBRICKS_MCP_API_KEY="fbk_..."
+```
+
+Add the HTTP MCP server:
+
+```bash
+claude mcp add --transport http formbricks-local-api-key http://localhost:3000/api/mcp \
+  --header "Authorization: Bearer $FORMBRICKS_MCP_API_KEY"
+```
+
+For a project-shared fallback configuration, keep the API key outside git:
+
+```json
+{
+  "mcpServers": {
+    "formbricks-local-api-key": {
+      "headers": {
+        "Authorization": "Bearer ${FORMBRICKS_MCP_API_KEY}"
+      },
+      "type": "http",
+      "url": "http://localhost:3000/api/mcp"
+    }
+  }
+}
+```
+
+Claude Code will fail to parse this fallback config if `FORMBRICKS_MCP_API_KEY` is not set.
+
+### Claude Desktop
+
+If the installed Claude Desktop build supports remote HTTP MCP server entries, add the same server
+definition to the Claude Desktop config file and restart Claude Desktop. Prefer the OAuth entry
+without headers when supported; use the API-key header entry only as a fallback.
+
+macOS config path:
+
+```text
+~/Library/Application Support/Claude/claude_desktop_config.json
+```
+
+Example config:
+
+```json
+{
+  "mcpServers": {
+    "formbricks-local": {
+      "type": "http",
+      "url": "http://localhost:3000/api/mcp"
+    }
+  }
+}
+```
+
+Fallback config with an API key:
+
+```json
+{
+  "mcpServers": {
+    "formbricks-local-api-key": {
+      "headers": {
+        "Authorization": "Bearer ${FORMBRICKS_MCP_API_KEY}"
+      },
+      "type": "http",
+      "url": "http://localhost:3000/api/mcp"
+    }
+  }
+}
+```
+
+Set the API key in the Desktop launch environment before opening Claude Desktop when using the
+fallback config:
+
+```bash
+launchctl setenv FORMBRICKS_MCP_API_KEY "fbk_..."
+```
+
+If a Claude Desktop version only supports stdio MCP servers, use Claude Code for the HTTP endpoint or
+add a local stdio-to-HTTP bridge.
+
+## Tool Responses
+
+Tool results include both `structuredContent` and a text content item containing the same JSON string.
+Successful results mirror the v3 REST response body and add `requestId` for correlation.
+
+Errors are returned as MCP error tool results with a structured v3 problem payload:
+
+```json
+{
+  "error": {
+    "code": "bad_request",
+    "detail": "Invalid survey document",
+    "invalid_params": [
+      {
+        "name": "blocks.0.elements.0.headline",
+        "reason": "Required"
+      }
+    ],
+    "requestId": "req_...",
+    "status": 400,
+    "title": "Bad Request"
+  }
+}
+```
+
+### Declared result shapes
+
+The response tools advertise an `outputSchema`, which no other tool does yet. A client can read the
+result shape off `tools/list` rather than inferring it from an example, and the SDK checks the
+structured result against the same schema it advertised.
+
+One object root with every branch optional, built by `mcpToolOutput`: a tool answers either the
+success payload or the error one, which reads like a union — but a union converts to a root-level
+`anyOf`, and the SDK then wraps the result for a 2025-era client to keep the wire shape legal. An
+object root is identity on both eras, so the same structured payload reaches every client. The cost is
+that the schema cannot say "exactly one of these", which is why the error branch is described in full:
+a client can still tell the two apart by which key is present.
+
+## Tool Arguments
+
+Every tool input schema is **strict**: an argument a tool does not declare is rejected, not ignored.
+The advertised JSON Schema carries `additionalProperties: false`, and the SDK validates the call before
+the handler runs, so an undeclared or misspelled key comes back as an input-validation error result and
+the underlying v3 operation is never reached.
+
+This matters most on filters. A dropped filter does not narrow, so the pre-strict behaviour ran the
+query wider than asked and reported success — `count_feedback_records` with a misspelled `userId`
+(the correct key is `user_id`) returned the count for every record in the dataset, which an agent has no
+way to tell from a real answer.
+
+Strictness applies at every depth, not just to the outermost object: a misspelled key inside
+`filter.status` is rejected the same way a misspelled top-level argument is. This matters because a
+dropped nested filter key does not merely lose the key — it leaves the filter object empty, so the query
+runs wider than asked.
+
+Two kinds of exception:
+
+- **Free-form by design.** `blocks`, `metadata`, `welcomeCard` and friends on `create_survey`, and the
+  `data` payload on `patch_survey` / `validate_survey`, accept any nested shape. They are validated by the
+  v3 survey document contract once the call reaches the operation.
+- **The workflow `definition`.** Everything below `definition` on `create_workflow` and `patch_workflow`
+  is still open, so a misspelled key inside a trigger, node, edge or node `config` is dropped rather than
+  rejected. That schema is shared with the v3 Workflows REST API and the workflow builder, so tightening it
+  is a v3 API change rather than an MCP one; it is tracked as ENG-2437. Treat a `create_workflow` result as
+  confirming only what it echoes back.
+
+<Note>
+  A client that adds its own keys to a tool call's `arguments` will be rejected. Nothing in the MCP spec
+  invites that, but it is a behaviour change from earlier Formbricks releases, which silently dropped
+  such keys.
+
+  Two consequences worth knowing. **Read-modify-write needs trimming:** `update_feedback_record` accepts
+  only the eight mutable fields, so echoing a record straight back from `get_feedback_record` is rejected
+  — strip the provenance (`source_*`, `field_*`, `submission_id`, `collected_at`) and the derived
+  sentiment/emotions/translation first. The error names every key to remove. And **`list_workspaces`
+  takes no arguments at all**, so a client that pads zero-argument calls with a placeholder key will fail
+  on the one tool every other workspace-scoped tool depends on for its `workspaceId`.
+</Note>
+
+## Available Tools
+
+### list_surveys
+
+Lists surveys in one workspace. The tool is read-only and idempotent.
+
+Input:
+
+```json
+{
+  "cursor": "opaque-cursor-from-previous-response",
+  "filter": {
+    "name": {
+      "contains": "feedback"
+    },
+    "status": {
+      "in": ["draft", "inProgress"]
+    },
+    "type": {
+      "in": ["link"]
+    }
+  },
+  "includeTotalCount": true,
+  "limit": 20,
+  "sortBy": "updatedAt",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output:
+
+```json
+{
+  "data": [
+    {
+      "createdAt": "2026-04-21T10:00:00.000Z",
+      "creator": {
+        "name": "Ada Lovelace"
+      },
+      "id": "clsv1234567890123456789012",
+      "name": "Product Feedback",
+      "responseCount": 0,
+      "status": "draft",
+      "type": "link",
+      "updatedAt": "2026-04-21T11:00:00.000Z",
+      "workspaceId": "clxx1234567890123456789012"
+    }
+  ],
+  "meta": {
+    "limit": 20,
+    "nextCursor": null,
+    "totalCount": 1
+  },
+  "requestId": "req_..."
+}
+```
+
+### get_survey
+
+Gets one survey by ID. The tool is read-only and idempotent.
+
+Input:
+
+```json
+{
+  "lang": ["en-US"],
+  "surveyId": "clsv1234567890123456789012"
+}
+```
+
+`lang` is optional. When supplied, it filters translatable survey fields to the requested language
+codes or configured aliases.
+
+### create_survey
+
+Creates a block-based link survey using the v3 survey document contract. The tool writes data and is
+not idempotent.
+
+A block is `{ name, elements[], id? }`; an element is `{ id, type, headline, ... }`. The element
+`type` is one of `fileUpload`, `openText`, `multipleChoiceSingle`, `multipleChoiceMulti`, `nps`,
+`cta`, `rating`, `consent`, `pictureSelection`, `cal`, `date`, `matrix`, `address`, `ranking`,
+`contactInfo`, `csat`, `ces`. Element ids are caller-supplied and become immutable once the survey
+leaves draft; block ids are generated when omitted. Translatable fields are keyed by locale code and
+must carry every configured language — the internal `default` key is rejected.
+
+The same list is carried on the tool's own `blocks` description, generated from
+`TSurveyElementTypeEnum` so the two cannot drift. Per-type required fields are not restated here.
+`validate_survey` will reject an element that is missing them, but it reports the element **by its
+position** rather than naming the field: the element schema is an undiscriminated union, so a wrong
+or absent `type` makes every branch fail and the message is a generic `Invalid input`. Send the
+type's own fields with the element rather than expecting the validator to name them.
+
+Input:
+
+```json
+{
+  "blocks": [
+    {
+      "elements": [
+        {
+          "headline": {
+            "de-DE": "Was sollen wir verbessern?",
+            "en-US": "What should we improve?"
+          },
+          "id": "satisfaction",
+          "required": true,
+          "type": "openText"
+        }
+      ],
+      "name": "Main Block"
+    }
+  ],
+  "defaultLanguage": "en-US",
+  "endings": [],
+  "hiddenFields": {
+    "enabled": false
+  },
+  "languages": [
+    {
+      "code": "de-DE",
+      "enabled": true
+    }
+  ],
+  "metadata": {
+    "cx_operation": "enterprise_onboarding",
+    "title": {
+      "de-DE": "Produktfeedback",
+      "en-US": "Product Feedback"
+    }
+  },
+  "name": "Product Feedback Survey",
+  "status": "draft",
+  "variables": [],
+  "welcomeCard": {
+    "enabled": true,
+    "headline": {
+      "de-DE": "Willkommen",
+      "en-US": "Welcome"
+    }
+  },
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output uses the same survey resource shape as `GET /api/v3/surveys/{surveyId}` and includes the MCP
+`requestId`.
+
+### validate_survey
+
+Validates a create or patch payload without writing survey changes. The tool is read-only and
+idempotent; workspace access is still checked when `workspaceId` is present, at `read` level —
+matching the `surveys:read` scope the tool declares.
+
+Create validation input:
+
+```json
+{
+  "data": {
+    "blocks": [
+      {
+        "elements": [
+          {
+            "headline": {
+              "en-US": "What should we improve?"
+            },
+            "id": "satisfaction",
+            "required": true,
+            "type": "openText"
+          }
+        ],
+        "name": "Main Block"
+      }
+    ],
+    "defaultLanguage": "en-US",
+    "name": "Product Feedback Survey",
+    "workspaceId": "clxx1234567890123456789012"
+  },
+  "operation": "create"
+}
+```
+
+Patch validation input:
+
+```json
+{
+  "data": {
+    "name": "Updated Product Feedback Survey"
+  },
+  "operation": "patch",
+  "surveyId": "clsv1234567890123456789012"
+}
+```
+
+Validation failures return `200` with `valid: false` and structured `invalid_params`, matching
+`POST /api/v3/surveys/validate`.
+
+### patch_survey
+
+Updates a survey by ID using the v3 survey patch contract. The tool writes data, can be
+destructive, and is not idempotent. Omitted top-level fields are preserved. Provided top-level
+objects and arrays replace that whole subtree, so omitted nested entries inside a provided subtree
+can be removed. The patch tool does not deep-merge nested objects and does not implement JSON Patch.
+For a change confined to one or a few blocks, prefer `edit_survey_blocks`, which does not require
+resending the others.
+
+The full `get_survey` output may be sent straight back: server-owned fields (`id`, `workspaceId`,
+`type`, `createdAt`, `archivedAt`, `defaultLanguage`, `languages[].alias`) are accepted and verified,
+and changing one is a `422` `read_only_field` rather than a silent ignore. A round-tripped
+`updatedAt` acts as an optimistic-concurrency precondition, so the patch is rejected with `409` if
+the survey changed since your read.
+
+<Note>
+  For agent workflows, fetch the current survey first, modify only the intended top-level fields, run
+  `validate_survey` with `operation: "patch"`, and then submit the same patch with `patch_survey`. If
+  the change is confined to blocks, stop here and use `edit_survey_blocks` or
+  `set_survey_block_order` instead — they are cheaper and cannot drop a block by omission.
+</Note>
+
+Input:
+
+```json
+{
+  "data": {
+    "metadata": {
+      "cx_operation": "enterprise_onboarding",
+      "title": {
+        "en-US": "Updated Product Feedback"
+      }
+    },
+    "name": "Updated Product Feedback"
+  },
+  "surveyId": "clsv1234567890123456789012"
+}
+```
+
+Output uses the same survey resource shape as `GET /api/v3/surveys/{surveyId}` and includes the MCP
+`requestId`.
+
+### edit_survey_blocks
+
+Edits a survey's blocks in place — update, insert or remove whole blocks without resending the ones
+you are not changing. The tool writes data, can be destructive, and is not idempotent. Operations
+apply in order against a single snapshot and land atomically: either all of them do or none do.
+
+Blocks are addressed by id, never by position, so a concurrent edit cannot redirect an operation onto
+a different block. An `update` replaces the target block entirely, and the replacement must carry
+every language the survey has configured. An `insert` anchors at `start`, `end`, or `after` a block
+id — including one an earlier operation in the same request inserted. `block.id` is optional on
+both: an insert without one gets a server-generated id, returned in the concise response's `applied`
+list, and an update takes it from the operation's `id`.
+
+Removing a block orphans any answers already collected for its elements, and the API cannot undo
+that. The editor shows a human a caution before this; an agent has no equivalent, so confirm with the
+user before removing a block from a survey that is not a draft.
+
+<Note>
+  Fetch the survey first and pass its `updatedAt` as `expectedUpdatedAt`. If the survey changed since
+  your read the call returns `409` with both timestamps in `details` — re-read and retry. The concise
+  response carries the new `updatedAt`, so a run of edits chains without fetching again.
+</Note>
+
+Input:
+
+```json
+{
+  "expectedUpdatedAt": "2026-04-21T10:00:00.000Z",
+  "ops": [
+    {
+      "id": "k1p9wq2m4x7c3v8b5n6t0j2r",
+      "op": "update",
+      "block": {
+        "id": "k1p9wq2m4x7c3v8b5n6t0j2r",
+        "name": "Satisfaction",
+        "elements": [
+          {
+            "headline": { "en-US": "How satisfied were you?" },
+            "id": "satisfaction",
+            "inputType": "text",
+            "required": true,
+            "type": "openText"
+          }
+        ]
+      }
+    }
+  ],
+  "response_format": "concise",
+  "surveyId": "clsv1234567890123456789012"
+}
+```
+
+Output defaults to a concise acknowledgement — `id`, `updatedAt`, `blockCount` and the operations
+applied — plus the MCP `requestId`. The full survey resource is ~15k tokens on a large survey, which
+would refill an agent's context as fast as resending the blocks did, so it is opt-in via
+`response_format: "detailed"`. `REST` always returns the full resource.
+
+### set_survey_block_order
+
+Replaces the order of a survey's blocks by listing every current block id exactly once. Block content
+is untouched. The tool writes data and can be destructive, but unlike every other survey write it is
+**idempotent**: the same order yields the same survey, and an order that already matches performs no
+write at all, so `updatedAt` does not move and other callers' preconditions stay valid. A stale
+`expectedUpdatedAt` still returns `409` on that path: the precondition is evaluated before the
+method, so a no-op outcome never reports success to a caller whose view is out of date.
+
+Because the list must be a permutation, a dropped or duplicated block is rejected rather than
+silently applied — the failure that resending the whole `blocks` array cannot catch.
+
+Input:
+
+```json
+{
+  "expectedUpdatedAt": "2026-04-21T10:00:00.000Z",
+  "order": [
+    "b4h8s2d6f0g3j5k7l9z1x3c5",
+    "k1p9wq2m4x7c3v8b5n6t0j2r"
+  ],
+  "response_format": "concise",
+  "surveyId": "clsv1234567890123456789012"
+}
+```
+
+Output matches `edit_survey_blocks`: concise by default, echoing the applied `order`.
+
+### delete_survey
+
+Deletes one survey by ID. The tool is destructive, writes data, and is not idempotent.
+
+Input:
+
+```json
+{
+  "surveyId": "clsv1234567890123456789012"
+}
+```
+
+The v3 REST delete operation returns `204 No Content`. The MCP tool result contains the `requestId`
+so callers can correlate the audit trail:
+
+```json
+{
+  "requestId": "req_..."
+}
+```
+
+### Workflow tools
+
+Workflow tools operate on the v3 Workflows API (trigger → condition → action automations). They reuse
+the same authentication, authorization, audit logging, and error mapping as the survey tools.
+
+#### list_workflows
+
+Lists workflows in one workspace. Read-only and idempotent.
+
+Input:
+
+```json
+{
+  "cursor": "opaque-cursor-from-previous-response",
+  "filter": {
+    "name": { "contains": "welcome" },
+    "status": { "in": ["draft", "enabled"] }
+  },
+  "limit": 20,
+  "sortBy": "updatedAt",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output mirrors the v3 list envelope: `{ "data": [...], "meta": { "limit", "nextCursor" }, "requestId" }`.
+Omitting `filter.status.in` returns every status except archived.
+
+#### get_workflow
+
+Gets one workflow by ID. Read-only and idempotent. Unknown or cross-workspace ids return `403`
+(never `404`) so existence is not leaked.
+
+```json
+{ "workflowId": "clwf1234567890123456789012" }
+```
+
+#### list_workflow_runs
+
+Lists workflow runs for a workspace, newest first. Read-only and idempotent.
+
+```json
+{
+  "filter": { "isDryRun": false, "status": { "in": ["completed"] } },
+  "limit": 20,
+  "responseId": "clrs1234567890123456789012",
+  "workflowId": "clwf1234567890123456789012",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Only `workspaceId` is required. Omit `filter.isDryRun` to return both real and dry runs.
+
+#### get_workflow_run
+
+Gets one workflow run with its ordered step logs. Read-only and idempotent.
+
+```json
+{ "runId": "clrn1234567890123456789012" }
+```
+
+#### test_workflow
+
+Dry-runs a workflow: validates its live definition would execute and resolves the trigger's survey +
+ending cards. No run is persisted and no side effects occur; the result reports `{ ok, problems }`.
+Annotated read-only (no world mutation). **Drafts are testable** — checking the setup before going
+live is the point of a dry run — so a workflow can be tested straight after `create_workflow`. Only
+**archived** workflows are rejected, with `422 invalid_workflow_state`, since they are soft-deleted.
+
+```json
+{ "workflowId": "clwf1234567890123456789012" }
+```
+
+#### create_workflow
+
+Creates a workflow, always as a draft (only `enable_workflow` makes it live). Writes data; not
+idempotent. Takes the full v3 create payload:
+
+```json
+{
+  "definition": {
+    "edges": [],
+    "entryNodeId": "trigger",
+    "nodes": [],
+    "schemaVersion": 1,
+    "trigger": {
+      "config": { "endingCardIds": ["ending-1"], "surveyId": "clsv1234567890123456789012" },
+      "id": "trigger",
+      "triggerType": "response.completed",
+      "type": "trigger"
+    }
+  },
+  "name": "Notify on churn survey completion",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+#### patch_workflow
+
+Updates a workflow (v3 PATCH contract: top-level partial merge, no deep merge). Destructive; not
+idempotent. `definition` edits are only accepted while the workflow is draft or disabled.
+
+```json
+{
+  "data": { "name": "Renamed workflow" },
+  "workflowId": "clwf1234567890123456789012"
+}
+```
+
+#### duplicate_workflow
+
+Duplicates a workflow as a new draft with empty run and version history. Writes data; not idempotent.
+
+```json
+{ "name": "Copy of workflow", "workflowId": "clwf1234567890123456789012" }
+```
+
+`name` is optional; if omitted the server picks a non-conflicting copy name.
+
+#### Lifecycle tools
+
+`delete_workflow`, `enable_workflow`, `disable_workflow`, `archive_workflow`, and `unarchive_workflow`
+each take only a workflow id:
+
+```json
+{ "workflowId": "clwf1234567890123456789012" }
+```
+
+- `enable_workflow` — validates executability, snapshots an immutable version, and makes the workflow
+  live. A non-executable definition is refused with `422 workflow_not_executable`.
+
+  <Warning>Once live, the workflow runs on matching survey responses and can send emails.</Warning>
+
+- `disable_workflow` — stops future runs.
+- `archive_workflow` / `unarchive_workflow` — soft archive and restore (to draft).
+- `delete_workflow` — the v3 delete returns `204 No Content`; the MCP result contains the `requestId`.
+
+### Response tools
+
+Eight tools, one per documented v3 response operation. The set mirrors the API deliberately: what an
+agent can do through MCP is what an API key can do over HTTP, read off one list rather than two.
+
+Every tool description states the boundary against the feedback-record tools, because
+`list_feedback_records(source_id=<surveyId>)` looks like it answers the same question and does not —
+see **Feedback Records And The Hub** below. The full paragraph goes on `list_responses` and
+`count_responses`, where the wrong pick is both likely and quiet; the others carry a one-line form,
+since a description is context every client pays for on every `tools/list`.
+
+#### list_responses / count_responses / get_response
+
+Read-only and idempotent. `workspaceId` is always required; `surveyId` or `contactId` narrows it, and
+the `finished` and `language` filters require one of those two anchors because without one they are
+unbounded scans. `list_responses` caps `limit` at 50 — below the API's 250, because an agent's binding
+constraint is its context window and a response carries every answer.
+
+```json
+{
+  "workspaceId": "clxx1234567890123456789012",
+  "surveyId": "clsv1234567890123456789012",
+  "finished": true,
+  "limit": 20
+}
+```
+
+#### validate_response
+
+A dry run of a create or patch: reports `valid`, `invalid_params`, and — when valid — the `effects` a
+write would have, including the language that would be stamped and the quotas that would count. It
+declares `responses:write` although it writes nothing, because it resolves the same references the
+write resolves; gating it at read would make it a cheaper existence probe than the operation it
+describes.
+
+```json
+{ "operation": "create", "data": { "surveyId": "clsv…", "finished": true, "data": {} } }
+```
+
+#### create_response / update_response
+
+`create_response` records a real submission: webhooks, integrations, follow-ups, quotas and metering
+all run. `update_response` replaces `data` and `tags` wholesale rather than merging, which is why it is
+annotated `destructiveHint: true` — to add one tag, read the response and send every tag it should end
+up with.
+
+Both take the v3 body as an opaque `data` argument and let the operation parse it, so the tool and the
+route answer the same thing to a malformed body.
+
+#### delete_response / batch_delete_responses
+
+Both **ask before they delete**, over the multi-round-trip `input_required` flow: the first call returns
+an `elicitation/create` request and an opaque `requestState`, and the client retries with the answer.
+
+The pending confirmation is HMAC-sealed by `createRequestStateCodec` and bound to the caller, and the
+handler compares the sealed `resourceId` against the arguments on re-entry. Both come back through the
+client, so without that comparison a client could be asked about response A and retry the confirmation
+against response B. The batch tool binds the exact id list, so a confirmation for two ids does not
+carry over to a third.
+
+`confirm: true` skips the prompt. That is not a convenience bolted on afterwards — it is the path a
+2025-era client and a headless caller use, and without it those clients could not delete at all.
+
+```json
+{ "responseId": "clrs1234567890123456789012", "confirm": true }
+```
+
+Both are `idempotentHint: true`: a response that is already gone answers the same `403` as one that was
+never this caller's, so repeating the call converges rather than compounding.
+
+### list_feedback_datasets
+
+Lists the active feedback datasets assigned to a workspace. Read-only and idempotent. Use the
+returned `id` as `datasetId` for the other feedback-record tools.
+
+Input:
+
+```json
+{
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output:
+
+```json
+{
+  "data": [{ "id": "clfd1234567890123456789012", "name": "Support" }],
+  "meta": { "nextCursor": null, "totalCount": 1 },
+  "requestId": "req_..."
+}
+```
+
+### list_feedback_records
+
+Lists feedback records in a workspace's feedback dataset. Read-only and idempotent, with opaque
+cursor pagination. `datasetId` is optional when the workspace has exactly one active
+dataset (the common case) and required when it has more than one.
+
+Input:
+
+```json
+{
+  "cursor": "opaque-cursor-from-previous-response",
+  "datasetId": "clfd1234567890123456789012",
+  "field_group_id": "grp_1",
+  "field_id": "q1",
+  "field_type": ["text", "rating"],
+  "has_sentiment": true,
+  "limit": 50,
+  "order": "desc",
+  "sentiment": ["negative", "very_negative"],
+  "since": "2026-01-01T00:00:00Z",
+  "sort": "collected_at",
+  "source_id": "svy_1",
+  "source_type": ["survey", "review"],
+  "submission_id": "sub_1",
+  "until": "2026-12-31T23:59:59Z",
+  "user_id": "user_1",
+  "value_id": "opt_1",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+All filters are optional. They mirror the Hub's own `GET /v1/feedback-records` parameters, and each is
+named after the record field it filters — so filtering by a `user_id` you just read in a response is
+spelled the same way. An unknown filter key is rejected with a 422 rather than ignored, since a silently
+dropped filter would widen the result set without saying so.
+
+**How they combine.** Every identity filter accepts one value or a list of them. Repeating one filter
+**OR**s its values; different filters are **AND**ed. So `source_type: ["survey", "review"]` with
+`sentiment: ["negative"]` reads as *"(survey OR review) AND negative"*. There is no way to OR across
+different filters.
+
+| Filter                                        | Selects                                                              |
+| --------------------------------------------- | -------------------------------------------------------------------- |
+| `source_type`                                 | a kind of source, e.g. `survey`, `review`, `call_notes`              |
+| `source_id`                                   | one survey/form/ticket                                               |
+| `source_name`                                 | one source by display name                                           |
+| `field_type`                                  | one field type (`text`, `nps`, `rating`, …)                          |
+| `field_id`                                    | all answers to one question                                          |
+| `field_group_id`                              | one grouped question (ranking, matrix, grid)                         |
+| `submission_id`                               | the sibling answers given in one submission                          |
+| `user_id`                                     | everything one end user submitted                                    |
+| `value_id`                                    | everyone who picked one particular choice                            |
+| `language`                                    | the language the feedback was given in                               |
+| `sentiment`                                   | a sentiment label; only enriched records carry one                   |
+| `emotions`                                    | **any** of the listed emotion labels, never all of them              |
+| `since` / `until`                             | a `collected_at` range (must fall between 1970-01-01 and 2080-12-31) |
+| `created_since` / `created_until`             | a `created_at` range — "what did this import bring in"               |
+| `value_date_min` / `value_date_max`           | a range over the date *answer*, not the collection time              |
+| `value_number_min` / `value_number_max`       | a range over the numeric answer                                      |
+| `sentiment_score_min` / `sentiment_score_max` | a sentiment score range, from -1 to 1                                |
+| `has_sentiment`                               | records that do (`true`) or do not (`false`) carry a sentiment        |
+| `has_emotions`                                | records that do or do not carry emotion labels                       |
+| `has_translation`                             | records that do or do not have a translation                         |
+
+Value limits mirror the Hub's: at most 100 values per filter (the enum filters cap at their own label
+count instead), 255 characters per value, and 10 for a `language` tag. Crossing either bound is a 422
+naming the filter, never a silent truncation to the first 100.
+
+An empty string is **not** the same thing here as on the Hub directly: the Hub treats `?source_type=` as
+identical to omitting the filter, but every string filter on this surface requires at least one
+character, so an empty value is rejected rather than ignored.
+
+<Warning>
+  **Every range filter excludes records whose column is empty.** `value_number_min: 0` is not
+  "everything" — it drops every text answer, because they carry no number. Likewise
+  `sentiment_score_min: -1` means "every *enriched* record", not every record. To find the records
+  enrichment has not reached, use `has_sentiment: false` rather than a score range.
+</Warning>
+
+<Warning>
+  **A backwards range is rejected, not run as an empty query.** `value_number_min: 5, value_number_max: 1`
+  is a `400` naming both bounds (e.g. `value_number_min` — "must be less than or equal to
+  value_number_max"). This applies to every range pair, including the timestamp ones; it is the Hub's own
+  check relayed as-is, not something validated here, so the message always names the Hub's parameters.
+</Warning>
+
+**Ordering.** `sort` accepts `collected_at` (the default) or `created_at`, and `order` accepts `asc` or
+`desc` (default `desc`). Neither applies to `count_feedback_records`, which rejects them. A cursor marks a
+position *within one specific ordering*, so keep `sort` and `order` identical for the whole traversal —
+presenting a cursor under a different ordering is rejected rather than silently returning a page that
+looks like a continuation.
+
+`collected_at` and `created_at` diverge whenever historical data is imported: the feedback was collected
+months ago but stored today. Use `created_since` for "what did this import bring in", and `since` for
+"what did people tell us in this period".
+
+The workspace/dataset/pagination parameters (`workspaceId`, `datasetId`, `limit`, `cursor`) stay camelCase:
+they name nothing in the record.
+
+Output mirrors the Hub feedback-record shape and paginates with `meta.nextCursor`. `meta` also names the
+dataset that was searched, so an empty `data` array unambiguously means that dataset holds no matching
+records — a caller that let the dataset auto-resolve does not need a second call to find out which one it was:
+
+```json
+{
+  "data": [
+    {
+      "collected_at": "2026-04-21T10:00:00.000Z",
+      "dataset_id": "clfd1234567890123456789012",
+      "field_id": "q1",
+      "field_type": "text",
+      "id": "019fa338-f494-7384-b34e-01739783d280",
+      "source_type": "survey",
+      "submission_id": "…",
+      "value_text": "Great support!"
+    }
+  ],
+  "meta": {
+    "datasetId": "clfd1234567890123456789012",
+    "datasetName": "Support",
+    "limit": 50,
+    "nextCursor": null
+  },
+  "requestId": "req_..."
+}
+```
+
+### count_feedback_records
+
+Counts the feedback records matching a filter set, without fetching them — for "how many" questions that
+would otherwise mean paging through records. Read-only and idempotent. Takes the same filters as
+`list_feedback_records` (no `limit`/`cursor`, and no `sort`/`order` — the Hub's count endpoint does not
+accept ordering and they are rejected here), because the Hub documents its count endpoint as accepting the
+same query parameters as its list endpoint; both go through one mapper in `lib/operations.ts`, so a count
+always describes the same set as the equivalent list.
+
+Input:
+
+```json
+{
+  "has_sentiment": false,
+  "since": "2026-01-01T00:00:00Z",
+  "source_type": ["survey", "review"],
+  "user_id": "user_1",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output is the total and the dataset it came from — **no record content**, which is the point: a caller
+asking "how many" never pulls end-user text into its context to find out.
+
+```json
+{
+  "data": {
+    "count": 42,
+    "dataset_id": "clfd1234567890123456789012",
+    "dataset_name": "Support"
+  },
+  "requestId": "req_..."
+}
+```
+
+### get_feedback_record
+
+Gets one feedback record by its Hub UUID. Read-only and idempotent. The record must belong to a
+feedback dataset assigned to the workspace; otherwise the tool returns a generic authorization
+error and never reveals whether a record id exists in another tenant.
+
+Input:
+
+```json
+{
+  "feedbackRecordId": "019fa338-f494-7384-b34e-01739783d280",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+### create_feedback_record
+
+Creates a feedback record in a workspace's feedback dataset. Writes data and is not idempotent, and
+requires `feedbackRecords:write` (API keys need `write` or `manage`). The tenant is derived from the
+resolved feedback dataset and is never taken from the request body. `submission_id` is optional — a
+UUID is generated when omitted.
+
+Input:
+
+```json
+{
+  "field_id": "note",
+  "field_label": "Call summary",
+  "field_type": "text",
+  "source_type": "call_notes",
+  "value_text": "Customer asked for SSO and a longer trial.",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output is the created feedback record (Hub shape) plus the MCP `requestId`.
+
+### create_feedback_records
+
+Creates several feedback records in one call — the batch form of `create_feedback_record`, for imports.
+Writes data, is not idempotent, and requires `feedbackRecords:write`. Between 1 and 50 records per call.
+
+The Hub has no bulk-create endpoint (its only bulk write is the delete-by-user erasure path), so this fans
+out to one Hub create per record, in parallel. Two consequences are deliberate:
+
+- **Validation is all-or-nothing.** Every record is validated before any is written, so a malformed batch
+  is rejected without leaving half of it stored. `invalid_params` names the offending index, e.g.
+  `records.3.value_text`.
+- **Partial success is reported, not hidden.** If the Hub rejects some records — a duplicate
+  `(submission_id, field_id)`, say — the created ones are returned and `meta.failures` accounts for the
+  rest by index, so only those need retrying. If _nothing_ could be created, the upstream failure is
+  returned as the response instead, because an empty success would read as "there was nothing to do".
+
+The 50-record cap is an amplification bound as much as a payload one: one authorized request must not
+become an unbounded burst of upstream writes.
+
+<Warning>
+  **A batch is not a submission.** Each record without a `submission_id` gets its own generated one, exactly
+  as in the single-record case — so several answers that belong to the same submission (a survey response, or
+  a call with both a rating and a comment) must carry the *same* `submission_id`, set by the caller. Omit it
+  and they are stored as unrelated submissions, which nothing downstream can distinguish from the intended
+  shape.
+</Warning>
+
+Input:
+
+```json
+{
+  "records": [
+    {
+      "field_id": "note",
+      "field_type": "text",
+      "source_type": "call_notes",
+      "value_text": "Asked for SSO."
+    },
+    {
+      "field_id": "score",
+      "field_type": "nps",
+      "source_type": "call_notes",
+      "value_number": 9
+    }
+  ],
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output:
+
+```json
+{
+  "data": [{ "dataset_id": "clfd…", "id": "019fa338-…", "value_text": "Asked for SSO." }],
+  "meta": {
+    "created": 1,
+    "datasetId": "clfd1234567890123456789012",
+    "datasetName": "Support",
+    "failed": 1,
+    "failures": [{ "detail": "duplicate record for (tenant_id, submission_id, field_id)", "index": 1 }],
+    "requested": 2
+  },
+  "requestId": "req_..."
+}
+```
+
+Per-record failure text goes through the same relay rules as a whole-request failure: a Hub 4xx explains
+itself, anything else becomes a fixed message. Each record actually created produces its own `created`
+audit event — N creations are N events, not one summary.
+
+### update_feedback_record
+
+Corrects the value of an existing feedback record. Writes data, is annotated `destructiveHint: true` (it
+overwrites a stored value; the previous one survives only in the audit log), and requires
+`feedbackRecords:write` (API keys need `write` or `manage`). Only the fields sent are changed; at least one is required.
+
+For API keys, the same dataset-exclusivity rule applies as for deletes: the key may update only a
+record in a dataset assigned to exactly one workspace, where its permission unambiguously covers every
+record present (ENG-2189). A shared dataset returns 403; an integration needing to update records in
+both workspaces should use a workspace-scoped key per workspace. Session, OAuth and MCP-person
+principals are unaffected and authorize through their organization role instead.
+
+Updatable — the Hub's own mutable set: `value_text`, `value_number`, `value_boolean`, `value_date`,
+`value_id`, `user_id`, `language`, `metadata`. The schema is `.pick()`ed from the create fields, so bounds
+can't drift between creating and correcting a record.
+
+The `value_*` field being set must be one the record's `field_type` accepts — the same table `create` enforces
+(`text` takes `value_text`, `nps`/`rating`/`number` take `value_number`, `categorical` takes `value_text`
+and/or `value_id`, and so on). Because `field_type` is immutable it is not part of the patch, so this is
+checked against the _stored_ record and therefore reported after the ownership check, as a 422 naming the
+offending field. Without it a patch could assemble what `create` rejects: putting `value_number` on a `text`
+record would leave both a text and a number set, with nothing to say which one the record means. The Hub does
+not enforce this itself.
+
+**Not** updatable: a record's provenance — `source_type`, `source_id`, `source_name`, `field_id`,
+`field_type`, `field_label`, `field_group_*`, `submission_id`, `collected_at`. Correcting those means
+deleting the record and creating it again. The derived enrichment fields (`sentiment`, `sentiment_score`,
+`emotions`, `value_text_translated`, `translation_lang_key`) are not accepted from callers either — they are
+the Hub's to compute.
+
+`metadata` is the one field that is **replaced, not merged** — the Hub assigns it wholesale, so adding a key
+means sending the existing ones too. Everything else is left untouched when omitted.
+
+Ownership is verified before the update, the same way as for get and delete: `PATCH /{id}` is another Hub
+endpoint that derives the tenant from the stored record. A record deleted in the window between that check
+and the write returns the same generic authorization error, not a 502 — nothing was updated and the service
+is fine.
+
+Input:
+
+```json
+{
+  "feedbackRecordId": "019fa338-f494-7384-b34e-01739783d280",
+  "value_text": "Actually the export works fine, it was the filter that confused me",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output is the updated record.
+
+<Warning>
+  **Editing the text resets what was derived from it.** Per the Hub's contract, changing `value_text` clears
+  `sentiment`, `sentiment_score`, `emotions`, `value_text_translated` and `translation_lang_key` and queues
+  re-enrichment; changing `language` re-queues the translation pair only. The response reflects the
+  **cleared** state, so those fields being absent right after an update means "being recomputed", not "none".
+  Changing `value_text` (or a field label) also re-queues the embedding, so semantic search catches up
+  asynchronously — and clearing a record's text removes its embedding, making it unsearchable.
+</Warning>
+
+### delete_feedback_record
+
+Permanently deletes one feedback record. Writes data, is not idempotent, is annotated
+`destructiveHint: true`, and requires `feedbackRecords:write` (API keys need `manage`). The
+record and its derived embedding are removed with no soft delete, so this cannot be undone — the audit log
+entry keeps the deleted record as its `oldObject` and is the only remaining trace.
+
+For API keys, the dataset must be assigned to exactly one workspace — the caller's — because a key's
+workspace permission can only identify whose records these are when the dataset is not shared
+(ENG-2189). A shared dataset returns 403 with an explanation; an integration needing to delete from
+both workspaces should use a workspace-scoped key per workspace. Session, OAuth and MCP-person
+principals are unaffected and authorize through their organization role instead.
+
+Ownership is verified before the delete: the record must belong to a feedback dataset assigned to the
+workspace, and a record in another tenant is refused with the same generic authorization error as an
+unknown id, without deleting anything. Single-record only — there is no bulk delete tool.
+
+Input:
+
+```json
+{
+  "feedbackRecordId": "019fa338-f494-7384-b34e-01739783d280",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Returns `204 No Content` on success (the tool result carries only the `requestId`).
+
+### search_feedback_records
+
+Searches a workspace's feedback dataset semantically: the query is embedded and compared to record
+embeddings by cosine similarity, so it matches meaning rather than keywords. Read-only and idempotent.
+
+Input:
+
+```json
+{
+  "cursor": "opaque-cursor-from-previous-response",
+  "limit": 10,
+  "minScore": 0.5,
+  "query": "checkout is confusing",
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Output is scored matches, best first — record ids with the embedded text, not full records. Pass a
+`feedback_record_id` to `get_feedback_record` for the rest of a record:
+
+```json
+{
+  "data": [
+    {
+      "feedback_record_id": "019fa338-f494-7384-b34e-01739783d280",
+      "field_label": "What can we improve?",
+      "score": 0.82,
+      "value_text": "I couldn't figure out how to pay"
+    }
+  ],
+  "meta": {
+    "datasetId": "clfd1234567890123456789012",
+    "datasetName": "Support",
+    "limit": 10,
+    "minScore": 0.5,
+    "nextCursor": null
+  },
+  "requestId": "req_..."
+}
+```
+
+### find_similar_feedback_records
+
+Finds the records most similar to a given one, by embedding distance — useful for gauging how widely a
+piece of feedback is echoed. Read-only and idempotent. Same output shape as `search_feedback_records`;
+the anchor record is excluded from its own results.
+
+Input:
+
+```json
+{
+  "feedbackRecordId": "019fa338-f494-7384-b34e-01739783d280",
+  "limit": 10,
+  "minScore": 0.5,
+  "workspaceId": "clxx1234567890123456789012"
+}
+```
+
+Ownership of the anchor record is verified before any neighbour is fetched (see
+[Feedback Records And The Hub](#feedback-records-and-the-hub)).
+
+<Note>
+  Both search tools need embeddings, which are optional in the Hub. Without `EMBEDDING_PROVIDER` and
+  `EMBEDDING_MODEL` configured on **both** the Hub API and the Hub worker they return `503` with that
+  instruction as the detail. Embedding is also asynchronous and only covers records that have text, so a
+  record created moments ago is not searchable yet; `find_similar_feedback_records` reports that as a `409`
+  rather than an empty result, distinguishing "still being embedded, retry" from "no text, so there is no
+  embedding to wait for" — the latter also covers text cleared by an update.
+</Note>
+
+`limit` (1–100, default 10) and `minScore` (0–1, default 0.5) are validated by Formbricks rather than
+passed straight through: the Hub silently coerces out-of-range values to its own defaults, which would
+return something other than what was asked for. The default `minScore` of 0.5 is Formbricks' own — the Hub
+defaults to 0.7, which is strict enough that a fair paraphrase often falls just below it.
+
+## Relationship to V3 Workflows API
+
+Like the survey tools, workflow tools run no custom database queries — each calls the shared,
+framework-agnostic `@formbricks/workflows` handlers used by the v3 REST routes:
+
+| MCP Tool             | REST Contract                                   |
+| -------------------- | ----------------------------------------------- |
+| `list_workflows`     | `GET /api/v3/workflows`                         |
+| `get_workflow`       | `GET /api/v3/workflows/{workflowId}`            |
+| `list_workflow_runs` | `GET /api/v3/workflows/runs`                    |
+| `get_workflow_run`   | `GET /api/v3/workflows/runs/{runId}`            |
+| `test_workflow`      | `POST /api/v3/workflows/{workflowId}/test`      |
+| `create_workflow`    | `POST /api/v3/workflows`                        |
+| `patch_workflow`     | `PATCH /api/v3/workflows/{workflowId}`          |
+| `duplicate_workflow` | `POST /api/v3/workflows/{workflowId}/duplicate` |
+| `delete_workflow`    | `DELETE /api/v3/workflows/{workflowId}`         |
+| `enable_workflow`    | `POST /api/v3/workflows/{workflowId}/enable`    |
+| `disable_workflow`   | `POST /api/v3/workflows/{workflowId}/disable`   |
+| `archive_workflow`   | `POST /api/v3/workflows/{workflowId}/archive`   |
+| `unarchive_workflow` | `POST /api/v3/workflows/{workflowId}/unarchive` |
+
+## Relationship to V3 Surveys API
+
+The MCP server does not run custom survey database queries. Each tool calls the shared server-only v3
+survey operations used by the REST routes:
+
+| MCP Tool          | REST Contract                       |
+| ----------------- | ----------------------------------- |
+| `list_surveys`    | `GET /api/v3/surveys`               |
+| `get_survey`      | `GET /api/v3/surveys/{surveyId}`    |
+| `create_survey`   | `POST /api/v3/surveys`              |
+| `validate_survey` | `POST /api/v3/surveys/validate`     |
+| `patch_survey`    | `PATCH /api/v3/surveys/{surveyId}`  |
+| `edit_survey_blocks` | `PATCH /api/v3/surveys/{surveyId}/blocks` |
+| `set_survey_block_order` | `PUT /api/v3/surveys/{surveyId}/blocks/order` |
+| `delete_survey`   | `DELETE /api/v3/surveys/{surveyId}` |
+
+When the v3 OpenAPI contract changes, update the MCP schemas and this page together. The hand-maintained
+v3 OpenAPI spec lives at `docs/api-v3-reference/openapi.yml`.
+
+## Feedback Records And The Hub
+
+Feedback-record tools do not map to a v3 REST route. They call the shared server-only Hub service
+(`@/modules/hub/service`) — the same client the Unify Feedback UI uses — and enforce the same
+`feedbackDirectories` Enterprise entitlement.
+
+A feedback record lives in the Formbricks Hub, addressed by an opaque tenant id. Every tool
+resolves that tenant server-side: it authorizes the caller's access to `workspaceId`, checks the
+`feedbackDirectories` license, then maps the workspace to its assigned feedback dataset — the
+`FeedbackDirectory` id **is** the Hub tenant id, and it is surfaced to callers as `dataset_id`.
+
+Assignment is a join table, but the application enforces at most one _non-archived_ directory per
+workspace, so in practice `datasetId` can be omitted and the single active dataset is used.
+It becomes required only if a workspace somehow has several active directories, in which case the tools
+return `400` rather than guessing. A tenant id is never accepted from tool input.
+
+Three Hub endpoints — get, delete, and similar — take a bare record id and derive the tenant from the
+stored record, delegating record-level authorization to the product. So `get_feedback_record`,
+`delete_feedback_record` and `find_similar_feedback_records` all retrieve the record first and verify its
+tenant — the named dataset when one was given, otherwise any dataset the workspace owns — before acting.
+A foreign record and an unknown record produce the same generic authorization error, so record ids cannot
+be probed across tenants. `search_feedback_records` instead has the resolved tenant injected into the Hub
+query, like `create_feedback_record`.
+
+## Limitations
+
+- OAuth is user-delegated only. Machine-to-machine client credentials for MCP are not supported.
+- OAuth access tokens must be JWTs audience-bound to `/api/mcp`; opaque MCP access token introspection is not
+  accepted by the MCP route.
+- API-key authentication remains supported for compatibility and fallback use.
+- The MCP server exposes only the survey, workflow, response and feedback-record operations listed on this page.
+- Survey and workflow tool coverage depends on the current v3 Surveys and Workflows REST endpoint
+  coverage; feedback-record tool coverage depends on the Hub feedback-records API.
+- `enable_workflow` makes a workflow live and can trigger email sending; treat it as a high-impact
+  mutation when granting agents write access.
+- `create_workflow` requires a complete workflow `definition` (schema version, trigger, entry node);
+  it is created as a draft and only `enable_workflow` can make it live.
+- Feedback-record tools require the `feedbackDirectories` Enterprise entitlement and a feedback
+  directory assigned to the workspace; without either they return 403 / 422.
+- A feedback record's **provenance** is immutable: `update_feedback_record` changes values, users, language
+  and metadata, but not which source, question or submission a record belongs to, nor when it was
+  collected. The derived enrichment fields are the Hub's to compute and are never accepted from callers.
+- `delete_feedback_record` deletes one record at a time. The Hub's bulk and delete-by-user endpoints are
+  deliberately not exposed: they are erasure operations whose blast radius does not belong on an agent
+  surface. There is deliberately no batch _delete_ to match `create_feedback_records`.
+- Counting and filtering cover the Hub's own filter set only. There is no aggregation by sentiment or
+  emotion, and semantic search cannot be narrowed by source or date — the Hub's search endpoint takes only
+  a query and a tenant. Those need Hub-side support first.
+- The search tools require an embedding model configured on the Hub API **and** the Hub worker; without
+  one they return 503. Embedding is asynchronous and covers only records with text.
+- The response tools are registered but `responses:read` / `responses:write` are not yet advertised in
+  the protected-resource metadata, so a client following the normal consent flow is not offered them.
+  Adding them to `MCP_RESOURCE_SCOPES` is the rollout step that follows the integrator notice.
+- `outputSchema` is declared on the response tools only. The survey, workflow and feedback-record tools
+  still advertise no result shape, so a client has to infer theirs from an example.
+- The response tools cover the v3 operations and nothing more: there is no tool that adds or removes a
+  single tag, because `PATCH` replaces the tag set wholesale and such a tool would be a read-modify-write
+  wrapper with its own race rather than an operation.
+- `create_survey` creates link surveys only. In-app survey creation and distribution settings are not
+  part of the current v3 create operation.
+- `edit_survey_blocks` and `set_survey_block_order` operate on whole blocks. There is no element-level
+  operation: elements travel inside the block payload, and going finer would reintroduce the same
+  resend problem one level down.
+- Ordering is validated as a delta on the **patch family only**: a change may not *introduce* a
+  `#recall:` that points forwards, a logic condition reading a later block, or a `requireAnswer`
+  targeting an earlier one (`misordered_reference`). Violations a survey already contains are left
+  alone, so an existing survey never becomes unpatchable — enforcing the full set would repeat the
+  ENG-3070 failure. `create_survey` is deliberately not covered: tightening it would reject payloads
+  that are valid today, which needs its own versioned rollout.
+- `stored_survey_invalid` (422) means the *stored* survey no longer satisfies the v3 document
+  contract; the reported paths are into the survey, not the request. A patch that includes corrected
+  values for those fields is accepted — or repair it in the editor. Only a survey the API cannot read
+  at all (legacy questions, no v3 block list) is refused before the request is evaluated.
+- `patch_survey` follows the v3 PATCH contract: top-level partial document updates only, no JSON Patch,
+  and no nested deep merge. Provided top-level objects and arrays replace their whole subtree and can
+  remove omitted nested entries.
+- `validate_survey` validates payload shape and references; it does not create languages, survey
+  versions, or surveys.
+- Query-string credentials are rejected; use headers for API keys.
+- Large request bodies are rejected before the MCP handler using the same body-size policy as v3 APIs.
+- Tool arguments are strict: undeclared keys are rejected rather than ignored (see [Tool
+  Arguments](#tool-arguments)).
+- Resources and prompts are not exposed — the server registers tools only, so there is no MCP resource
+  for the survey document contract yet.
+- `subscriptions/listen` is refused (`maxSubscriptions: 0`). The 2026-07-28 revision replaced the GET SSE
+  endpoint with a long-lived POST-response stream, but with no resources registered and no list-changed
+  notifications emitted, such a stream could never deliver anything — it would just hold a connection.
+  A client that opens one gets `Subscription limit reached`; the list endpoints remain the way to see
+  current tools, prompts and resources.
+
+## Implementation Files
+
+- `apps/web/app/api/mcp/route.ts`
+- `apps/web/modules/mcp/auth.ts`
+- `apps/web/modules/mcp/server.ts`
+- `apps/web/modules/mcp/tools/surveys.ts`
+- `apps/web/modules/mcp/tools/workspaces.ts`
+- `apps/web/modules/mcp/tools/feedback-records.ts`
+- `apps/web/modules/mcp/tools/schemas.ts`
+- `apps/web/modules/mcp/tools/workflows.ts`
+- `apps/web/modules/mcp/tools/workflow-schemas.ts`
+- `apps/web/app/api/v3/surveys/lib/operations.ts`
+- `apps/web/app/api/v3/surveys/blocks.ts` (pure block op-application and reorder logic)
+- `apps/web/app/api/v3/workflows/lib/context.ts` (adapter to the `@formbricks/workflows` handlers)
+- `apps/web/app/api/v3/feedbackRecords/lib/operations.ts`
+- `apps/web/app/api/v3/feedbackRecords/lib/access.ts` (tenant resolution + per-record ownership guard)
+- `apps/web/app/api/v3/feedbackRecords/lib/errors.ts` (Hub error → v3 problem mapping)

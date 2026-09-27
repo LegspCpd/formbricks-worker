@@ -1,0 +1,531 @@
+import { describe, expect, test, vi } from "vitest";
+import { TSurveyElementTypeEnum } from "@formbricks/types/surveys/elements";
+import { TSurvey } from "@formbricks/types/surveys/types";
+import { parseRecallInfo } from "@/lib/utils/recall";
+import { convertResponseValue, getElementResponseMapping, processResponseData } from "./responses";
+
+// Mock the recall and i18n utils
+vi.mock("@/lib/utils/recall", () => ({
+  parseRecallInfo: vi.fn((text) => text),
+}));
+
+vi.mock("./i18n/utils", () => ({
+  getLocalizedValue: vi.fn((obj: Record<string, string>, lang: string) => obj[lang] || obj.default),
+  getLanguageCode: vi.fn(
+    (surveyLanguages: { default: boolean; language: { code: string } }[], languageCode: string) => {
+      if (!surveyLanguages?.length || !languageCode) return null;
+      const language = surveyLanguages.find(
+        (surveyLanguage: { default: boolean; language: { code: string } }) =>
+          surveyLanguage.language.code === languageCode
+      );
+      return language?.default ? "default" : language?.language.code || "default";
+    }
+  ),
+}));
+
+describe("Response Processing", () => {
+  describe("processResponseData", () => {
+    test("should handle string input", () => {
+      expect(processResponseData("test")).toBe("test");
+    });
+
+    test("should handle number input", () => {
+      expect(processResponseData(42)).toBe("42");
+    });
+
+    test("should handle array input", () => {
+      expect(processResponseData(["a", "b", "c"])).toBe("a; b; c");
+    });
+
+    test("should filter out empty values from array", () => {
+      const input = ["a", "", "c"];
+      expect(processResponseData(input)).toBe("a; c");
+    });
+
+    test("should handle object input", () => {
+      const input = { key1: "value1", key2: "value2" };
+      expect(processResponseData(input)).toBe("key1: value1\nkey2: value2");
+    });
+
+    test("should filter out empty values from object", () => {
+      const input = { key1: "value1", key2: "", key3: "value3" };
+      expect(processResponseData(input)).toBe("key1: value1\nkey3: value3");
+    });
+
+    test("should return empty string for unsupported types", () => {
+      expect(processResponseData(undefined as any)).toBe("");
+    });
+
+    test("should filter out null values from array", () => {
+      const input = ["a", null, "c"] as any;
+      expect(processResponseData(input)).toBe("a; c");
+    });
+
+    test("should filter out undefined values from array", () => {
+      const input = ["a", undefined, "c"] as any;
+      expect(processResponseData(input)).toBe("a; c");
+    });
+  });
+
+  describe("convertResponseValue", () => {
+    const mockOpenTextQuestion = {
+      id: "q1",
+      type: TSurveyElementTypeEnum.OpenText as const,
+      headline: { default: "Test Question" },
+      required: true,
+      inputType: "text" as const,
+      longAnswer: false,
+      charLimit: { enabled: false },
+    };
+
+    const mockRankingQuestion = {
+      id: "q1",
+      type: TSurveyElementTypeEnum.Ranking as const,
+      headline: { default: "Test Question" },
+      required: true,
+      choices: [
+        { id: "1", label: { default: "Choice 1" } },
+        { id: "2", label: { default: "Choice 2" } },
+      ],
+      shuffleOption: "none" as const,
+    };
+
+    const mockFileUploadQuestion = {
+      id: "q1",
+      type: TSurveyElementTypeEnum.FileUpload as const,
+      headline: { default: "Test Question" },
+      required: true,
+      allowMultipleFiles: true,
+    };
+
+    const mockPictureSelectionQuestion = {
+      id: "q1",
+      type: TSurveyElementTypeEnum.PictureSelection as const,
+      headline: { default: "Test Question" },
+      required: true,
+      allowMulti: false,
+      choices: [
+        { id: "1", imageUrl: "image1.jpg", label: { default: "Choice 1" } },
+        { id: "2", imageUrl: "image2.jpg", label: { default: "Choice 2" } },
+      ],
+    };
+
+    test("should handle ranking type with string input", () => {
+      expect(convertResponseValue("answer", mockRankingQuestion)).toEqual(["answer"]);
+    });
+
+    test("should handle ranking type with array input", () => {
+      expect(convertResponseValue(["answer1", "answer2"], mockRankingQuestion)).toEqual([
+        "answer1",
+        "answer2",
+      ]);
+    });
+
+    test("should handle fileUpload type with string input", () => {
+      expect(convertResponseValue("file.jpg", mockFileUploadQuestion)).toEqual(["file.jpg"]);
+    });
+
+    test("should handle fileUpload type with array input", () => {
+      expect(convertResponseValue(["file1.jpg", "file2.jpg"], mockFileUploadQuestion)).toEqual([
+        "file1.jpg",
+        "file2.jpg",
+      ]);
+    });
+
+    test("should handle pictureSelection type with string input", () => {
+      expect(convertResponseValue("1", mockPictureSelectionQuestion)).toEqual(["image1.jpg"]);
+    });
+
+    test("should handle pictureSelection type with array input", () => {
+      expect(convertResponseValue(["1", "2"], mockPictureSelectionQuestion)).toEqual([
+        "image1.jpg",
+        "image2.jpg",
+      ]);
+    });
+
+    test("should handle pictureSelection type with invalid choice", () => {
+      expect(convertResponseValue("invalid", mockPictureSelectionQuestion)).toEqual([]);
+    });
+
+    test("should handle pictureSelection type with number input", () => {
+      expect(convertResponseValue(42, mockPictureSelectionQuestion)).toEqual([]);
+    });
+
+    test("should handle pictureSelection type with object input", () => {
+      expect(convertResponseValue({ key: "value" }, mockPictureSelectionQuestion)).toEqual([]);
+    });
+
+    test("should handle pictureSelection type with null input", () => {
+      expect(convertResponseValue(null as any, mockPictureSelectionQuestion)).toEqual([]);
+    });
+
+    test("should handle pictureSelection type with undefined input", () => {
+      expect(convertResponseValue(undefined as any, mockPictureSelectionQuestion)).toEqual([]);
+    });
+
+    test("should handle default case with string input", () => {
+      expect(convertResponseValue("answer", mockOpenTextQuestion)).toBe("answer");
+    });
+
+    test("should handle default case with number input", () => {
+      expect(convertResponseValue(42, mockOpenTextQuestion)).toBe("42");
+    });
+
+    test("should handle default case with array input", () => {
+      expect(convertResponseValue(["a", "b", "c"], mockOpenTextQuestion)).toBe("a; b; c");
+    });
+
+    test("should handle default case with object input", () => {
+      const input = { key1: "value1", key2: "value2" };
+      expect(convertResponseValue(input, mockOpenTextQuestion)).toBe("key1: value1\nkey2: value2");
+    });
+  });
+
+  describe("getElementResponseMapping", () => {
+    const mockSurvey = {
+      id: "survey1",
+      type: "link" as const,
+      status: "inProgress" as const,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      name: "Test Survey",
+      createdBy: null,
+      blocks: [
+        {
+          id: "block1",
+          name: "Block 1",
+          elements: [
+            {
+              id: "q1",
+              type: TSurveyElementTypeEnum.OpenText as const,
+              headline: { default: "Question 1" },
+              required: true,
+              inputType: "text" as const,
+              longAnswer: false,
+              charLimit: { enabled: false },
+            },
+            {
+              id: "q2",
+              type: TSurveyElementTypeEnum.MultipleChoiceMulti as const,
+              headline: { default: "Question 2" },
+              required: true,
+              choices: [
+                { id: "1", label: { default: "Option 1" } },
+                { id: "2", label: { default: "Option 2" } },
+              ],
+              shuffleOption: "none" as const,
+              buttonLabel: { default: "Next" },
+            },
+          ],
+        },
+      ],
+      questions: [],
+      hiddenFields: {
+        enabled: false,
+        fieldIds: [],
+      },
+      displayOption: "displayOnce" as const,
+      delay: 0,
+      languages: [
+        {
+          language: {
+            id: "lang1",
+            code: "default",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            alias: null,
+            workspaceId: "proj1",
+          },
+          default: true,
+          enabled: true,
+        },
+      ],
+      variables: [],
+      endings: [],
+      displayLimit: null,
+      autoClose: null,
+      autoComplete: null,
+      recontactDays: null,
+      welcomeCard: {
+        enabled: false,
+        timeToFinish: false,
+        showResponseCount: false,
+      },
+      showLanguageSwitch: false,
+      isBackButtonHidden: false,
+      isVerifyEmailEnabled: false,
+      displayPercentage: 100,
+      styling: null,
+      workspaceOverwrites: null,
+      inlineTriggers: [],
+      pin: null,
+      triggers: [],
+      followUps: [],
+      segment: null,
+      recaptcha: null,
+      surveyClosedMessage: null,
+      singleUse: {
+        enabled: false,
+        isEncrypted: false,
+      },
+      metadata: {},
+    } as unknown as TSurvey;
+
+    const mockResponse = {
+      id: "response1",
+      surveyId: "survey1",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      finished: true,
+      data: {
+        q1: "Answer 1",
+        q2: ["Option 1", "Option 2"],
+      },
+      language: "default",
+      meta: {
+        url: undefined,
+        country: undefined,
+        action: undefined,
+        source: undefined,
+        userAgent: undefined,
+      },
+      tags: [],
+      person: null,
+      personAttributes: {},
+      ttc: {},
+      variables: {},
+      contact: null,
+      contactAttributes: {},
+      singleUseId: null,
+    };
+
+    test("should map questions to responses correctly", () => {
+      const mapping = getElementResponseMapping(mockSurvey, mockResponse);
+      expect(mapping).toHaveLength(2);
+      expect(mapping[0]).toEqual({
+        element: "Question 1",
+        response: "Answer 1",
+        type: TSurveyElementTypeEnum.OpenText,
+      });
+      expect(mapping[1]).toEqual({
+        element: "Question 2",
+        response: "Option 1; Option 2",
+        type: TSurveyElementTypeEnum.MultipleChoiceMulti,
+      });
+    });
+
+    test("recall receives the response's variables, which the value map cannot carry", () => {
+      // A variable is stored outside `response.data` and addressed by its id, so it is absent from
+      // the merged reserved+answers map. Omitting this argument left a headline recalling a variable
+      // rendering its fallback in the notification email while the same token resolved in the body.
+      vi.mocked(parseRecallInfo).mockClear();
+
+      getElementResponseMapping(mockSurvey, { ...mockResponse, variables: { var1: "gold" } });
+
+      expect(vi.mocked(parseRecallInfo)).toHaveBeenCalledWith("Question 1", expect.anything(), {
+        var1: "gold",
+      });
+    });
+
+    test("should handle missing response data", () => {
+      const response = {
+        id: "response1",
+        surveyId: "survey1",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        finished: true,
+        data: {},
+        language: "default",
+        meta: {
+          url: undefined,
+          country: undefined,
+          action: undefined,
+          source: undefined,
+          userAgent: undefined,
+        },
+        tags: [],
+        person: null,
+        personAttributes: {},
+        ttc: {},
+        variables: {},
+        contact: null,
+        contactAttributes: {},
+        singleUseId: null,
+      };
+      const mapping = getElementResponseMapping(mockSurvey, response);
+      expect(mapping).toHaveLength(2);
+      expect(mapping[0].response).toBe("");
+      expect(mapping[1].response).toBe("");
+    });
+
+    test("should handle different language", () => {
+      const survey = {
+        ...mockSurvey,
+        blocks: [
+          {
+            id: "block1",
+            name: "Block 1",
+            elements: [
+              {
+                id: "q1",
+                type: TSurveyElementTypeEnum.OpenText as const,
+                headline: { default: "Question 1", en: "Question 1 EN" },
+                required: true,
+                inputType: "text" as const,
+                longAnswer: false,
+                charLimit: { enabled: false },
+              },
+            ],
+          },
+        ],
+        questions: [],
+        languages: [
+          {
+            language: {
+              id: "lang1",
+              code: "default",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              alias: null,
+              workspaceId: "proj1",
+            },
+            default: true,
+            enabled: true,
+          },
+          {
+            language: {
+              id: "lang2",
+              code: "en",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              alias: null,
+              workspaceId: "proj1",
+            },
+            default: false,
+            enabled: true,
+          },
+        ],
+      };
+      const response = {
+        id: "response1",
+        surveyId: "survey1",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        finished: true,
+        data: { q1: "Answer 1" },
+        language: "en",
+        meta: {
+          url: undefined,
+          country: undefined,
+          action: undefined,
+          source: undefined,
+          userAgent: undefined,
+        },
+        tags: [],
+        person: null,
+        personAttributes: {},
+        ttc: {},
+        variables: {},
+        contact: null,
+        contactAttributes: {},
+        singleUseId: null,
+      };
+      const mapping = getElementResponseMapping(survey, response);
+      expect(mapping[0].element).toBe("Question 1 EN");
+    });
+
+    test("should handle null response language", () => {
+      const response = {
+        id: "response1",
+        surveyId: "survey1",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        finished: true,
+        data: { q1: "Answer 1" },
+        language: null,
+        meta: {
+          url: undefined,
+          country: undefined,
+          action: undefined,
+          source: undefined,
+          userAgent: undefined,
+        },
+        tags: [],
+        person: null,
+        personAttributes: {},
+        ttc: {},
+        variables: {},
+        contact: null,
+        contactAttributes: {},
+        singleUseId: null,
+      };
+      const mapping = getElementResponseMapping(mockSurvey, response);
+      expect(mapping).toHaveLength(2);
+      expect(mapping[0].element).toBe("Question 1");
+    });
+
+    test("should handle undefined response language", () => {
+      const response = {
+        id: "response1",
+        surveyId: "survey1",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        finished: true,
+        data: { q1: "Answer 1" },
+        language: null,
+        meta: {
+          url: undefined,
+          country: undefined,
+          action: undefined,
+          source: undefined,
+          userAgent: undefined,
+        },
+        tags: [],
+        person: null,
+        personAttributes: {},
+        ttc: {},
+        variables: {},
+        contact: null,
+        contactAttributes: {},
+        singleUseId: null,
+      };
+      const mapping = getElementResponseMapping(mockSurvey, response);
+      expect(mapping).toHaveLength(2);
+      expect(mapping[0].element).toBe("Question 1");
+    });
+
+    test("should handle empty survey languages", () => {
+      const survey = {
+        ...mockSurvey,
+        languages: [], // Empty languages array
+      };
+      const response = {
+        id: "response1",
+        surveyId: "survey1",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        finished: true,
+        data: { q1: "Answer 1" },
+        language: "en",
+        meta: {
+          url: undefined,
+          country: undefined,
+          action: undefined,
+          source: undefined,
+          userAgent: undefined,
+        },
+        tags: [],
+        person: null,
+        personAttributes: {},
+        ttc: {},
+        variables: {},
+        contact: null,
+        contactAttributes: {},
+        singleUseId: null,
+      };
+      const mapping = getElementResponseMapping(survey, response);
+      expect(mapping).toHaveLength(2);
+      expect(mapping[0].element).toBe("Question 1"); // Should fallback to default
+    });
+  });
+});

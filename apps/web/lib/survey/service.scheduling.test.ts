@@ -1,0 +1,398 @@
+import { prisma } from "@/lib/__mocks__/database";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { ValidationError } from "@formbricks/types/errors";
+import { getActionClasses } from "@/lib/actionClass/service";
+import { getOrganizationByWorkspaceId } from "@/lib/organization/service";
+import {
+  createSurveyInput,
+  mockActionClass,
+  mockSurveyOutput,
+  updateSurveyInput,
+} from "./__mock__/survey.mock";
+import { createSurvey, updateSurveyInternal } from "./service";
+
+const { mockQueueAuditEventWithoutRequest } = vi.hoisted(() => ({
+  mockQueueAuditEventWithoutRequest: vi.fn(),
+}));
+
+vi.mock("@/lib/actionClass/service", () => ({
+  getActionClasses: vi.fn(),
+}));
+
+vi.mock("@/lib/organization/service", () => ({
+  getOrganizationByWorkspaceId: vi.fn(),
+  subscribeOrganizationMembersToSurveyResponses: vi.fn(),
+}));
+
+vi.mock("@/modules/ee/audit-logs/lib/handler", () => ({
+  queueAuditEventWithoutRequest: mockQueueAuditEventWithoutRequest,
+}));
+
+const createSchedulingCandidate = ({
+  id = updateSurveyInput.id,
+  closeOn,
+  publishOn,
+  status,
+  workspaceId = updateSurveyInput.workspaceId,
+}: {
+  id?: string;
+  closeOn: Date | null;
+  publishOn: Date | null;
+  status: "draft" | "paused" | "inProgress";
+  workspaceId?: string;
+}) => ({
+  id,
+  closeOn,
+  publishOn,
+  status,
+  workspace: {
+    organizationId: "org123",
+  },
+  workspaceId,
+});
+
+describe("survey service scheduling", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-17T12:30:00.000Z"));
+    vi.mocked(getActionClasses).mockResolvedValue([mockActionClass] as never);
+    vi.mocked(getOrganizationByWorkspaceId).mockResolvedValue({ id: "org123" } as never);
+    mockQueueAuditEventWithoutRequest.mockResolvedValue(undefined);
+    // createSurvey and updateSurveyInternal wrap their core writes in prisma.$transaction; run the
+    // callback with the same mocked client so per-test prisma.survey/segment mocks still apply inside
+    // the transaction.
+    vi.mocked(prisma.$transaction).mockImplementation(async (callback) => callback(prisma));
+    // Both paths also reconcile the Embedded Data tables (ENG-1978); no existing links means the
+    // reconcile is a no-op and scheduling behaviour is what these tests still measure.
+    vi.mocked(prisma.surveyEmbeddedData.findMany).mockResolvedValue([]);
+    vi.mocked(prisma.embeddedData.create).mockResolvedValue({ id: "ed_1" } as never);
+    vi.mocked(prisma.surveyEmbeddedData.create).mockResolvedValue({} as never);
+    // `createSurvey` re-reads the survey after that reconcile (ENG-2412), so the read has to be
+    // answered too. Echoing `survey.create`'s resolved value keeps each test's own fixture in charge.
+    vi.mocked(prisma.survey.findUniqueOrThrow).mockImplementation((async () => {
+      const created = vi.mocked(prisma.survey.create).mock.results.at(-1)?.value;
+      return created instanceof Promise ? await created : created;
+    }) as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("manual publish clears publishOn", async () => {
+    const scheduledPublishSelection = new Date(Date.UTC(2026, 3, 20, 12, 0, 0));
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: scheduledPublishSelection,
+      status: "draft",
+    } as never);
+    prisma.survey.update.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: null,
+      status: "inProgress",
+    } as never);
+
+    // Publishing runs through updateSurveyAction -> updateSurvey, i.e. with validation. Leaving a
+    // draft is never allowed on the skip-validation path (ENG-2115).
+    await updateSurveyInternal(
+      {
+        ...updateSurveyInput,
+        publishOn: scheduledPublishSelection,
+        status: "inProgress",
+      },
+      false
+    );
+
+    expect(prisma.survey.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          publishOn: null,
+          status: "inProgress",
+        }),
+      })
+    );
+  });
+
+  test("manual paused status clears closeOn", async () => {
+    const scheduledCloseSelection = new Date(Date.UTC(2026, 3, 20, 12, 0, 0));
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: scheduledCloseSelection,
+      status: "inProgress",
+    } as never);
+    prisma.survey.update.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: null,
+      status: "paused",
+    } as never);
+
+    await updateSurveyInternal(
+      {
+        ...updateSurveyInput,
+        closeOn: scheduledCloseSelection,
+        status: "paused",
+      },
+      false
+    );
+
+    expect(prisma.survey.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          closeOn: null,
+          status: "paused",
+        }),
+      })
+    );
+  });
+
+  test("scheduling from draft keeps closeOn when publishOn is set", async () => {
+    const scheduledPublishSelection = new Date(Date.UTC(2026, 3, 20, 12, 0, 0));
+    const scheduledCloseSelection = new Date(Date.UTC(2026, 3, 21, 12, 0, 0));
+    const normalizedPublishOn = new Date("2026-04-19T22:00:00.000Z");
+    const normalizedCloseOn = new Date("2026-04-20T22:00:00.000Z");
+
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: null,
+      publishOn: null,
+      status: "draft",
+    } as never);
+    prisma.survey.update.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: normalizedCloseOn,
+      publishOn: normalizedPublishOn,
+      status: "paused",
+    } as never);
+    prisma.survey.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([] as never);
+
+    // Scheduling a draft also runs through updateSurveyAction -> updateSurvey, i.e. with validation
+    // (ENG-2115: the skip-validation path may not move a survey out of draft).
+    await updateSurveyInternal(
+      {
+        ...updateSurveyInput,
+        closeOn: scheduledCloseSelection,
+        publishOn: scheduledPublishSelection,
+        status: "paused",
+      },
+      false
+    );
+
+    expect(prisma.survey.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          closeOn: normalizedCloseOn,
+          publishOn: normalizedPublishOn,
+          status: "paused",
+        }),
+      })
+    );
+  });
+
+  test("manual completion clears both scheduling dates", async () => {
+    const scheduledSelection = new Date(Date.UTC(2026, 3, 20, 12, 0, 0));
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: scheduledSelection,
+      publishOn: scheduledSelection,
+      status: "inProgress",
+    } as never);
+    prisma.survey.update.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: null,
+      publishOn: null,
+      status: "completed",
+    } as never);
+
+    await updateSurveyInternal(
+      {
+        ...updateSurveyInput,
+        closeOn: scheduledSelection,
+        publishOn: scheduledSelection,
+        status: "completed",
+      },
+      false
+    );
+
+    expect(prisma.survey.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          closeOn: null,
+          publishOn: null,
+          status: "completed",
+        }),
+      })
+    );
+  });
+
+  test("saving a due publish schedule catches up immediately for paused surveys", async () => {
+    const dueSelection = new Date(Date.UTC(2026, 3, 17, 12, 0, 0));
+    const normalizedDuePublishOn = new Date("2026-04-16T22:00:00.000Z");
+
+    prisma.survey.findUnique
+      .mockResolvedValueOnce({
+        ...mockSurveyOutput,
+        publishOn: null,
+        status: "paused",
+      } as never)
+      .mockResolvedValueOnce({
+        ...mockSurveyOutput,
+        publishOn: null,
+        status: "inProgress",
+      } as never);
+    prisma.survey.update.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: normalizedDuePublishOn,
+      status: "paused",
+    } as never);
+    prisma.survey.findMany
+      .mockResolvedValueOnce([
+        createSchedulingCandidate({
+          closeOn: null,
+          publishOn: normalizedDuePublishOn,
+          status: "paused",
+        }),
+      ] as never)
+      .mockResolvedValueOnce([] as never);
+    prisma.survey.updateMany.mockResolvedValueOnce({ count: 1 } as never);
+
+    const updatedSurvey = await updateSurveyInternal(
+      {
+        ...updateSurveyInput,
+        publishOn: dueSelection,
+        status: "paused",
+      },
+      false
+    );
+
+    expect(updatedSurvey.status).toBe("inProgress");
+    expect(prisma.survey.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          publishOn: normalizedDuePublishOn,
+        }),
+      })
+    );
+    expect(mockQueueAuditEventWithoutRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test("saving a due publish schedule in draft does not auto-publish", async () => {
+    const dueSelection = new Date(Date.UTC(2026, 3, 17, 12, 0, 0));
+    const normalizedDuePublishOn = new Date("2026-04-16T22:00:00.000Z");
+
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: null,
+      status: "draft",
+    } as never);
+    prisma.survey.update.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: normalizedDuePublishOn,
+      status: "draft",
+    } as never);
+    prisma.survey.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([] as never);
+
+    const updatedSurvey = await updateSurveyInternal(
+      {
+        ...updateSurveyInput,
+        publishOn: dueSelection,
+        status: "draft",
+      },
+      true
+    );
+
+    expect(updatedSurvey.status).toBe("draft");
+    expect(prisma.survey.updateMany).not.toHaveBeenCalled();
+    expect(mockQueueAuditEventWithoutRequest).toHaveBeenCalledTimes(0);
+  });
+
+  test("creating a paused survey with a due publish schedule catches up immediately", async () => {
+    const dueSelection = new Date(Date.UTC(2026, 3, 17, 12, 0, 0));
+    const normalizedDuePublishOn = new Date("2026-04-16T22:00:00.000Z");
+
+    prisma.survey.create.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: normalizedDuePublishOn,
+      status: "paused",
+      type: "link",
+    } as never);
+    prisma.survey.findMany
+      .mockResolvedValueOnce([
+        createSchedulingCandidate({
+          closeOn: null,
+          publishOn: normalizedDuePublishOn,
+          status: "paused",
+        }),
+      ] as never)
+      .mockResolvedValueOnce([] as never);
+    prisma.survey.updateMany.mockResolvedValueOnce({ count: 1 } as never);
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      publishOn: null,
+      status: "inProgress",
+      type: "link",
+    } as never);
+
+    const createdSurvey = await createSurvey(updateSurveyInput.workspaceId, {
+      ...createSurveyInput,
+      name: "Scheduled survey",
+      publishOn: dueSelection,
+      status: "paused",
+      type: "link",
+    });
+
+    expect(createdSurvey.status).toBe("inProgress");
+    expect(prisma.survey.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          publishOn: normalizedDuePublishOn,
+        }),
+      })
+    );
+    expect(mockQueueAuditEventWithoutRequest).toHaveBeenCalledTimes(1);
+  });
+
+  test("same-day publish and close is rejected", async () => {
+    const sameDaySelection = new Date(Date.UTC(2026, 3, 17, 12, 0, 0));
+
+    prisma.survey.findUnique.mockResolvedValueOnce({
+      ...mockSurveyOutput,
+      closeOn: null,
+      publishOn: null,
+      status: "paused",
+    } as never);
+
+    await expect(
+      updateSurveyInternal(
+        {
+          ...updateSurveyInput,
+          closeOn: sameDaySelection,
+          publishOn: sameDaySelection,
+          status: "paused",
+        },
+        false
+      )
+    ).rejects.toThrow(ValidationError);
+
+    expect(prisma.survey.update).not.toHaveBeenCalled();
+    expect(mockQueueAuditEventWithoutRequest).not.toHaveBeenCalled();
+  });
+
+  test("creating a survey with the same publish and close date is rejected", async () => {
+    const sameDaySelection = new Date(Date.UTC(2026, 3, 17, 12, 0, 0));
+
+    await expect(
+      createSurvey(updateSurveyInput.workspaceId, {
+        ...createSurveyInput,
+        closeOn: sameDaySelection,
+        name: "Scheduled survey",
+        publishOn: sameDaySelection,
+        status: "paused",
+        type: "link",
+      })
+    ).rejects.toThrow(ValidationError);
+
+    expect(prisma.survey.create).not.toHaveBeenCalled();
+    expect(mockQueueAuditEventWithoutRequest).not.toHaveBeenCalled();
+  });
+});

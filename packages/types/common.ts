@@ -1,0 +1,266 @@
+import { z } from "zod";
+
+export const ZBoolean = z.boolean();
+
+export const ZString = z.string();
+
+export const ZUrl = z.url();
+
+/**
+ * Schema for storage URLs that can be either:
+ * - Full URLs (http:// or https://)
+ * - Relative storage paths (/storage/...)
+ */
+export const ZStorageUrl = z.string().refine(
+  (val) => {
+    // Allow relative storage paths
+    if (val.startsWith("/storage/")) {
+      return true;
+    }
+    // Otherwise validate as URL
+    try {
+      const parsed = new URL(val);
+      // The scheme has to be constrained, not just parseable: these values are survey image/video
+      // URLs, organization logos and favicons, and styling background URLs, and they are rendered
+      // straight into `src`/`href` attributes. `new URL()` happily accepts `javascript:`, `data:` and
+      // `vbscript:`, so accepting any parseable URL turned an editable survey field into stored XSS —
+      // on a link survey that executes on the Formbricks origin, and in an embedded survey on the
+      // customer's own site.
+      return parsed.protocol === "https:" || parsed.protocol === "http:";
+    } catch {
+      return false;
+    }
+  },
+  {
+    error: "Must be a valid http(s) URL or a relative storage path (/storage/...)",
+  }
+);
+
+/**
+ * True when a user-authored link target is safe to hand to `window.open()`, `location.replace()` or an
+ * `href`.
+ *
+ * `z.url()` only checks that the value parses as a URL, and `new URL()` happily accepts `javascript:`,
+ * `data:` and `vbscript:` — so validating a link field with `z.url()` turns it into stored XSS. Parsing
+ * (rather than a prefix/regex test) also normalizes obfuscated schemes such as `java\tscript:`, which a
+ * `startsWith` check would wave through.
+ *
+ * The scheme set is an allowlist: `http`/`https` for web links, plus `mailto` and `tel`, which are
+ * legitimate CTA targets, cannot execute script, and are already tolerated by `safeUrlRefinement`.
+ */
+export const isSafeLinkUrl = (url: string): boolean => {
+  try {
+    const { protocol } = new URL(url.trim());
+    return protocol === "https:" || protocol === "http:" || protocol === "mailto:" || protocol === "tel:";
+  } catch {
+    return false;
+  }
+};
+
+export const ZNumber = z.number();
+
+export const ZOptionalNumber = z.number().optional();
+
+export const ZOptionalString = z.string().optional();
+
+export const ZNullableString = z.string().nullable();
+
+export const ZColor = z.string().regex(/^#(?:[A-Fa-f0-9]{3}|[A-Fa-f0-9]{4}|[A-Fa-f0-9]{6}|[A-Fa-f0-9]{8})$/);
+
+export const ZPlacement = z.enum(["bottomLeft", "bottomRight", "topLeft", "topRight", "center"]);
+
+export type TPlacement = z.infer<typeof ZPlacement>;
+
+export const ZOverlay = z.enum(["none", "light", "dark"]);
+
+export type TOverlay = z.infer<typeof ZOverlay>;
+
+export const ZId = z.cuid2();
+
+export const ZUuid = z.uuid();
+
+export const getZSafeUrl = z.string().superRefine((url, ctx) => {
+  safeUrlRefinement(url, ctx);
+});
+
+// Simple URL validation for ending cards - only checks if URL starts with http:// or https://
+// This allows dynamic URLs via hidden fields/recall values
+export const ZEndingCardUrl = z.string().superRefine((url, ctx) => {
+  endingCardUrlRefinement(url, ctx);
+});
+
+export const endingCardUrlRefinement = (url: string, ctx: z.RefinementCtx): void => {
+  // Trim the URL to handle trailing/leading spaces
+  const trimmedUrl = url.trim();
+
+  if (!trimmedUrl.startsWith("http://") && !trimmedUrl.startsWith("https://")) {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL must start with http:// or https://",
+    });
+  }
+};
+
+export const safeUrlRefinement = (url: string, ctx: z.RefinementCtx): void => {
+  if (url.includes(" ") || url.endsWith(" ") || url.startsWith(" ")) {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL must not contain spaces",
+    });
+  }
+
+  // early recall check for better user feedback
+  if (url.startsWith("#recall:")) {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL must not start with a recall value",
+    });
+  }
+
+  // Allow localhost for easy recall testing on self-hosted environments and mailto links
+  if (!url.startsWith("https://") && !url.startsWith("http://localhost") && !url.startsWith("mailto:")) {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL must start with https:// or mailto:",
+    });
+  }
+
+  // Skip further validation for mailto URLs as they have different structure
+  if (url.startsWith("mailto:")) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "mailto:") {
+        ctx.addIssue({
+          code: "custom",
+          message: "Invalid mailto URL format",
+        });
+        return;
+      }
+    } catch {
+      ctx.addIssue({
+        code: "custom",
+        message: "Invalid mailto URL format",
+      });
+    }
+    return;
+  }
+
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname;
+
+    // Check if recall information appears in the hostname (not allowed)
+    if (hostname.includes("#recall:")) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Recall information must appear after the domain, not within it",
+      });
+      return;
+    }
+
+    // Validate domain structure
+    if (hostname) {
+      const addIssue = (): void => {
+        ctx.addIssue({
+          code: "custom",
+          message: "URL is not valid",
+        });
+      };
+
+      // Check if it's localhost (allow for easy recall testing on self-hosted environments)
+      if (hostname === "localhost") {
+        return; // localhost is valid
+      }
+
+      // Check if it's an IPv6 address (simplified check for bracket notation)
+      if (hostname.startsWith("[") && hostname.endsWith("]")) {
+        const ipv6 = hostname.slice(1, -1);
+        // Basic IPv6 validation - common cases like ::1, ::, and basic hex:hex format
+        if (ipv6 === "::1" || ipv6 === "::" || /^[0-9a-fA-F:]+$/.test(ipv6)) {
+          return; // IPv6 address is valid
+        }
+      }
+
+      // For regular domain names, require proper structure
+      if (!hostname.includes(".")) {
+        addIssue();
+        return;
+      }
+
+      const parts = hostname.split(".");
+
+      // Check if it's an IPv4 address
+      // Simple IPv4 validation instead of complex regex
+      if (
+        parts.length === 4 &&
+        parts.every((part) => {
+          const num = parseInt(part, 10);
+          return !isNaN(num) && num >= 0 && num <= 255 && part === num.toString();
+        })
+      ) {
+        return; // IPv4 address is valid
+      }
+
+      // Check if it has a valid top-level domain (at least 2 characters after the last dot, for example: .com, .uk, .de, etc.)
+      const tld = parts[parts.length - 1];
+
+      // TLD validation: must be at least 2 characters and contain valid domain characters
+      // Support punycode TLDs (IDNs) which can contain hyphens and numbers
+      // DNS label limit is 63 characters, but most TLDs are much shorter
+      if (
+        tld.length < 2 ||
+        tld.length > 63 ||
+        !/^[a-zA-Z0-9-]+$/.test(tld) ||
+        tld.startsWith("-") ||
+        tld.endsWith("-")
+      ) {
+        addIssue();
+        return;
+      }
+
+      // Special case: if we have www.something, ensure "something" is not just a single part
+      // www.domain should be www.domain.tld (at least 3 parts total)
+      if (parts[0].toLowerCase() === "www" && parts.length < 3) {
+        addIssue();
+        return;
+      }
+
+      // Check if all parts are valid (no empty parts between dots)
+      if (parts.some((part) => part.length === 0)) {
+        addIssue();
+        return;
+      }
+
+      // Ensure we have at least a domain name + TLD (minimum 2 parts)
+      if (parts.length < 2) {
+        addIssue();
+        return;
+      }
+
+      // Validate each part contains only valid domain characters
+      const domainRegex = /^[a-zA-Z0-9-]+$/;
+      for (const part of parts) {
+        if (!domainRegex.test(part) || part.startsWith("-") || part.endsWith("-")) {
+          addIssue();
+          return;
+        }
+      }
+    }
+  } catch {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL is not valid",
+    });
+  }
+};
+
+export const ZEmail = z.email();
+
+export const isValidIanaTimeZone = (value: string): boolean => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+};

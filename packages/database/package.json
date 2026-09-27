@@ -1,0 +1,105 @@
+{
+  "name": "@formbricks/database",
+  "private": true,
+  "version": "0.1.0",
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "generated",
+    "schema",
+    "prisma.config.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./types/*": {
+      "types": "./types/*.ts",
+      "import": "./types/*.ts"
+    },
+    "./prisma": {
+      "types": "./dist/src/prisma.d.ts",
+      "import": "./dist/src/prisma.js",
+      "require": "./dist/src/prisma.cjs"
+    },
+    "./prisma-browser": {
+      "types": "./dist/src/prisma-browser.d.ts",
+      "import": "./dist/src/prisma-browser.js",
+      "require": "./dist/src/prisma-browser.cjs"
+    },
+    "./prisma-adapter": {
+      "types": "./dist/src/prisma-adapter.d.ts",
+      "import": "./dist/src/prisma-adapter.js",
+      "require": "./dist/src/prisma-adapter.cjs"
+    },
+    "./zod/*": {
+      "types": "./zod/*.ts",
+      "import": "./zod/*.ts"
+    }
+  },
+  "scripts": {
+    "clean": "rimraf .turbo node_modules dist",
+    "build": "pnpm generate && vite build && tsc -p tsconfig.generated-prisma.json",
+    "dev": "vite build --watch",
+    "db:migrate:deploy": "node ./dist/scripts/apply-migrations.js",
+    "db:migrate:dev": "pnpm build && dotenv -e ../../.env -- sh -c \"pnpm generate && node ./dist/scripts/apply-migrations.js\"",
+    "db:migrate:ci": "dotenv -e ../../.env -- node ./dist/scripts/apply-migrations.js",
+    "db:create-saml-database:deploy": "env SAML_DATABASE_URL=\"${SAML_DATABASE_URL}\" node ./dist/scripts/create-saml-database.js",
+    "db:create-saml-database:dev": "dotenv -e ../../.env -- node ./dist/scripts/create-saml-database.js",
+    "db:push": "prisma db push --accept-data-loss --config ./prisma.config.ts",
+    "db:seed": "dotenv -e ../../.env -- tsx src/seed.ts",
+    "db:seed:clear": "dotenv -e ../../.env -- tsx src/seed.ts --clear",
+    "db:seed:contract": "dotenv -e ../../.env -- tsx src/scripts/seed-contract-fixtures.ts",
+    "db:setup": "pnpm db:migrate:dev && pnpm db:create-saml-database:dev",
+    "db:start": "pnpm db:setup",
+    "check:migration-drift": "dotenv -e ../../.env -- tsx ./src/scripts/check-migration-drift.ts",
+    "format": "prisma format --config ./prisma.config.ts",
+    "generate": "node ./src/scripts/clean-generated-prisma.mjs && prisma generate --config ./prisma.config.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "lint:migrations": "squawk --config ./.squawk.toml",
+    "generate-data-migration": "tsx ./src/scripts/generate-data-migration.ts",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "create-migration": "dotenv -e ../../.env -- tsx ./src/scripts/create-migration.ts"
+  },
+  "dependencies": {
+    "@formbricks/i18n-utils": "workspace:*",
+    "@formbricks/logger": "workspace:*",
+    "@formbricks/types": "workspace:*",
+    "@formbricks/workflows": "workspace:*",
+    "@paralleldrive/cuid2": "catalog:",
+    "@prisma/adapter-pg": "7.8.0",
+    "@prisma/client": "catalog:",
+    "bcryptjs": "catalog:",
+    "pg": "8.16.3",
+    "pino": "catalog:",
+    "uuid": "catalog:",
+    "zod": "catalog:",
+    "zod-openapi": "catalog:"
+  },
+  "devDependencies": {
+    "@formbricks/config-eslint": "workspace:*",
+    "@formbricks/config-typescript": "workspace:*",
+    "@formbricks/vite-plugins": "workspace:*",
+    "@types/pg": "8.16.0",
+    "@vitest/coverage-v8": "catalog:",
+    "dotenv": "catalog:",
+    "dotenv-cli": "catalog:",
+    "glob": "catalog:",
+    "prisma": "7.8.0",
+    "prisma-json-types-generator": "4.1.1",
+    "squawk-cli": "2.63.0",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-dts": "catalog:",
+    "vitest": "catalog:"
+  }
+}
