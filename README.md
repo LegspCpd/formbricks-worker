@@ -102,34 +102,35 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 5. 在 **Account Resources** 中选择你的账号
 6. 复制生成的 Token
 
-#### 第三步：在 Cloudflare 创建 Pages 项目
+#### 第三步：在 Cloudflare 创建 Worker
 
 1. 进入 **Workers & Pages**，点击 **Create application**
-2. 选择 **Pages** 标签，点击 **Connect to Git**
-3. 选择你 Fork 的 `formbricks-worker` 仓库
-4. 配置构建设置：
+2. 选择 **Workers** 标签，点击 **Create Worker**
+3. 命名为 `formbricks-worker`，点击 **Deploy**
+4. 进入 Worker 的 **Settings → Integrations → Git**，点击 **Connect to Git**
+5. 选择你 Fork 的 `formbricks-worker` 仓库
+6. 配置构建设置：
 
 | 设置项 | 值 |
 |--------|-----|
-| **Framework preset** | Next.js |
 | **Build command** | `pnpm install && pnpm build:cf` |
 | **Build output directory** | `.open-next` |
 | **Root directory** | `apps/web` |
 
-5. 添加环境变量（见下方环境变量表）
-6. 点击 **Save and Deploy**
+7. 添加环境变量（见下方环境变量表）
+8. 点击 **Save and Deploy**
 
 #### 第四步：配置环境变量
 
-在 Cloudflare Pages 的 **Settings → Environment variables** 中添加以下变量：
+在 Cloudflare Worker 的 **Settings → Variables** 中添加以下变量：
 
 | 变量名 | 说明 | 示例 |
 |--------|------|------|
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（第二步创建） | `xxxxxxxxxxxxxxxx` |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账号 ID（Dashboard 右侧栏可见） | `xxxxxxxxxxxxxxxx` |
 | `DATABASE_URL` | Supabase PostgreSQL 连接字符串 | `postgresql://postgres:password@db.xxx.supabase.co:5432/postgres` |
-| `WEBAPP_URL` | 你的应用 URL | `https://your-app.pages.dev` |
-| `BETTER_AUTH_URL` | 同 WEBAPP_URL | `https://your-app.pages.dev` |
+| `WEBAPP_URL` | 你的应用 URL | `https://your-app.workers.dev` |
+| `BETTER_AUTH_URL` | 同 WEBAPP_URL | `https://your-app.workers.dev` |
 | `BETTER_AUTH_SECRET` | 随机密钥（32位以上） | `openssl rand -hex 32` |
 | `ENCRYPTION_KEY` | 加密密钥（32位十六进制） | `openssl rand -hex 32` |
 | `CRON_SECRET` | Cron 任务密钥 | `openssl rand -hex 32` |
@@ -144,14 +145,14 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 
 #### 第五步：绑定域名（可选）
 
-1. 进入 Pages 项目的 **Custom domains** 标签
-2. 点击 **Set up a custom domain**
+1. 进入 Worker 的 **Settings → Domains & Routes** 标签
+2. 点击 **Add domain**
 3. 输入你的域名，按提示配置 DNS 记录
 4. 等待 DNS 生效，即可通过域名访问
 
 ### 部署完成
 
-部署完成后，访问你的 Cloudflare Pages URL（如 `https://your-app.pages.dev`），即可开始使用 Formbricks。
+部署完成后，访问你的 Cloudflare Workers URL（如 `https://your-app.workers.dev`），即可开始使用 Formbricks。
 
 **首次访问时**，系统会自动创建管理员账户，使用你设置的 `BETTER_AUTH_URL` 访问注册页面即可。
 

@@ -7,10 +7,6 @@
     "nodejs_compat",
     "global_fetch_strictly_public"
   ],
-  "assets": {
-    "directory": ".open-next/assets",
-    "binding": "ASSETS"
-  },
   "observability": {
     "enabled": true
   },
@@ -40,8 +36,10 @@
       "binding": "JOBS_QUEUE"
     }
   ],
-  "images": {
-    "binding": "IMAGES"
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
   },
   "vars": {
     "NODE_ENV": "production"
