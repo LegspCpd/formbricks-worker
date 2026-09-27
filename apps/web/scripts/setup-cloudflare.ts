@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 
 const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
@@ -22,6 +23,27 @@ interface Queue {
   name: string;
   created_on: string;
 }
+
+const runDatabaseMigrations = (): void => {
+  console.log("Running database migrations...");
+
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is required to run migrations");
+  }
+
+  try {
+    const prismaDir = resolve(__dirname, "../../../packages/database");
+    execSync("npx prisma migrate deploy", {
+      cwd: prismaDir,
+      stdio: "inherit",
+      env: { ...process.env },
+    });
+    console.log("  Database migrations applied successfully");
+  } catch (error) {
+    console.error("  Database migrations failed:", error);
+    throw error;
+  }
+};
 
 const getCloudflareApiToken = (): string => {
   const token = process.env.CLOUDFLARE_API_TOKEN;
@@ -182,9 +204,13 @@ const updateWranglerConfig = (config: {
 };
 
 const main = async (): Promise<void> => {
-  console.log("Setting up Cloudflare resources...");
+  console.log("=== Formbricks Cloudflare Setup ===\n");
 
   try {
+    runDatabaseMigrations();
+
+    console.log("\nSetting up Cloudflare resources...");
+
     const cacheKvId = await ensureKVNamespace("formbricks_cache_kv");
     const tagCacheKvId = await ensureKVNamespace("formbricks_tag_cache_kv");
     const memoryCacheKvId = await ensureKVNamespace("formbricks_memory_cache_kv");
@@ -199,9 +225,9 @@ const main = async (): Promise<void> => {
       queueName,
     });
 
-    console.log("Cloudflare resources setup complete!");
+    console.log("\n=== Setup complete! ===");
   } catch (error) {
-    console.error("Failed to setup Cloudflare resources:", error);
+    console.error("\nSetup failed:", error);
     process.exit(1);
   }
 };

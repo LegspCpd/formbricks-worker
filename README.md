@@ -89,18 +89,7 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 
 点击本仓库右上角的 **Fork** 按钮，将仓库复制到你的 GitHub 账号下。
 
-#### 第二步：在 Supabase 创建数据库
-
-1. 登录 [Supabase](https://supabase.com/)
-2. 创建一个新项目
-3. 进入 **Settings → Database**，复制 **Connection String**（选择 "Session pooler" 模式）
-4. 在 SQL Editor 中运行以下命令初始化数据库：
-
-```bash
-cd packages/database && npx prisma migrate deploy
-```
-
-#### 第三步：在 Cloudflare 创建 API Token
+#### 第二步：在 Cloudflare 创建 API Token
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. 进入 **My Profile → API Tokens**
@@ -113,7 +102,7 @@ cd packages/database && npx prisma migrate deploy
 5. 在 **Account Resources** 中选择你的账号
 6. 复制生成的 Token
 
-#### 第四步：在 Cloudflare 创建 Pages 项目
+#### 第三步：在 Cloudflare 创建 Pages 项目
 
 1. 进入 **Workers & Pages**，点击 **Create application**
 2. 选择 **Pages** 标签，点击 **Connect to Git**
@@ -130,13 +119,13 @@ cd packages/database && npx prisma migrate deploy
 5. 添加环境变量（见下方环境变量表）
 6. 点击 **Save and Deploy**
 
-#### 第五步：配置环境变量
+#### 第四步：配置环境变量
 
 在 Cloudflare Pages 的 **Settings → Environment variables** 中添加以下变量：
 
 | 变量名 | 说明 | 示例 |
 |--------|------|------|
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（第三步创建） | `xxxxxxxxxxxxxxxx` |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（第二步创建） | `xxxxxxxxxxxxxxxx` |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账号 ID（Dashboard 右侧栏可见） | `xxxxxxxxxxxxxxxx` |
 | `DATABASE_URL` | Supabase PostgreSQL 连接字符串 | `postgresql://postgres:password@db.xxx.supabase.co:5432/postgres` |
 | `WEBAPP_URL` | 你的应用 URL | `https://your-app.pages.dev` |
@@ -146,9 +135,14 @@ cd packages/database && npx prisma migrate deploy
 | `CRON_SECRET` | Cron 任务密钥 | `openssl rand -hex 32` |
 | `LOG_LEVEL` | 日志级别 | `info` |
 
-> **注意**：构建过程中会自动创建 KV 命名空间、R2 存储桶和 Queue，无需手动创建。如果资源已存在则自动复用。
+> **全自动初始化**：构建过程中会自动完成以下操作，无需手动执行：
+> - 数据库迁移（`prisma migrate deploy`）
+> - KV 命名空间创建（如不存在）
+> - R2 存储桶创建（如不存在）
+> - Queue 创建（如不存在）
+> - 资源绑定配置自动更新
 
-#### 第六步：绑定域名（可选）
+#### 第五步：绑定域名（可选）
 
 1. 进入 Pages 项目的 **Custom domains** 标签
 2. 点击 **Set up a custom domain**
@@ -158,6 +152,8 @@ cd packages/database && npx prisma migrate deploy
 ### 部署完成
 
 部署完成后，访问你的 Cloudflare Pages URL（如 `https://your-app.pages.dev`），即可开始使用 Formbricks。
+
+**首次访问时**，系统会自动创建管理员账户，使用你设置的 `BETTER_AUTH_URL` 访问注册页面即可。
 
 ## 🐳 本地开发
 
