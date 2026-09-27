@@ -100,13 +100,25 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 cd packages/database && npx prisma migrate deploy
 ```
 
-#### 第三步：在 Cloudflare 创建资源
+#### 第三步：在 Cloudflare 创建 API Token
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
-2. 进入 **Workers & Pages**，点击 **Create application**
-3. 选择 **Pages** 标签，点击 **Connect to Git**
-4. 选择你 Fork 的 `formbricks-worker` 仓库
-5. 配置构建设置：
+2. 进入 **My Profile → API Tokens**
+3. 点击 **Create Token**，选择 **Create Custom Token**
+4. 添加以下权限：
+   - `Account / Workers KV Storage / Edit`
+   - `Account / Workers Scripts / Edit`
+   - `Account / R2 Storage / Edit`
+   - `Account / Cloudflare Queues / Edit`
+5. 在 **Account Resources** 中选择你的账号
+6. 复制生成的 Token
+
+#### 第四步：在 Cloudflare 创建 Pages 项目
+
+1. 进入 **Workers & Pages**，点击 **Create application**
+2. 选择 **Pages** 标签，点击 **Connect to Git**
+3. 选择你 Fork 的 `formbricks-worker` 仓库
+4. 配置构建设置：
 
 | 设置项 | 值 |
 |--------|-----|
@@ -115,15 +127,17 @@ cd packages/database && npx prisma migrate deploy
 | **Build output directory** | `.open-next` |
 | **Root directory** | `apps/web` |
 
-6. 添加环境变量（见下方环境变量表）
-7. 点击 **Save and Deploy**
+5. 添加环境变量（见下方环境变量表）
+6. 点击 **Save and Deploy**
 
-#### 第四步：配置环境变量
+#### 第五步：配置环境变量
 
 在 Cloudflare Pages 的 **Settings → Environment variables** 中添加以下变量：
 
 | 变量名 | 说明 | 示例 |
 |--------|------|------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（第三步创建） | `xxxxxxxxxxxxxxxx` |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账号 ID（Dashboard 右侧栏可见） | `xxxxxxxxxxxxxxxx` |
 | `DATABASE_URL` | Supabase PostgreSQL 连接字符串 | `postgresql://postgres:password@db.xxx.supabase.co:5432/postgres` |
 | `WEBAPP_URL` | 你的应用 URL | `https://your-app.pages.dev` |
 | `BETTER_AUTH_URL` | 同 WEBAPP_URL | `https://your-app.pages.dev` |
@@ -132,33 +146,9 @@ cd packages/database && npx prisma migrate deploy
 | `CRON_SECRET` | Cron 任务密钥 | `openssl rand -hex 32` |
 | `LOG_LEVEL` | 日志级别 | `info` |
 
-#### 第五步：创建 Cloudflare 资源
+> **注意**：构建过程中会自动创建 KV 命名空间、R2 存储桶和 Queue，无需手动创建。如果资源已存在则自动复用。
 
-在 Cloudflare Dashboard 中创建以下资源：
-
-1. **KV 命名空间**（3个）：
-   - `formbricks_cache_kv` — 缓存
-   - `formbricks_tag_cache_kv` — 标签缓存
-   - `formbricks_memory_cache_kv` — 内存缓存
-
-2. **R2 存储桶**（1个）：
-   - `formbricks-storage` — 文件存储
-
-3. **Queue**（1个）：
-   - `formbricks-jobs` — 后台任务队列
-
-创建后，在 Pages 项目的 **Settings → Functions** 中绑定这些资源：
-
-| 绑定名称 | 类型 | 资源 |
-|----------|------|------|
-| `CACHE_KV` | KV namespace | formbricks_cache_kv |
-| `TAG_CACHE_KV` | KV namespace | formbricks_tag_cache_kv |
-| `MEMORY_CACHE_KV` | KV namespace | formbricks_memory_cache_kv |
-| `STORAGE_R2` | R2 bucket | formbricks-storage |
-| `JOBS_QUEUE` | Queue | formbricks-jobs |
-| `ASSETS` | Assets | 自动绑定 |
-
-#### 第六步：绑定域名
+#### 第六步：绑定域名（可选）
 
 1. 进入 Pages 项目的 **Custom domains** 标签
 2. 点击 **Set up a custom domain**
