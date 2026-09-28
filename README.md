@@ -131,8 +131,7 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 |--------|------|------|
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（第二步创建） | `xxxxxxxxxxxxxxxx` |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账号 ID（Dashboard 右侧栏可见） | `xxxxxxxxxxxxxxxx` |
-| `DATABASE_URL` | PostgreSQL 连接字符串（Supabase 或 Neon） | 见下方说明 |
-| `HYPERDRIVE` | Hyperdrive 连接字符串（使用 Neon + Hyperdrive 时） | `postgresql://formbricks-hyperdrive:<token>@<hyperdrive-host>/postgres?sslmode=require` |
+| `DATABASE_URL` | PostgreSQL 连接字符串（见下方数据库配置说明） | 见下方说明 |
 | `WEBAPP_URL` | 你的应用 URL | `https://your-app.workers.dev` |
 | `BETTER_AUTH_URL` | 同 WEBAPP_URL | `https://your-app.workers.dev` |
 | `BETTER_AUTH_SECRET` | 随机密钥（32位以上） | `openssl rand -hex 32` |
@@ -140,50 +139,58 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 | `CRON_SECRET` | Cron 任务密钥 | `openssl rand -hex 32` |
 | `LOG_LEVEL` | 日志级别 | `info` |
 
-**数据库连接字符串格式**：
+**数据库配置说明**：Hyperdrive 是**可选**的，以下两种方式任选其一：
 
-- **Supabase**：`postgresql://postgres:password@db.xxx.supabase.co:5432/postgres`
-- **Neon**：`postgresql://user:password@ep-xxx.region.aws.neon.tech/dbname?sslmode=require`
-- **Neon + Hyperdrive**（推荐用于 Cloudflare Workers）：见下方说明
+**方式一（推荐）：使用 Hyperdrive**
 
-#### Neon + Hyperdrive 配置（推荐）
+在 Cloudflare Workers 上访问 Neon 数据库推荐使用 Hyperdrive，它提供连接池和更快的访问速度。使用前需要创建 Hyperdrive 配置：
 
-在 Cloudflare Workers 上访问 Neon 数据库推荐使用 Hyperdrive，它提供连接池和更快的访问速度。
-
-**第一步：在 Neon 中创建 hyperdrive-user 角色**
-
-在 Neon 控制台的 SQL Editor 中执行：
+1. 在 Neon 控制台的 SQL Editor 中执行：
 
 ```sql
 CREATE USER hyperdrive-user WITH PASSWORD 'your-password';
 GRANT CONNECT ON DATABASE your_database TO hyperdrive-user;
 ```
 
-**第二步：创建 Hyperdrive 配置**
+2. 创建 Hyperdrive 配置（选择以下任一方式）：
 
-选择以下任一方式：
-
-**方式一：wrangler CLI**
+**wrangler CLI：**
 
 ```bash
 npx wrangler hyperdrive create formbricks-hyperdrive \
   --connection-string="postgresql://hyperdrive-user:your-password@ep-xxx.region.aws.neon.tech/your_database"
 ```
 
-**方式二：Cloudflare Dashboard**
+**Cloudflare Dashboard：**
 
 1. 进入 **Workers & Pages → Your Worker → Settings → Integrations → Hyperdrive**
 2. 点击 **Connect a database**
 3. 选择你的 Neon 数据库
 4. 复制生成的 Hyperdrive 连接字符串
 
-**第三步：配置环境变量**
-
-将 Hyperdrive 连接字符串作为 `DATABASE_URL` 环境变量：
+3. 将 Hyperdrive 连接字符串设置为 `DATABASE_URL` 环境变量：
 
 ```
 postgresql://formbricks-hyperdrive:<token>@<hyperdrive-host>/postgres?sslmode=require
 ```
+
+4. 在 `wrangler.jsonc` 中启用 hyperdrive 绑定（该配置为可选，默认已注释，取消注释并填入你的 Hyperdrive id）：
+
+```jsonc
+"hyperdrive": [
+  {
+    "binding": "HYPERDRIVE",
+    "id": "your_hyperdrive_id"
+  }
+],
+```
+
+**方式二：不使用 Hyperdrive**
+
+直接使用 Neon 的 serverless driver，无需创建 Hyperdrive 配置，`wrangler.jsonc` 中的 hyperdrive 配置保持注释状态即可。将数据库连接字符串直接设置为 `DATABASE_URL` 环境变量：
+
+- **Neon**：`postgresql://user:password@ep-xxx.region.aws.neon.tech/dbname?sslmode=require`
+- **Supabase**：`postgresql://postgres:password@db.xxx.supabase.co:5432/postgres`
 
 > **全自动初始化**：构建过程中会自动完成以下操作，无需手动执行：
 > - 数据库迁移（`prisma migrate deploy`）

@@ -36,12 +36,15 @@
       "binding": "JOBS_QUEUE"
     }
   ],
-  "hyperdrive": [
-    {
-      "binding": "HYPERDRIVE",
-      "id": "your_hyperdrive_id"
-    }
-  ],
+  // 可选配置：
+  // - 如果使用 Neon + Hyperdrive，取消下面的注释并填入你的 Hyperdrive id
+  // - 如果不需要 Hyperdrive，保持注释状态即可
+  // "hyperdrive": [
+  //   {
+  //     "binding": "HYPERDRIVE",
+  //     "id": "your_hyperdrive_id"
+  //   }
+  // ],
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS",
