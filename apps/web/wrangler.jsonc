@@ -36,6 +36,12 @@
       "binding": "JOBS_QUEUE"
     }
   ],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "your_hyperdrive_id"
+    }
+  ],
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS",
