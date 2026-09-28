@@ -9,7 +9,12 @@
     "prisma.config.mjs",
     "turbo.json"
   ],
-  "globalEnv": ["MIGRATE_DATABASE_URL", "SHADOW_DATABASE_URL"],
+  "globalEnv": [
+    "MIGRATE_DATABASE_URL",
+    "SHADOW_DATABASE_URL",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID"
+  ],
   "globalPassThroughEnv": ["SEED_API_KEY"],
   "tasks": {
     "@formbricks/ai#build": {

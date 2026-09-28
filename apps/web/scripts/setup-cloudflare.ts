@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
@@ -33,7 +33,8 @@ const runDatabaseMigrations = (): void => {
 
   try {
     const prismaDir = resolve(__dirname, "../../../packages/database");
-    execSync("npx prisma migrate deploy", {
+    const prismaConfigPath = resolve(prismaDir, "prisma.config.ts");
+    execSync(`npx prisma migrate deploy --config ${prismaConfigPath}`, {
       cwd: prismaDir,
       stdio: "inherit",
       env: { ...process.env },
@@ -61,10 +62,7 @@ const getCloudflareAccountId = (): string => {
   return accountId;
 };
 
-const cloudflareApi = async <T>(
-  path: string,
-  options: RequestInit = {}
-): Promise<CloudflareResponse<T>> => {
+const cloudflareApi = async <T>(path: string, options: RequestInit = {}): Promise<CloudflareResponse<T>> => {
   const token = getCloudflareApiToken();
   const response = await fetch(`${CLOUDFLARE_API_BASE}${path}`, {
     ...options,
@@ -92,22 +90,17 @@ const findKVNamespace = async (title: string): Promise<KVNamespace | null> => {
 
 const createKVNamespace = async (title: string): Promise<KVNamespace> => {
   const accountId = getCloudflareAccountId();
-  const data = await cloudflareApi<KVNamespace>(
-    `/accounts/${accountId}/storage/kv/namespaces`,
-    {
-      method: "POST",
-      body: JSON.stringify({ title }),
-    }
-  );
+  const data = await cloudflareApi<KVNamespace>(`/accounts/${accountId}/storage/kv/namespaces`, {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
   return data.result;
 };
 
 const findR2Bucket = async (name: string): Promise<R2Bucket | null> => {
   const accountId = getCloudflareAccountId();
   try {
-    const data = await cloudflareApi<R2Bucket[]>(
-      `/accounts/${accountId}/r2/buckets?per_page=100`
-    );
+    const data = await cloudflareApi<R2Bucket[]>(`/accounts/${accountId}/r2/buckets?per_page=100`);
     return data.result.find((b) => b.name === name) ?? null;
   } catch {
     return null;
@@ -116,22 +109,17 @@ const findR2Bucket = async (name: string): Promise<R2Bucket | null> => {
 
 const createR2Bucket = async (name: string): Promise<R2Bucket> => {
   const accountId = getCloudflareAccountId();
-  const data = await cloudflareApi<R2Bucket>(
-    `/accounts/${accountId}/r2/buckets`,
-    {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    }
-  );
+  const data = await cloudflareApi<R2Bucket>(`/accounts/${accountId}/r2/buckets`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
   return data.result;
 };
 
 const findQueue = async (name: string): Promise<Queue | null> => {
   const accountId = getCloudflareAccountId();
   try {
-    const data = await cloudflareApi<Queue[]>(
-      `/accounts/${accountId}/queues?per_page=100`
-    );
+    const data = await cloudflareApi<Queue[]>(`/accounts/${accountId}/queues?per_page=100`);
     return data.result.find((q) => q.name === name) ?? null;
   } catch {
     return null;
@@ -140,13 +128,10 @@ const findQueue = async (name: string): Promise<Queue | null> => {
 
 const createQueue = async (name: string): Promise<Queue> => {
   const accountId = getCloudflareAccountId();
-  const data = await cloudflareApi<Queue>(
-    `/accounts/${accountId}/queues`,
-    {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    }
-  );
+  const data = await cloudflareApi<Queue>(`/accounts/${accountId}/queues`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
   return data.result;
 };
 
@@ -196,7 +181,10 @@ const updateWranglerConfig = (config: {
   content = content.replace(/"id":\s*"formbricks_cache_kv"/, `"id": "${config.cacheKvId}"`);
   content = content.replace(/"id":\s*"formbricks_tag_cache_kv"/, `"id": "${config.tagCacheKvId}"`);
   content = content.replace(/"id":\s*"formbricks_memory_cache_kv"/, `"id": "${config.memoryCacheKvId}"`);
-  content = content.replace(/"bucket_name":\s*"formbricks-storage"/, `"bucket_name": "${config.r2BucketName}"`);
+  content = content.replace(
+    /"bucket_name":\s*"formbricks-storage"/,
+    `"bucket_name": "${config.r2BucketName}"`
+  );
   content = content.replace(/"name":\s*"formbricks-jobs"/, `"name": "${config.queueName}"`);
 
   writeFileSync(wranglerPath, content);
