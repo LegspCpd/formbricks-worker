@@ -212,6 +212,24 @@ const emptyStringToUndefined = (value: unknown) =>
   typeof value === "string" && value.trim() === "" ? undefined : value;
 const ZOptionalNonEmptyString = z.preprocess(emptyStringToUndefined, z.string().trim().min(1).optional());
 /**
+ * Blank normalizes to unset; a value without a scheme (e.g. `formbricks.example.com`) is treated as
+ * HTTPS, so a one-click deployment does not have to know the exact scheme up front.
+ */
+const coerceToAbsoluteUrl = (value: unknown): unknown => {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const trimmed = value.trim();
+
+  if (trimmed === "") {
+    return undefined;
+  }
+
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+};
+const ZOptionalAbsoluteUrl = z.preprocess(coerceToAbsoluteUrl, z.url().optional());
+/**
  * Blank normalizes to unset, but a non-blank value is kept VERBATIM — no `.trim()`, which in zod is a
  * transform and would rewrite the parsed value. For a secret that is fatal: an instance whose value
  * carries a trailing newline (what `kubectl create secret --from-file` stores, and what the chart
@@ -496,7 +514,7 @@ const parsedEnv = createEnv({
     // changing its value, which invalidates every session and outstanding token. Warned about at boot
     // instead (`warnOnAuthSecretRisks`).
     BETTER_AUTH_SECRET: ZOptionalVerbatimSecret,
-    BETTER_AUTH_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
+    BETTER_AUTH_URL: ZOptionalAbsoluteUrl,
     MCP_OAUTH_JWKS_URL: ZMcpOauthJwksUrl.optional(),
     MAIL_FROM_NAME: z.string().optional(),
     NOTION_OAUTH_CLIENT_ID: z.string().optional(),
@@ -572,7 +590,7 @@ const parsedEnv = createEnv({
     TURNSTILE_SITE_KEY: z.string().optional(),
     RECAPTCHA_SITE_KEY: z.string().optional(),
     RECAPTCHA_SECRET_KEY: z.string().optional(),
-    WEBAPP_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
+    WEBAPP_URL: ZOptionalAbsoluteUrl,
     UNSPLASH_ACCESS_KEY: z.string().optional(),
 
     NODE_ENV: z.enum(["development", "production", "test"]).optional(),
