@@ -1,0 +1,68 @@
+name: Retry Cloudflare deploy after a runner loss
+
+# GitHub-hosted runners are occasionally withdrawn from under a job. The runner then shuts the job's
+# steps down, the log ends with
+#
+#     ##[error]The runner has received a shutdown signal. This can happen when the runner service is
+#     stopped, or a manually started runner is canceled.
+#     ##[error]The operation was canceled.
+#
+# and the run is reported as failed/cancelled even though neither the build nor the deploy failed --
+# a run killed this way has `conclusion: failure` while the step is `cancelled`, which is different
+# from a workflow-level cancel (that one makes the *run* `cancelled`). This watcher recognises the
+# runner-side signature in the failed job's log and re-runs the deploy instead of leaving it red.
+on:
+  workflow_run:
+    workflows: ["Deploy to Cloudflare Workers"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cf-deploy-rerun-${{ github.event.workflow_run.workflow_id }}
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    name: Re-run the deploy if the runner was lost
+    if: >-
+      github.event.workflow_run.conclusion != 'success' &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Re-run when the runner was lost, not when the build failed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          # A newer run of the same workflow means this one is superseded: there is nothing to rescue,
+          # and re-running it would only fight the concurrency group of the run that came after it.
+          latest=$(gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?per_page=1" --jq '.workflow_runs[0].id')
+          if [ "${latest}" != "${RUN_ID}" ]; then
+            echo "Run ${latest} is newer than ${RUN_ID}; leaving this one alone."
+            exit 0
+          fi
+
+          job=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --jq '.jobs[0].id')
+          log=$(mktemp)
+          if ! gh api "repos/${REPO}/actions/jobs/${job}/logs" >"${log}" 2>/dev/null; then
+            echo "Could not read the job log; not re-running."
+            exit 0
+          fi
+
+          # Strings only the runner host can produce. A genuine build failure would not match any of
+          # them, and re-running it would only waste another build.
+          if grep -qE 'The runner has received a shutdown signal|lost communication with the server|The operation was canceled by the runner service' "${log}"; then
+            echo "Runner loss detected (attempt ${ATTEMPT}); re-running the failed jobs."
+            gh api --method POST "repos/${REPO}/actions/runs/${RUN_ID}/rerun-failed-jobs"
+          else
+            echo "No runner-loss marker in the log; treating this as a real failure and not re-running."
+          fi
