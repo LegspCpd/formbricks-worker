@@ -144,6 +144,7 @@
         "RECAPTCHA_SECRET_KEY",
         "RECAPTCHA_SITE_KEY",
         "REDIS_URL",
+        "RESEND_API_KEY",
         "S3_ACCESS_KEY",
         "S3_BUCKET_NAME",
         "S3_FORCE_PATH_STYLE",

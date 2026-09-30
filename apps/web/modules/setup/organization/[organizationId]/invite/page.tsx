@@ -2,7 +2,7 @@ import { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { AuthenticationError } from "@formbricks/types/errors";
 import { withAuthorizationSurface } from "@/lib/authorization/context";
-import { SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_USER } from "@/lib/constants";
+import { IS_RESEND_CONFIGURED, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_USER } from "@/lib/constants";
 import { getTranslate } from "@/lingodotdev/server";
 import { getSession } from "@/modules/auth/lib/session";
 import { InviteMembers } from "@/modules/setup/organization/[organizationId]/invite/components/invite-members";
@@ -24,7 +24,9 @@ export const InvitePage = async (props: InvitePageProps) => {
   // despite the shared name: onboarding also wants credentials present before it stops warning. Do not
   // "de-duplicate" this against that constant — an authenticated relay with `SMTP_AUTHENTICATED=0` is a
   // valid setup, so importing it would silently drop the warning for a half-configured mailer.
-  const IS_SMTP_CONFIGURED = Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASSWORD);
+  // Resend needs no separate credentials beyond its key, so its flag is already the complete check.
+  const IS_SMTP_CONFIGURED =
+    Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASSWORD) || IS_RESEND_CONFIGURED;
   const session = await getSession();
   if (!session) throw new AuthenticationError(t("common.session_not_found"));
 

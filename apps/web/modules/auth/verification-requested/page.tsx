@@ -7,7 +7,7 @@
 import Link from "next/link";
 import { logger } from "@formbricks/logger";
 import { ZUserEmail } from "@formbricks/types/user";
-import { IS_SMTP_CONFIGURED, WEBAPP_URL } from "@/lib/constants";
+import { IS_EMAIL_CONFIGURED, WEBAPP_URL } from "@/lib/constants";
 import { getEmailFromEmailToken } from "@/lib/jwt";
 import { getTranslate } from "@/lingodotdev/server";
 import { FormWrapper } from "@/modules/auth/components/form-wrapper";
@@ -39,7 +39,7 @@ export const VerificationRequestedPage = async ({
   // no mailer this renders for everyone, including someone whose address already had an account and for
   // whom nothing was created. The resend button is hidden in that state too — it cannot work — leaving
   // the log-in link as the only offered action.
-  const mailerNotConfigured = !IS_SMTP_CONFIGURED;
+  const mailerNotConfigured = !IS_EMAIL_CONFIGURED;
   // Carry the callback (for an invite sign-up, `/invite?token=…`) into the log-in link below, so a
   // visitor who already has an account can log in and land straight back on the invite. Present for
   // every invited visitor, not just those with an account — the link must not vary with that

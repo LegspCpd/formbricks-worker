@@ -525,6 +525,9 @@ const parsedEnv = createEnv({
     OIDC_ISSUER: z.string().optional(),
     OIDC_SIGNING_ALGORITHM: z.string().optional(),
     REDIS_URL: z.preprocess(emptyStringToUndefined, z.url("REDIS_URL must be a valid URL").optional()),
+    // Turns on the Resend HTTP mail API. Unlike SMTP it needs no outbound socket, which is what lets
+    // a Workers deployment send mail at all. `MAIL_FROM` / `MAIL_FROM_NAME` supply the sender.
+    RESEND_API_KEY: z.string().optional(),
     PASSWORD_HIBP_CHECK_DISABLED: z.enum(["1", "0"]).optional(),
     PASSWORD_RESET_DISABLED: z.enum(["1", "0"]).optional(),
     PASSWORD_RESET_TOKEN_LIFETIME_MINUTES: z.coerce.number().int().min(5).max(120).optional().default(30),
@@ -725,6 +728,7 @@ const parsedEnv = createEnv({
     RATE_LIMITING_DISABLED: process.env.RATE_LIMITING_DISABLED,
     TRUSTED_PROXY_HOP_COUNT: process.env.TRUSTED_PROXY_HOP_COUNT,
     TELEMETRY_DISABLED: process.env.TELEMETRY_DISABLED,
+    RESEND_API_KEY: process.env.RESEND_API_KEY,
     S3_ACCESS_KEY: process.env.S3_ACCESS_KEY,
     S3_BUCKET_NAME: process.env.S3_BUCKET_NAME,
     S3_REGION: process.env.S3_REGION,

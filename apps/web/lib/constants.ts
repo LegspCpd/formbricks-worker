@@ -103,6 +103,28 @@ export const MAIL_FROM = env.MAIL_FROM;
 export const MAIL_FROM_NAME = env.MAIL_FROM_NAME;
 
 /**
+ * Resend's HTTP mail API. `SMTP_*` needs an outbound socket, which a Worker does not have, so this is
+ * the only mailer a Workers deployment can actually use. Setting `RESEND_API_KEY` is enough to turn it
+ * on; the sender reuses `MAIL_FROM` / `MAIL_FROM_NAME`, which has to be an address on a domain you
+ * verified with Resend.
+ */
+export const RESEND_API_KEY = env.RESEND_API_KEY;
+export const IS_RESEND_CONFIGURED = Boolean(env.RESEND_API_KEY);
+
+/**
+ * Whether *some* mailer can send. `sendEmail` returns `false` without throwing when this is false, so
+ * every caller and the "nothing was sent" screens ask this rather than `IS_SMTP_CONFIGURED` (ENG-2091).
+ */
+export const IS_EMAIL_CONFIGURED = IS_SMTP_CONFIGURED || IS_RESEND_CONFIGURED;
+
+/** Which mailer `sendEmail` picks. Resend wins so a half-migrated SMTP config cannot shadow it. */
+export const MAIL_PROVIDER: "resend" | "smtp" | null = IS_RESEND_CONFIGURED
+  ? "resend"
+  : IS_SMTP_CONFIGURED
+    ? "smtp"
+    : null;
+
+/**
  * Auth secret and base URL, resolved once for the whole app.
  *
  * `BETTER_AUTH_*` are the documented names. `NEXTAUTH_*` are a deliberately UNDOCUMENTED

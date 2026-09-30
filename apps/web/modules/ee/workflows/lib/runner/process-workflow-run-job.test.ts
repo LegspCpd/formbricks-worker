@@ -740,23 +740,23 @@ describe("processWorkflowRunJob", () => {
     expect(runStatuses).not.toContain("failed");
   });
 
-  test("keeps the run non-terminal and rethrows on a non-final attempt when SMTP is not configured", async () => {
+  test("keeps the run non-terminal and rethrows on a non-final attempt when no mailer is configured", async () => {
     mockSendEmail.mockResolvedValue(false);
 
-    await expect(processWorkflowRunJob(data, baseContext)).rejects.toThrow(/SMTP is not configured/);
+    await expect(processWorkflowRunJob(data, baseContext)).rejects.toThrow(/No mailer is configured/);
 
     const statuses = mockWorkflowRunUpdateMany.mock.calls.map((call) => call[0].data.status);
     expect(statuses).not.toContain("failed");
   });
 
-  test("marks the run failed on the final attempt when SMTP is not configured (sendEmail returns false)", async () => {
+  test("marks the run failed on the final attempt when no mailer is configured (sendEmail returns false)", async () => {
     mockSendEmail.mockResolvedValue(false);
 
     await expect(processWorkflowRunJob(data, finalAttemptContext)).resolves.toBeUndefined();
 
     const failure = mockWorkflowRunUpdateMany.mock.calls.at(-1)?.[0];
     expect(failure.data.status).toBe("failed");
-    expect(failure.data.error).toMatch(/SMTP is not configured/);
+    expect(failure.data.error).toMatch(/No mailer is configured/);
     expect(failure.data.data.steps[0]).toMatchObject({ status: "failed" });
   });
 

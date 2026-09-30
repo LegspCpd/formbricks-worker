@@ -156,7 +156,10 @@ jobs:
           FB_CUBEJS_API_SECRET: ${{ secrets.CUBEJS_API_SECRET }}
           FB_CUBEJS_JWT_ISSUER: ${{ secrets.CUBEJS_JWT_ISSUER }}
           FB_CUBEJS_JWT_AUDIENCE: ${{ secrets.CUBEJS_JWT_AUDIENCE }}
-          # --- Email / SMTP -------------------------------------------------------------------
+          # --- Email: Resend (HTTP) or SMTP ---------------------------------------------------
+          # A Worker cannot open the socket `SMTP_*` needs, so the Resend HTTP API is the mailer that
+          # actually works here. MAIL_FROM has to be an address on a domain verified with Resend.
+          FB_RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           FB_MAIL_FROM: ${{ secrets.MAIL_FROM }}
           FB_MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
           FB_SMTP_HOST: ${{ secrets.SMTP_HOST }}

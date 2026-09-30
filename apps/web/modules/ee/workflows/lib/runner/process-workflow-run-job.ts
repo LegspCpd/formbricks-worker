@@ -19,6 +19,7 @@ import {
   isLiteralEmailRecipient,
   planExecutableSteps,
 } from "@formbricks/workflows";
+import { MAIL_PROVIDER } from "@/lib/constants";
 import { isDatabasePoolExhaustionError } from "@/lib/jobs/pool-exhaustion";
 import { getOrganizationByWorkspaceId } from "@/lib/organization/service";
 import { getResponse } from "@/lib/response/service";
@@ -50,7 +51,9 @@ const TERMINAL_STATUSES = new Set<string>(TERMINAL_STATUS_LIST);
 /** Run states a delivery may claim by transitioning to `running`. */
 const CLAIMABLE_STATUSES = ["queued"] as const;
 
-const EMAIL_PROVIDER = "smtp";
+// Which mailer actually sent. `sendEmail` returning `true` means one was configured, so this is only
+// null on the failure path below; the fallback keeps the run record's field a string.
+const EMAIL_PROVIDER = MAIL_PROVIDER ?? "smtp";
 
 const workflowRunSelect = {
   id: true,
@@ -225,7 +228,7 @@ const sendResolvedEmail = async (
     if (sent) {
       return { status: "succeeded", error: null, output: { messageId, provider: EMAIL_PROVIDER } };
     }
-    return { status: "failed", error: "SMTP is not configured; workflow email was not sent", output: {} };
+    return { status: "failed", error: "No mailer is configured; workflow email was not sent", output: {} };
   } catch (sendError) {
     return {
       status: "failed",

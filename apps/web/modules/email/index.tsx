@@ -1,4 +1,6 @@
-import { createTransport } from "nodemailer";
+// `nodemailer` is imported lazily inside the SMTP branch below. A Worker cannot open the socket it
+// needs, so a Resend deployment must never load it — and the type-only import here is erased at build
+// time, which keeps it out of the module graph until an SMTP send actually happens.
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import {
   renderAccountDeletionEmail,
@@ -26,10 +28,14 @@ import {
   DEBUG,
   IMPRINT_ADDRESS,
   IMPRINT_URL,
+  IS_EMAIL_CONFIGURED,
+  IS_RESEND_CONFIGURED,
   IS_SMTP_CONFIGURED,
   MAIL_FROM,
   MAIL_FROM_NAME,
+  MAIL_PROVIDER,
   PRIVACY_URL,
+  RESEND_API_KEY,
   SMTP_AUTHENTICATED,
   SMTP_HOST,
   SMTP_PASSWORD,
@@ -59,7 +65,7 @@ import {
 import { buildVerifiedLinkSurveyUrl } from "@/modules/email/lib/verified-link-survey-url";
 import { resolveStorageUrl } from "@/modules/storage/utils";
 
-export { IS_SMTP_CONFIGURED };
+export { IS_EMAIL_CONFIGURED, IS_SMTP_CONFIGURED };
 
 const legalProps: TEmailTemplateLegalProps = {
   privacyUrl: PRIVACY_URL || undefined,
@@ -84,45 +90,92 @@ export type TResponseFinishedEmailSurvey = TElementResponseMappingSurvey &
   // EmbeddedData rows the template resolves definitions through (ENG-1837).
   Pick<TSurvey, "id" | "name" | "variables" | "hiddenFields" | "embeddedFields">;
 
+const RESEND_EMAILS_ENDPOINT = "https://api.resend.com/emails";
+
+const resolveSender = (override?: string): string =>
+  override ?? `${MAIL_FROM_NAME ?? "Formbricks"} <${MAIL_FROM ?? "noreply@formbricks.com"}>`;
+
+/**
+ * Sends over Resend's HTTP API.
+ *
+ * This is the path a Cloudflare Worker has to take: `SMTP_*` needs a raw outbound socket, which
+ * workerd does not offer, so a deployment without a relay sends mail here instead. Resend rejects the
+ * request with a JSON body when `MAIL_FROM` is not on a domain verified in the account.
+ */
+const sendEmailWithResend = async (emailData: SendEmailDataProps): Promise<void> => {
+  const response = await fetch(RESEND_EMAILS_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: resolveSender(emailData.from),
+      to: emailData.to,
+      subject: emailData.subject,
+      html: emailData.html,
+      ...(emailData.text ? { text: emailData.text } : {}),
+      // Resend spells the field `reply_to` and takes extra RFC 5322 headers under `headers`.
+      ...(emailData.replyTo ? { reply_to: emailData.replyTo } : {}),
+      ...(emailData.messageId ? { headers: { "Message-ID": emailData.messageId } } : {}),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Resend responded with ${response.status}: ${await response.text()}`);
+  }
+};
+
+const sendEmailWithSmtp = async (emailData: SendEmailDataProps): Promise<void> => {
+  const { createTransport } = await import("nodemailer");
+
+  const transporter = createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE_ENABLED, // true for 465, false for other ports
+    ...(SMTP_AUTHENTICATED
+      ? {
+          auth: {
+            type: "LOGIN",
+            user: SMTP_USER,
+            pass: SMTP_PASSWORD,
+          },
+        }
+      : {}),
+    tls: {
+      rejectUnauthorized: SMTP_REJECT_UNAUTHORIZED_TLS,
+    },
+    logger: DEBUG,
+    debug: DEBUG,
+  } as SMTPTransport.Options);
+
+  const emailDefaults = { from: resolveSender() };
+  await transporter.sendMail({
+    ...emailDefaults,
+    ...emailData,
+    from: emailData.from ?? emailDefaults.from,
+  });
+};
+
 export const sendEmail = async (emailData: SendEmailDataProps): Promise<boolean> => {
-  if (!IS_SMTP_CONFIGURED) {
-    logger.info("SMTP is not configured, skipping email sending");
+  if (!IS_EMAIL_CONFIGURED) {
+    logger.info("No mailer is configured, skipping email sending");
     return false;
   }
   try {
-    const transporter = createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_SECURE_ENABLED, // true for 465, false for other ports
-      ...(SMTP_AUTHENTICATED
-        ? {
-            auth: {
-              type: "LOGIN",
-              user: SMTP_USER,
-              pass: SMTP_PASSWORD,
-            },
-          }
-        : {}),
-      tls: {
-        rejectUnauthorized: SMTP_REJECT_UNAUTHORIZED_TLS,
-      },
-      logger: DEBUG,
-      debug: DEBUG,
-    } as SMTPTransport.Options);
-
-    const emailDefaults = {
-      from: `${MAIL_FROM_NAME ?? "Formbricks"} <${MAIL_FROM ?? "noreply@formbricks.com"}>`,
-    };
-    await transporter.sendMail({
-      ...emailDefaults,
-      ...emailData,
-      from: emailData.from ?? emailDefaults.from,
-    });
+    // Resend wins when both are set: it is the one a constrained runtime can actually reach.
+    if (IS_RESEND_CONFIGURED) {
+      await sendEmailWithResend(emailData);
+    } else {
+      await sendEmailWithSmtp(emailData);
+    }
 
     return true;
   } catch (error) {
     logger.error(error, "Error in sendEmail");
-    throw new InvalidInputError("Incorrect SMTP credentials");
+    throw new InvalidInputError(
+      MAIL_PROVIDER === "resend" ? "Incorrect Resend credentials" : "Incorrect SMTP credentials"
+    );
   }
 };
 
