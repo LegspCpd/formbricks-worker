@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
@@ -20,25 +20,41 @@ interface R2Bucket {
 }
 
 interface Queue {
-  name: string;
+  queue_id: string;
+  queue_name: string;
   created_on: string;
 }
 
 const runDatabaseMigrations = (): void => {
   console.log("Running database migrations...");
 
-  if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is required to run migrations");
+  const databaseUrl = process.env.MIGRATE_DATABASE_URL ?? process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL (or MIGRATE_DATABASE_URL) is required to run migrations");
   }
 
+  const repoRootDir = resolve(__dirname, "../../..");
+  const migrationRunnerPath = resolve(repoRootDir, "packages/database/dist/scripts/apply-migrations.js");
+
   try {
-    const prismaDir = resolve(__dirname, "../../../packages/database");
-    const prismaConfigPath = resolve(prismaDir, "prisma.config.ts");
-    execSync(`npx prisma migrate deploy --config ${prismaConfigPath}`, {
-      cwd: prismaDir,
+    console.log("  Building @formbricks/database...");
+    execSync("pnpm build --filter=@formbricks/database", {
+      cwd: repoRootDir,
       stdio: "inherit",
       env: { ...process.env },
     });
+
+    if (!existsSync(migrationRunnerPath)) {
+      throw new Error(`Migration runner not found at ${migrationRunnerPath}`);
+    }
+
+    console.log("  Applying migrations with the Formbricks migration runner...");
+    execSync(`node ${JSON.stringify(migrationRunnerPath)}`, {
+      cwd: repoRootDir,
+      stdio: "inherit",
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+    });
+
     console.log("  Database migrations applied successfully");
   } catch (error) {
     console.error("  Database migrations failed:", error);
@@ -100,8 +116,10 @@ const createKVNamespace = async (title: string): Promise<KVNamespace> => {
 const findR2Bucket = async (name: string): Promise<R2Bucket | null> => {
   const accountId = getCloudflareAccountId();
   try {
-    const data = await cloudflareApi<R2Bucket[]>(`/accounts/${accountId}/r2/buckets?per_page=100`);
-    return data.result.find((b) => b.name === name) ?? null;
+    const data = await cloudflareApi<{ buckets: R2Bucket[] }>(
+      `/accounts/${accountId}/r2/buckets?per_page=100`
+    );
+    return data.result.buckets?.find((b) => b.name === name) ?? null;
   } catch {
     return null;
   }
@@ -120,7 +138,7 @@ const findQueue = async (name: string): Promise<Queue | null> => {
   const accountId = getCloudflareAccountId();
   try {
     const data = await cloudflareApi<Queue[]>(`/accounts/${accountId}/queues?per_page=100`);
-    return data.result.find((q) => q.name === name) ?? null;
+    return data.result.find((q) => q.queue_name === name) ?? null;
   } catch {
     return null;
   }
@@ -130,7 +148,7 @@ const createQueue = async (name: string): Promise<Queue> => {
   const accountId = getCloudflareAccountId();
   const data = await cloudflareApi<Queue>(`/accounts/${accountId}/queues`, {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ queue_name: name }),
   });
   return data.result;
 };
@@ -161,11 +179,11 @@ const ensureQueue = async (name: string): Promise<string> => {
   const existing = await findQueue(name);
   if (existing) {
     console.log(`  Queue "${name}" already exists`);
-    return existing.name;
+    return existing.queue_name;
   }
   const created = await createQueue(name);
-  console.log(`  Created Queue "${created.name}"`);
-  return created.name;
+  console.log(`  Created Queue "${created.queue_name}"`);
+  return created.queue_name;
 };
 
 const updateWranglerConfig = (config: {
@@ -182,7 +200,7 @@ const updateWranglerConfig = (config: {
   content = content.replace(/"id":\s*"formbricks_tag_cache_kv"/, `"id": "${config.tagCacheKvId}"`);
   content = content.replace(/"id":\s*"formbricks_memory_cache_kv"/, `"id": "${config.memoryCacheKvId}"`);
   content = content.replace(
-    /"bucket_name":\s*"formbricks-storage"/,
+    /"bucket_name":\s*"formbricks-storage"/g,
     `"bucket_name": "${config.r2BucketName}"`
   );
   content = content.replace(/"name":\s*"formbricks-jobs"/, `"name": "${config.queueName}"`);

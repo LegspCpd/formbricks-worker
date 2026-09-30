@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { logger } from "@formbricks/logger";
 import { Prisma, PrismaClient } from "../prisma";
@@ -483,7 +483,10 @@ const loadMigrations = async (): Promise<MigrationScript[]> => {
       // It's a data migration, dynamically import and extract the scripts
       // Use .js extension when running from built code, .ts when running from source
       const modulePath = path.join(migrationPath, dataMigrationFileName);
-      const mod = (await import(modulePath)) as Record<string, MigrationScript | undefined>;
+      const mod = (await import(pathToFileURL(modulePath).href)) as Record<
+        string,
+        MigrationScript | undefined
+      >;
 
       // Check each export in the module for a DataMigrationScript (type: "data")
       for (const key of Object.keys(mod)) {

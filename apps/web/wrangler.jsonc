@@ -28,6 +28,16 @@
     {
       "binding": "STORAGE_R2",
       "bucket_name": "formbricks-storage"
+    },
+    {
+      "binding": "NEXT_INC_CACHE_R2_BUCKET",
+      "bucket_name": "formbricks-storage"
+    }
+  ],
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "formbricks-worker"
     }
   ],
   "queues": [

@@ -10,7 +10,7 @@
     "build:env-validator": "vite build --config vite.env-validation.config.mts",
     "build:dev": "pnpm run build",
     "build:cf": "opennextjs-cloudflare build",
-    "build:cf:full": "tsx scripts/setup-cloudflare.ts && opennextjs-cloudflare build",
+    "build:cf:full": "tsx scripts/setup-cloudflare.ts && pnpm exec turbo run build --filter=@formbricks/web^... && opennextjs-cloudflare build",
     "deploy:cf": "wrangler deploy",
     "preview:cf": "wrangler dev",
     "start": "next start",
@@ -174,6 +174,7 @@
   "devDependencies": {
     "@formbricks/config-eslint": "workspace:*",
     "@formbricks/config-typescript": "workspace:*",
+    "@opennextjs/cloudflare": "1.20.6",
     "@playwright/test": "catalog:",
     "@storybook/react": "catalog:",
     "@storybook/react-vite": "catalog:",
@@ -206,6 +207,7 @@
     "vite": "catalog:",
     "vite-tsconfig-paths": "catalog:",
     "vitest": "catalog:",
-    "vitest-mock-extended": "3.1.1"
+    "vitest-mock-extended": "3.1.1",
+    "wrangler": "4.138.0"
   }
 }

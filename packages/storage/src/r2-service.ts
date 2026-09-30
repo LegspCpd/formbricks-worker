@@ -1,6 +1,6 @@
 import { logger } from "@formbricks/logger";
-import { type Result, type StorageError, StorageErrorCode, err, ok } from "./types/error";
 import type { FileStreamResult } from "./service";
+import { type Result, type StorageError, StorageErrorCode, err, ok } from "./types/error";
 
 interface R2Bucket {
   get(key: string): Promise<R2ObjectBody | null>;
@@ -83,48 +83,50 @@ export const setR2Bucket = (bucket: R2Bucket): void => {
   (globalThis as unknown as { __cloudflareR2?: R2Bucket }).__cloudflareR2 = bucket;
 };
 
-export const getSignedUploadUrl = async (
+export const getSignedUploadUrl = (
   fileName: string,
   contentType: string,
   filePath: string,
-  maxSize: number = 1024 * 1024 * 10
+  _maxSize: number = 1024 * 1024 * 10
 ): Promise<Result<{ signedUrl: string; presignedFields: PresignedPost["fields"] }, StorageError>> => {
   try {
     const bucket = getR2Bucket();
     if (!bucket) {
-      return err({ code: StorageErrorCode.S3ClientError });
+      return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
     }
 
     const key = `${filePath}/${fileName}`;
     const url = `/storage/upload/${encodeURIComponent(key)}`;
 
-    return ok({
-      signedUrl: url,
-      presignedFields: {
-        key,
-        "Content-Type": contentType,
-      },
-    });
+    return Promise.resolve(
+      ok({
+        signedUrl: url,
+        presignedFields: {
+          key,
+          "Content-Type": contentType,
+        },
+      })
+    );
   } catch (error) {
     logger.error({ error, fileName, filePath }, "Failed to get R2 signed upload URL");
-    return err({ code: StorageErrorCode.S3ClientError });
+    return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
   }
 };
 
-export const getSignedDownloadUrl = async (
+export const getSignedDownloadUrl = (
   filePath: string,
-  expiresIn: number = 3600
+  _expiresIn: number = 3600
 ): Promise<Result<string, StorageError>> => {
   try {
     const bucket = getR2Bucket();
     if (!bucket) {
-      return err({ code: StorageErrorCode.S3ClientError });
+      return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
     }
 
-    return ok(`/storage/download/${encodeURIComponent(filePath)}`);
+    return Promise.resolve(ok(`/storage/download/${encodeURIComponent(filePath)}`));
   } catch (error) {
     logger.error({ error, filePath }, "Failed to get R2 signed download URL");
-    return err({ code: StorageErrorCode.S3ClientError });
+    return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
   }
 };
 
@@ -170,11 +172,11 @@ export const getFileStream = async (filePath: string): Promise<Result<FileStream
 
     const object = await bucket.get(filePath);
     if (!object) {
-      return err({ code: StorageErrorCode.FileNotFound });
+      return err({ code: StorageErrorCode.FileNotFoundError });
     }
 
     return ok({
-      stream: object.body,
+      body: object.body as ReadableStream<Uint8Array>,
       contentType: (object.httpMetadata?.["content-type"] as string) || "application/octet-stream",
       contentLength: object.size,
     });

@@ -16,6 +16,7 @@ allowBuilds:
   sqlite3: true
   unrs-resolver: true
   "@prisma/client": true
+  workerd: true
 
 # Single source of truth for the version of every dependency used by two or more
 # workspaces. Packages reference these as `"typescript": "catalog:"` and never as a

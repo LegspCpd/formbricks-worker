@@ -1,7 +1,7 @@
 import { logger } from "@formbricks/logger";
 import type { BackgroundJobProducer, EnqueuedJob, JobExecutionContext } from "./contracts";
 import { getBackgroundJobDefinition } from "./definitions";
-import type { TResponsePipelineJobData, TWebhookDeliveryJobData, TWorkflowRunJobData } from "./types";
+import type { TResponsePipelineJobData } from "./types";
 
 const createJobContext = (jobName: string): JobExecutionContext => ({
   attempt: 1,
