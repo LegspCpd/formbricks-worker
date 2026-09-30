@@ -354,6 +354,30 @@ jobs:
       - name: Build the OpenNext Worker
         run: pnpm --filter @formbricks/web run build:cf:full
 
+      # Cloudflare rejects a script whose *uncompressed* size exceeds 64 MiB, and its error only names
+      # the five largest files. Measure the real thing instead of inferring it: `wrangler deploy
+      # --dry-run` performs the exact bundling and minification the real deploy does, reports
+      # `Total Upload` / `gzip`, and writes the bundle out -- without ever talking to Cloudflare.
+      # `continue-on-error` so a diagnostic that cannot run never hides the deploy result, and
+      # `OPEN_NEXT_DEPLOY=true` so wrangler does not hand the command back to `opennextjs-cloudflare`.
+      - name: Measure the Worker bundle
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "::group::.open-next total"
+          du -sh apps/web/.open-next
+          echo "::endgroup::"
+          echo "::group::Largest files in .open-next"
+          find apps/web/.open-next -type f -printf '%s\t%p\n' | sort -rn | head -n 25 \
+            | awk '{ printf "%9.2f MiB  %s\n", $1/1048576, $2 }'
+          echo "::endgroup::"
+          echo "::group::Bundled worker (dry run)"
+          cd apps/web
+          OPEN_NEXT_DEPLOY=true pnpm exec wrangler deploy --dry-run --outdir="${RUNNER_TEMP}/cf-dry-run" 2>&1 | tail -n 60
+          find "${RUNNER_TEMP}/cf-dry-run" -type f -printf '%s\t%p\n' | sort -rn | head -n 10 \
+            | awk '{ printf "%9.2f MiB  %s\n", $1/1048576, $2 }'
+          echo "::endgroup::"
+
       # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
       # project and shells out to exactly this command anyway, through one extra `npx` process it
       # announces twice. It also populates the remote R2 incremental cache and injects the deployment

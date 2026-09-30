@@ -118,6 +118,16 @@ const nextConfig = {
   experimental: {
     proxyClientMaxBodySize: "16mb",
     turbopackFileSystemCacheForBuild: true,
+    // A Cloudflare Worker script is capped at 64 MiB *uncompressed*, and what is uploaded is the
+    // whole OpenNext output. Next writes a `.map` next to every server chunk and each one embeds
+    // the full sources of everything that chunk pulled in, so `.next/server` came out at 711 MiB
+    // with ~600 MiB of that being source maps. OpenNext copies the tree into `.open-next`, and the
+    // maps then sit in the bundle's build directory (and in the file tracer's input) for nothing:
+    // a Worker never serves them, and Cloudflare's stack traces use the maps wrangler uploads
+    // itself. `serverSourceMaps` covers the webpack server build, `turbopackSourceMaps` the
+    // Turbopack one this repo builds with.
+    serverSourceMaps: false,
+    turbopackSourceMaps: false,
   },
   // Type errors never change the emitted build output, and the `tsc` pass is one of the most
   // expensive phases of a cold build. Cloudflare Workers Builds caps every build at 20 minutes on a
