@@ -61,34 +61,6 @@ const getUniqueValues = (values) => [...new Set(values.filter(Boolean))];
 // that file serves stale cached builds — from the local Turbo cache and the CI build-output cache
 // alike. Enforced by lib/turbo-build-env.test.ts. Read env vars directly (`process.env.<NAME>` or
 // `process.env["<NAME>"]`), not via destructuring, so that guardrail can detect them.
-// `@aws-sdk/client-s3` and `@aws-sdk/s3-presigned-post` are part of Next.js' built-in
-// `serverExternalPackages` list (next/dist/lib/server-external-packages.jsonc), so they are never bundled
-// into the server code: Next only traces the files Node itself would `require`, i.e. the `dist-cjs` builds.
-// That is fine for the server bundle — `@opennextjs/cloudflare` pins `conditions: ["workerd"]` there (see
-// `bundle-server.js`) — but not for the Node-runtime middleware (`proxy.ts` reads a session through Prisma,
-// so Next compiles it for the Node runtime). `@opennextjs/cloudflare` re-bundles that middleware with
-// `conditions: ["module"]` and `mainFields: ["module", "main"]`, and the AWS SDK v3 packages resolve that
-// `module` condition to `dist-es/*` — a directory the traced copy does not contain, which failed the build
-// with 44 `Could not resolve` errors (`@smithy/core`, `@aws-sdk/core`, `@aws-crypto/*`,
-// `@aws/lambda-invoke-store`, `tslib`).
-//
-// The SDK does not come from the middleware's own trace: `server/middleware.js.nft.json` lists 340 files and
-// no AWS package at all, while `server/instrumentation.js.nft.json` carries every one of them. `@opennextjs/aws`'
-// `copyTracedFiles` copies both traces into the middleware output directory, and the middleware bundler then
-// statically requires every chunk it finds there. Tracing the packages completely puts their `dist-es` builds
-// on disk next to the `dist-cjs` ones Next had traced.
-//
-// The keys are the `.next/server/<entry>.js.nft.json` entry names. `middleware` and `proxy` are listed too
-// because both traces share a single output directory, and because Next only renames
-// `server/proxy.js.nft.json` to `server/middleware.js.nft.json` on the webpack path — after the includes have
-// already been applied, so the webpack build sees the `proxy` key.
-const nodeMiddlewareExternalTrees = [
-  "../../node_modules/@aws/**/*",
-  "../../node_modules/@aws-sdk/**/*",
-  "../../node_modules/@aws-crypto/**/*",
-  "../../node_modules/@smithy/**/*",
-  "../../node_modules/tslib/**/*",
-];
 
 /** @type {import('next').NextConfig} */
 
@@ -105,9 +77,9 @@ const nextConfig = {
   //
   // `@aws-sdk/client-s3` and `@aws-sdk/s3-presigned-post` are just as heavy, but they cannot be moved
   // out of the module graph from here: they are part of Next.js' built-in `serverExternalPackages`
-  // list, and this option only ever adds entries to it. Their interaction with the Node.js middleware
-  // is handled by `nodeMiddlewareExternalTrees` and `outputFileTracingIncludes` below. The entries
-  // listed here are server-only routes that never reach the middleware.
+  // list, and this option only ever adds entries to it. The way that frustrates the Node.js middleware
+  // bundler is handled in `open-next.config.ts` (`middleware.install`). The entries listed here are
+  // server-only routes that never reach the middleware.
   serverExternalPackages: [
     "@authzed/authzed-node",
     "@grpc/grpc-js",
@@ -132,11 +104,6 @@ const nextConfig = {
       "../../node_modules/pino-abstract-transport/**/*",
       "../../node_modules/otlp-logger/**/*",
     ],
-    // See `nodeMiddlewareExternalTrees` above. `instrumentation` is the trace that actually carries the
-    // AWS SDK into the middleware output; the other two keep the fix in place if Next moves those entries.
-    instrumentation: nodeMiddlewareExternalTrees,
-    middleware: nodeMiddlewareExternalTrees,
-    proxy: nodeMiddlewareExternalTrees,
   },
   turbopack: {},
   experimental: {
