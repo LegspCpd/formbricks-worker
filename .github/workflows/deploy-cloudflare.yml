@@ -363,21 +363,50 @@ jobs:
           set -euo pipefail
 
           # `wrangler` re-bundles the whole OpenNext output here, and esbuild prints thousands of
-          # harmless `[WARNING] Duplicate key ...` lines while it does. They bury the handful of
-          # lines that actually matter (`Total Upload`, `Deployed ... triggers`, or the real error),
-          # and they make the step look stuck. Keep the full output in a file and only surface the
-          # tail, so the log stays readable and a failure still shows esbuild's error block.
+          # harmless `[WARNING] Duplicate key ...` lines while it does. They bury the handful of lines
+          # that matter (`Total Upload`, `Deployed ... triggers`, or the real error), and a step that
+          # prints nothing for a long time is indistinguishable from a hung one.
+          #
+          # So: keep the full output in a file, and report a heartbeat instead. The step log stays
+          # short *and* shows that work is still happening. The heartbeat also carries the elapsed
+          # time, which is what tells us why a run died when the runner kills the step with SIGTERM
+          # (`Error: Process completed with exit code 143`) -- the heartbeats are already flushed by
+          # then, so the last one is the last thing that happened.
           log="${RUNNER_TEMP}/deploy-cf.log"
-          echo "Running \`opennextjs-cloudflare deploy\` (full output captured in ${log})."
-          echo "esbuild re-bundling the worker can take several minutes; the warnings are suppressed."
+          started=$(date +%s)
 
-          set +e
-          pnpm --filter @formbricks/web run deploy:cf >"${log}" 2>&1
-          status=$?
-          set -e
+          # A run that is stopped from the outside -- someone cancelling it, or the runner being shut
+          # down -- kills this step with SIGTERM, which surfaces only as
+          # `Error: Process completed with exit code 143`. Dump whatever was captured at that point so
+          # the kill stops being a black box.
+          handle_signal() {
+            echo "::warning::deploy:cf was signalled (SIGTERM/SIGINT) from outside the step; dumping the captured output"
+            echo "::group::deploy-cf.log (last 200 lines)"
+            tail -n 200 "${log}" 2>/dev/null || true
+            echo "::endgroup::"
+            exit 143
+          }
+          trap handle_signal TERM INT
+
+          echo "Running \`opennextjs-cloudflare deploy\` (full output captured in ${log})."
+
+          pnpm --filter @formbricks/web run deploy:cf >"${log}" 2>&1 &
+          deploy_pid=$!
+
+          while kill -0 "${deploy_pid}" 2>/dev/null; do
+            sleep 20
+            if kill -0 "${deploy_pid}" 2>/dev/null; then
+              # First line of every real progress message, skipping esbuild's indented warning block.
+              step="$(grep -vE '^[[:space:]]|^▲' "${log}" | tail -n 1 || true)"
+              echo "[+$(( $(date +%s) - started ))s] deploy:cf running | ${step:-<no output yet>}"
+            fi
+          done
+
+          status=0
+          wait "${deploy_pid}" || status=$?
 
           if [ "${status}" -ne 0 ]; then
-            echo "::group::deploy:cf output (last 400 lines)"
+            echo "::group::deploy:cf full output (last 400 lines)"
             tail -n 400 "${log}"
             echo "::endgroup::"
             exit "${status}"
