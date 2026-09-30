@@ -11,7 +11,7 @@
     "build:dev": "pnpm run build",
     "build:cf": "cross-env FORMBRICKS_SKIP_TYPECHECK=1 FORMBRICKS_OTEL_ENABLED=0 opennextjs-cloudflare build",
     "build:cf:full": "cross-env FORMBRICKS_SKIP_DTS=1 FORMBRICKS_OTEL_ENABLED=0 pnpm exec turbo run build --filter=@formbricks/web^... && tsx scripts/setup-cloudflare.ts && cross-env FORMBRICKS_SKIP_TYPECHECK=1 FORMBRICKS_OTEL_ENABLED=0 opennextjs-cloudflare build",
-    "deploy:cf": "wrangler deploy",
+    "deploy:cf": "opennextjs-cloudflare deploy",
     "preview:cf": "wrangler dev",
     "start": "next start",
     "typecheck": "pnpm typegen && cross-env NODE_OPTIONS=--max-old-space-size=8192 tsc --noEmit --project tsconfig.typecheck.json",

@@ -1,8 +1,8 @@
 name: Deploy to Cloudflare Workers
 
 # Builds the OpenNext Worker on a GitHub-hosted runner and pushes it straight into the *existing*
-# `formbricks-worker` Worker with `wrangler deploy`, so Cloudflare Workers Builds never has to
-# compile the app again (its 2 vCPU / 20-minute builder was taking ~22 minutes for this repo).
+# `formbricks-worker` Worker with `opennextjs-cloudflare deploy`, so Cloudflare Workers Builds never
+# has to compile the app again (its 2 vCPU / 20-minute builder was taking ~22 minutes for this repo).
 #
 # The Worker is addressed purely by the `name` in `apps/web/wrangler.jsonc`; nothing here creates a
 # new project or re-binds anything. `scripts/setup-cloudflare.ts` looks the KV namespaces, the R2
@@ -42,10 +42,13 @@ on:
 permissions:
   contents: read
 
-# A newer push supersedes an in-flight deploy for the same branch rather than racing it.
+# Serialise deploys per branch instead of cancelling the one in flight. Cancelling a run that is
+# already uploading aborts it mid-flight — OpenNext reports that as `The operation was canceled.` —
+# and the step before it has already populated the *remote* R2 incremental cache, so a half-run leaves
+# that cache holding entries from a build that never shipped. A newer push waits its turn instead.
 concurrency:
   group: deploy-cloudflare-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -346,8 +349,12 @@ jobs:
       - name: Build the OpenNext Worker
         run: pnpm --filter @formbricks/web run build:cf:full
 
+      # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
+      # project and shells out to exactly this command anyway, through one extra `npx` process it
+      # announces twice. It also populates the remote R2 incremental cache and injects the deployment
+      # mapping, which a bare `wrangler deploy` skips — the delegation exists precisely to add those.
       - name: Deploy the Worker
-        run: pnpm --filter @formbricks/web exec wrangler deploy
+        run: pnpm --filter @formbricks/web run deploy:cf
 
       # `wrangler deploy` does not carry secrets, so push the same configuration onto the Worker's
       # own environment. This is what OpenNext's adapter reads at request time -- build-time inlining
