@@ -37,12 +37,19 @@ const runDatabaseMigrations = (): void => {
   const migrationRunnerPath = resolve(repoRootDir, "packages/database/dist/scripts/apply-migrations.js");
 
   try {
-    console.log("  Building @formbricks/database...");
-    execSync("pnpm build --filter=@formbricks/database", {
-      cwd: repoRootDir,
-      stdio: "inherit",
-      env: { ...process.env },
-    });
+    // `pnpm build:cf:full` already built `@formbricks/database` (it is part of the `@formbricks/web^...`
+    // graph), and `dist/scripts/apply-migrations.js` is one of its `vite build` outputs. Rebuilding it here
+    // burned a second full generate/build/tsc pass; on Cloudflare Workers Builds — 2 vCPU, 8 GB, 20 minutes
+    // for the whole job — that is time the build cannot spare. Only build when the artifact is genuinely
+    // missing, which keeps this script usable standalone.
+    if (!existsSync(migrationRunnerPath)) {
+      console.log("  Building @formbricks/database...");
+      execSync("pnpm build --filter=@formbricks/database", {
+        cwd: repoRootDir,
+        stdio: "inherit",
+        env: { ...process.env },
+      });
+    }
 
     if (!existsSync(migrationRunnerPath)) {
       throw new Error(`Migration runner not found at ${migrationRunnerPath}`);

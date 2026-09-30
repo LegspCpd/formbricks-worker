@@ -21,6 +21,11 @@ export const onRequestError: Instrumentation.onRequestError = (...args) => {
   Sentry.captureRequestError(...args);
 };
 
+// Read through a build-time constant (next.config.mjs `env`) rather than the plain environment so that a
+// build with FORMBRICKS_OTEL_ENABLED=0 compiles the `await import("./instrumentation-node")` branch — and
+// the ~10k `@opentelemetry/*` files behind it — out of the bundle entirely.
+const OTEL_ENABLED = process.env.FORMBRICKS_OTEL_ENABLED !== "0";
+
 export const register = async () => {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     if (process.env.NEXT_PHASE !== "phase-production-build") {
@@ -30,7 +35,7 @@ export const register = async () => {
     }
 
     // Load OpenTelemetry instrumentation when Prometheus metrics or OTLP export is enabled
-    if (PROMETHEUS_ENABLED || process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+    if (OTEL_ENABLED && (PROMETHEUS_ENABLED || process.env.OTEL_EXPORTER_OTLP_ENDPOINT)) {
       await import("./instrumentation-node");
     }
 

@@ -509,6 +509,14 @@ const nextConfig = {
   },
   env: {
     NEXTAUTH_URL: process.env.NEXTAUTH_URL, // TODO: Remove this once we have a proper solution for the base path
+    // Inlined at build time (Next's `env` config is applied through the bundler's define pass) so that the
+    // `await import("./instrumentation-node")` branch in instrumentation.ts folds away to dead code when the
+    // deployment target cannot run it. That import is the single most expensive edge of the module graph:
+    // `@opentelemetry/auto-instrumentations-node` eagerly references every `@opentelemetry/instrumentation-*`
+    // package (~10k files), and the Workers build — which has 8 GB of RAM and 20 minutes for the whole job —
+    // can neither run the Node OTel SDK (the Prometheus exporter binds a TCP port) nor afford to compile it.
+    // Self-hosted builds keep the default.
+    FORMBRICKS_OTEL_ENABLED: process.env.FORMBRICKS_OTEL_ENABLED ?? "1",
   },
 };
 
