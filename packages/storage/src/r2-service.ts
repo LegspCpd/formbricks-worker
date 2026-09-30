@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { logger } from "@formbricks/logger";
 import type { FileStreamResult } from "./service";
 import { type Result, type StorageError, StorageErrorCode, err, ok } from "./types/error";
@@ -83,6 +84,23 @@ export const setR2Bucket = (bucket: R2Bucket): void => {
   (globalThis as unknown as { __cloudflareR2?: R2Bucket }).__cloudflareR2 = bucket;
 };
 
+const UPLOAD_URL_TTL_MS = 2 * 60 * 1000;
+
+export const createUploadSignature = (key: string, expires: number, secret: string): string =>
+  createHmac("sha256", secret).update(`${key}|${expires}`).digest("hex");
+
+export const verifyUploadSignature = (
+  signature: string,
+  key: string,
+  expires: number,
+  secret: string
+): boolean => {
+  const expected = Buffer.from(createUploadSignature(key, expires, secret), "utf8");
+  const provided = Buffer.from(signature, "utf8");
+
+  return expected.length === provided.length && timingSafeEqual(expected, provided);
+};
+
 export const getSignedUploadUrl = (
   fileName: string,
   contentType: string,
@@ -95,8 +113,16 @@ export const getSignedUploadUrl = (
       return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
     }
 
+    const secret = process.env.ENCRYPTION_KEY;
+    if (!secret) {
+      logger.error({ fileName, filePath }, "ENCRYPTION_KEY is not set; cannot sign R2 upload URL");
+      return Promise.resolve(err({ code: StorageErrorCode.S3CredentialsError }));
+    }
+
     const key = `${filePath}/${fileName}`;
-    const url = `/storage/upload/${encodeURIComponent(key)}`;
+    const expires = Date.now() + UPLOAD_URL_TTL_MS;
+    const signature = createUploadSignature(key, expires, secret);
+    const url = `/storage/upload/${encodeURIComponent(key)}?expires=${expires}&sig=${signature}`;
 
     return Promise.resolve(
       ok({

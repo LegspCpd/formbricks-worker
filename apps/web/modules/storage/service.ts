@@ -6,11 +6,16 @@ import {
   StorageErrorCode,
   deleteFile as deleteFileFromS3,
   deleteFilesByPrefix,
+  deleteFile as deleteR2File,
+  deleteFilesByPrefix as deleteR2FilesByPrefix,
   getFileStream,
+  getFileStream as getR2FileStream,
+  getSignedUploadUrl as getR2SignedUploadUrl,
   getSignedUploadUrl,
 } from "@formbricks/storage";
 import { Result, err, ok } from "@formbricks/types/error-handlers";
 import { type TAccessType } from "@formbricks/types/storage";
+import { isR2StorageConfigured } from "@/lib/cloudflare-bindings";
 import { sanitizeFileName } from "./utils";
 
 const SAFE_FILE_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
@@ -64,7 +69,8 @@ export const getSignedUrlForUpload = async (
     const updatedFileName = `${fileNameWithoutExtension}--fid--${randomUUID()}.${fileExtension}`;
     const filePath = [workspaceId, accessType, ...filePathSegments].join("/");
 
-    const signedUrlResult = await getSignedUploadUrl(updatedFileName, fileType, filePath, maxFileUploadSize);
+    const getUploadUrl = (await isR2StorageConfigured()) ? getR2SignedUploadUrl : getSignedUploadUrl;
+    const signedUrlResult = await getUploadUrl(updatedFileName, fileType, filePath, maxFileUploadSize);
 
     if (!signedUrlResult.ok) {
       return signedUrlResult;
@@ -113,11 +119,12 @@ export const getFileStreamForDownload = async (
 
     const primaryKey = `${primaryId}/${accessType}/${fileNameDecoded}`;
 
-    const streamResult = await getFileStream(primaryKey);
+    const getStream = (await isR2StorageConfigured()) ? getR2FileStream : getFileStream;
+    const streamResult = await getStream(primaryKey);
 
     if (!streamResult.ok && streamResult.error.code === StorageErrorCode.FileNotFoundError && fallbackId) {
       const fallbackKey = `${fallbackId}/${accessType}/${fileNameDecoded}`;
-      return await getFileStream(fallbackKey);
+      return await getStream(fallbackKey);
     }
 
     return streamResult;
@@ -144,10 +151,11 @@ export const deleteFile = async (
     return err({ code: StorageErrorCode.InvalidInput });
   }
 
-  const result = await deleteFileFromS3(`${primaryId}/${accessType}/${fileName}`);
+  const removeFile = (await isR2StorageConfigured()) ? deleteR2File : deleteFileFromS3;
+  const result = await removeFile(`${primaryId}/${accessType}/${fileName}`);
 
   if (!result.ok && result.error.code === StorageErrorCode.FileNotFoundError && fallbackId) {
-    return await deleteFileFromS3(`${fallbackId}/${accessType}/${fileName}`);
+    return await removeFile(`${fallbackId}/${accessType}/${fileName}`);
   }
 
   return result;
@@ -156,9 +164,10 @@ export const deleteFile = async (
 // Deletes all files for a workspace — cleans up both workspaceId-prefixed (new uploads) and
 // environmentId-prefixed (legacy uploads) paths. Errors are not thrown; callers should check results.
 export const deleteFilesByWorkspaceId = async (workspaceId: string, environmentIds: string[]) => {
+  const removeByPrefix = (await isR2StorageConfigured()) ? deleteR2FilesByPrefix : deleteFilesByPrefix;
   const results = await Promise.all([
-    deleteFilesByPrefix(workspaceId),
-    ...environmentIds.map((envId) => deleteFilesByPrefix(envId)),
+    removeByPrefix(workspaceId),
+    ...environmentIds.map((envId) => removeByPrefix(envId)),
   ]);
 
   // Return the first error if any, otherwise success

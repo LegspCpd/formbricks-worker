@@ -78,6 +78,7 @@ const nextConfig = {
   turbopack: {},
   experimental: {
     proxyClientMaxBodySize: "16mb",
+    turbopackFileSystemCacheForBuild: true,
   },
   transpilePackages: ["@formbricks/database", "@formbricks/workflows"],
   images: {

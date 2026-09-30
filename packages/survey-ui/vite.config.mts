@@ -53,11 +53,15 @@ export default defineConfig({
   },
   plugins: [
     tsconfigPaths(),
-    dts({
-      include: ["src"],
-      exclude: ["**/*.stories.tsx", "**/*.test.ts", "**/story-helpers.tsx"],
-      beforeWriteFile: rewriteNodeNextDtsSpecifiers,
-    }),
+    ...(process.env.FORMBRICKS_SKIP_DTS !== "1"
+      ? [
+          dts({
+            include: ["src"],
+            exclude: ["**/*.stories.tsx", "**/*.test.ts", "**/story-helpers.tsx"],
+            beforeWriteFile: rewriteNodeNextDtsSpecifiers,
+          }),
+        ]
+      : []),
   ],
   test: {
     environment: "node",

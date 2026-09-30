@@ -29,11 +29,15 @@ export default defineConfig({
     },
   },
   plugins: [
-    dts({
-      include: ["src/**/*"],
-      exclude: ["src/**/*.test.ts"],
-      entryRoot: "src",
-      outDir: "dist",
-    }),
+    ...(process.env.FORMBRICKS_SKIP_DTS !== "1"
+      ? [
+          dts({
+            include: ["src/**/*"],
+            exclude: ["src/**/*.test.ts"],
+            entryRoot: "src",
+            outDir: "dist",
+          }),
+        ]
+      : []),
   ],
 });

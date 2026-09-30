@@ -2,6 +2,7 @@ import "server-only";
 import type { RedisClientType } from "redis";
 import { getCacheService } from "@formbricks/cache";
 import { logger } from "@formbricks/logger";
+import { ensureCloudflareBindings } from "@/lib/cloudflare-bindings";
 
 type CacheResult<T, E = { code: string }> = { ok: true; data: T } | { ok: false; error: E };
 
@@ -38,6 +39,7 @@ export const cache = new Proxy({} as AsyncCacheService, {
     if (prop === "withCache") {
       return async <T extends NonNullable<unknown>>(fn: () => Promise<T>, ...rest: [string, number]) => {
         try {
+          await ensureCloudflareBindings();
           const cacheServiceResult = await getCacheService();
 
           if (!cacheServiceResult.ok) {
@@ -59,6 +61,7 @@ export const cache = new Proxy({} as AsyncCacheService, {
         ...rest: [string, number]
       ) => {
         try {
+          await ensureCloudflareBindings();
           const cacheServiceResult = await getCacheService();
 
           if (!cacheServiceResult.ok) {
@@ -76,6 +79,7 @@ export const cache = new Proxy({} as AsyncCacheService, {
 
     if (prop === "getRedisClient") {
       return async () => {
+        await ensureCloudflareBindings();
         const cacheServiceResult = await getCacheService();
         if (!cacheServiceResult.ok) {
           return null;
@@ -87,6 +91,7 @@ export const cache = new Proxy({} as AsyncCacheService, {
 
     // Default: lazily initialize and forward the call; returns a Promise for all methods
     return async (...args: Parameters<CacheService[typeof prop]>) => {
+      await ensureCloudflareBindings();
       const cacheServiceResult = await getCacheService();
 
       if (!cacheServiceResult.ok) {

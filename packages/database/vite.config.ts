@@ -86,22 +86,26 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
       ssr: true, // Server-side rendering mode for Node.js
     },
     plugins: [
-      dts({
-        rollupTypes: false,
-        include: [
-          "src/index.ts",
-          "src/client.ts",
-          "src/json-types.ts",
-          "src/prisma.ts",
-          "src/prisma-browser.ts",
-          "src/prisma-adapter.ts",
-          ...generatedPrismaTsFiles,
-        ],
-        entryRoot: ".",
-        exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "migration/**/*"],
-        insertTypesEntry: true,
-        beforeWriteFile: rewriteNodeNextDtsSpecifiers,
-      }),
+      ...(process.env.FORMBRICKS_SKIP_DTS !== "1"
+        ? [
+            dts({
+              rollupTypes: false,
+              include: [
+                "src/index.ts",
+                "src/client.ts",
+                "src/json-types.ts",
+                "src/prisma.ts",
+                "src/prisma-browser.ts",
+                "src/prisma-adapter.ts",
+                ...generatedPrismaTsFiles,
+              ],
+              entryRoot: ".",
+              exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "migration/**/*"],
+              insertTypesEntry: true,
+              beforeWriteFile: rewriteNodeNextDtsSpecifiers,
+            }),
+          ]
+        : []),
       copySqlMigrationsPlugin,
     ],
   };

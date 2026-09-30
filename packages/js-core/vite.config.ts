@@ -27,13 +27,17 @@ export default defineConfig({
     },
   },
   plugins: [
-    dts({
-      rollupTypes: false,
-      insertTypesEntry: true,
-      include: ["src/**/*.ts"],
-      exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "src/**/tests/**", "vitest.setup.ts"],
-      beforeWriteFile: rewriteNodeNextDtsSpecifiers,
-    }) as VitestPluginOption,
+    ...(process.env.FORMBRICKS_SKIP_DTS !== "1"
+      ? [
+          dts({
+            rollupTypes: false,
+            insertTypesEntry: true,
+            include: ["src/**/*.ts"],
+            exclude: ["src/**/*.test.ts", "src/**/*.spec.ts", "src/**/tests/**", "vitest.setup.ts"],
+            beforeWriteFile: rewriteNodeNextDtsSpecifiers,
+          }) as VitestPluginOption,
+        ]
+      : []),
     copyCompiledAssetsPlugin({
       filename: "formbricks",
       distDir: resolve(__dirname, "dist"),

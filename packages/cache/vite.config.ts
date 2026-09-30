@@ -22,13 +22,17 @@ export default defineConfig({
     },
   },
   plugins: [
-    dts({
-      include: ["src/**/*"],
-      exclude: ["src/**/*.test.ts", "src/**/*.spec.ts"],
-      entryRoot: "src",
-      outDir: "dist",
-      beforeWriteFile: rewriteNodeNextDtsSpecifiers,
-    }),
+    ...(process.env.FORMBRICKS_SKIP_DTS !== "1"
+      ? [
+          dts({
+            include: ["src/**/*"],
+            exclude: ["src/**/*.test.ts", "src/**/*.spec.ts"],
+            entryRoot: "src",
+            outDir: "dist",
+            beforeWriteFile: rewriteNodeNextDtsSpecifiers,
+          }),
+        ]
+      : []),
   ],
   test: {
     environment: "node",

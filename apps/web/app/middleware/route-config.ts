@@ -20,6 +20,7 @@ const COMMON_ROUTES = {
   HEALTH_ROUTES: [/^\/health$/], // /health endpoint
   PUBLIC_STORAGE_ROUTES: [
     /^\/storage\/[^/]+\/public\//, // /storage/[environmentId]/public/** - public storage
+    /^\/storage\/upload\//, // /storage/upload/** - presigned direct uploads (R2)
   ],
 } as const;
 
