@@ -80,6 +80,16 @@ const nextConfig = {
   // list, and this option only ever adds entries to it. The way that frustrates the Node.js middleware
   // bundler is handled in `open-next.config.ts` (`middleware.install`). The entries listed here are
   // server-only routes that never reach the middleware.
+  //
+  // `posthog-node` is deliberately NOT listed even though it is just as heavy. Turbopack externalises
+  // it into a hashed `.next/node_modules/posthog-node-<hash>` chunk, and `@opennextjs/cloudflare`
+  // rewrites that chunk back to `await import("posthog-node")` so the Node.js middleware bundler can
+  // bundle the real package. That bundler resolves with `conditions: ["module"]` and therefore picks
+  // `dist/entrypoints/index.node.mjs`, whose relative ESM imports (`../client.mjs`, `../exports.mjs`,
+  // `@posthog/core`'s `./featureFlagUtils.mjs`, ...) are then left untransformed: `openNextEdgePlugins`
+  // marks every `.mjs` request as external, so the middleware output ends up with relative `.mjs`
+  // imports that do not exist next to it, and `wrangler deploy` fails with `Could not resolve`.
+  // Letting Turbopack bundle it keeps the ESM graph inside the app's own module ids instead.
   serverExternalPackages: [
     "@authzed/authzed-node",
     "@grpc/grpc-js",
@@ -88,7 +98,6 @@ const nextConfig = {
     "pino",
     "pino-pretty",
     "pino-opentelemetry-transport",
-    "posthog-node",
     "stripe",
     "xlsx",
   ],
