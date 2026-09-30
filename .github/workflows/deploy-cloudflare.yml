@@ -9,11 +9,21 @@ name: Deploy to Cloudflare Workers
 # bucket and the queue up by title and reuses them when they already exist, then rewrites the
 # placeholder ids in `wrangler.jsonc` with the real ones before the deploy.
 #
-# Required repository secrets:
-#   CLOUDFLARE_API_TOKEN   - token with Workers Scripts: Edit + Workers KV: Edit + R2: Edit + Queues: Edit
-#   CLOUDFLARE_ACCOUNT_ID  - the account that owns the Worker
-#   ENV_FILE               - the whole Formbricks `.env` (every variable below is optional except
-#                            WEBAPP_URL, DATABASE_URL, ENCRYPTION_KEY and BETTER_AUTH_SECRET)
+# Set these repository secrets (Settings -> Secrets and variables -> Actions -> New repository
+# secret). Create only the ones you need -- an unset secret is simply left out, it never becomes an
+# empty variable:
+#
+#   Required to deploy:
+#     CLOUDFLARE_API_TOKEN    Workers Scripts: Edit + Workers KV: Edit + R2: Edit + Queues: Edit
+#     CLOUDFLARE_ACCOUNT_ID   the account that owns the Worker
+#
+#   Required by the app (the build and the Worker both refuse to start without them):
+#     WEBAPP_URL  BETTER_AUTH_URL  DATABASE_URL  ENCRYPTION_KEY  BETTER_AUTH_SECRET  CRON_SECRET
+#     AUTHZED_ENABLED=true  AUTHZED_ENDPOINT  AUTHZED_TOKEN  AUTHZED_SYSTEM_KEY  AUTHZED_CONSISTENCY
+#
+#   Everything else (mail, S3, SSO, Stripe, AI, Cube, Hub, feature flags, ...): see the single
+#   secret-per-variable list in the "Collect environment" step below. The left-hand side of each
+#   line is only a marker; the SECRET you create is the name on the right-hand side.
 on:
   push:
     branches:
@@ -34,6 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      # Credentials for the Cloudflare CLI and the resource setup script. Deliberately *not*
+      # prefixed, so they are never pushed onto the Worker itself.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       # Same switches as apps/web's `build:cf*` scripts. workerd cannot host the Node OpenTelemetry
@@ -87,71 +99,203 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --config.platform=linux --config.architecture=x64
 
-      # One repository secret (`ENV_FILE`) carries the whole Formbricks `.env`. It is written to a
-      # real `.env`, exported into every later step, and turned into the bulk payload that
-      # `wrangler secret bulk` pushes onto the Worker, so build time and runtime see the same
-      # configuration: webapp/auth URLs, database, encryption and auth secrets, SMTP, S3/R2,
-      # GitHub/Google/Azure/OIDC/SAML SSO, Slack/Notion/Airtable/Google Sheets, Stripe, AI provider
-      # credentials, Cube, Hub, feature flags and so on.
-      - name: Materialise the environment from the ENV_FILE secret
+      # --------------------------------------------------------------------------------------------
+      # One repository secret per variable. The left-hand `FB_*` name is only a marker: it lets the
+      # collector tell these apart from the runner's own environment, and is stripped again before
+      # the variables are used. The secret to create is the name on the right-hand side, e.g. create
+      # a secret called `DATABASE_URL` for the `FB_DATABASE_URL:` line.
+      #
+      # Blank values are skipped on purpose: several variables are enums, URLs or bounded numbers
+      # that reject an empty string, while leaving them unset is fine.
+      # --------------------------------------------------------------------------------------------
+      - name: Collect environment from repository secrets
         env:
-          ENV_FILE: ${{ secrets.ENV_FILE }}
+          # --- Basics -------------------------------------------------------------------------
+          FB_WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
+          FB_BETTER_AUTH_URL: ${{ secrets.BETTER_AUTH_URL }}
+          FB_NEXTAUTH_URL: ${{ secrets.NEXTAUTH_URL }}
+          FB_BASE_PATH: ${{ secrets.BASE_PATH }}
+          FB_ASSET_PREFIX_URL: ${{ secrets.ASSET_PREFIX_URL }}
+          FB_ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          FB_BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          FB_NEXTAUTH_SECRET: ${{ secrets.NEXTAUTH_SECRET }}
+          FB_CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          FB_LOG_LEVEL: ${{ secrets.LOG_LEVEL }}
+          FB_ENVIRONMENT: ${{ secrets.ENVIRONMENT }}
+          # --- Database -----------------------------------------------------------------------
+          FB_DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FB_MIGRATE_DATABASE_URL: ${{ secrets.MIGRATE_DATABASE_URL }}
+          FB_SAML_DATABASE_URL: ${{ secrets.SAML_DATABASE_URL }}
+          # --- Authorization (SpiceDB / AuthZed) ----------------------------------------------
+          FB_AUTHZED_ENABLED: ${{ secrets.AUTHZED_ENABLED }}
+          FB_AUTHZED_ENDPOINT: ${{ secrets.AUTHZED_ENDPOINT }}
+          FB_AUTHZED_TOKEN: ${{ secrets.AUTHZED_TOKEN }}
+          FB_AUTHZED_SYSTEM_KEY: ${{ secrets.AUTHZED_SYSTEM_KEY }}
+          FB_AUTHZED_INSECURE: ${{ secrets.AUTHZED_INSECURE }}
+          FB_AUTHZED_CONSISTENCY: ${{ secrets.AUTHZED_CONSISTENCY }}
+          # --- Hub ----------------------------------------------------------------------------
+          FB_HUB_API_URL: ${{ secrets.HUB_API_URL }}
+          FB_HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+          # --- Analytics (Cube) ---------------------------------------------------------------
+          FB_CUBEJS_API_URL: ${{ secrets.CUBEJS_API_URL }}
+          FB_CUBEJS_API_SECRET: ${{ secrets.CUBEJS_API_SECRET }}
+          FB_CUBEJS_JWT_ISSUER: ${{ secrets.CUBEJS_JWT_ISSUER }}
+          FB_CUBEJS_JWT_AUDIENCE: ${{ secrets.CUBEJS_JWT_AUDIENCE }}
+          # --- Email / SMTP -------------------------------------------------------------------
+          FB_MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          FB_MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+          FB_SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          FB_SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          FB_SMTP_USER: ${{ secrets.SMTP_USER }}
+          FB_SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          FB_SMTP_SECURE_ENABLED: ${{ secrets.SMTP_SECURE_ENABLED }}
+          FB_SMTP_AUTHENTICATED: ${{ secrets.SMTP_AUTHENTICATED }}
+          FB_SMTP_REJECT_UNAUTHORIZED_TLS: ${{ secrets.SMTP_REJECT_UNAUTHORIZED_TLS }}
+          # --- Object storage (S3-compatible; the R2 binding is configured in wrangler.jsonc) ---
+          FB_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          FB_S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+          FB_S3_REGION: ${{ secrets.S3_REGION }}
+          FB_S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+          FB_S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          FB_S3_FORCE_PATH_STYLE: ${{ secrets.S3_FORCE_PATH_STYLE }}
+          # --- Auth providers / SSO -----------------------------------------------------------
+          FB_GITHUB_ID: ${{ secrets.GITHUB_ID }}
+          FB_GITHUB_SECRET: ${{ secrets.GITHUB_SECRET }}
+          FB_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          FB_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          FB_AZUREAD_CLIENT_ID: ${{ secrets.AZUREAD_CLIENT_ID }}
+          FB_AZUREAD_CLIENT_SECRET: ${{ secrets.AZUREAD_CLIENT_SECRET }}
+          FB_AZUREAD_TENANT_ID: ${{ secrets.AZUREAD_TENANT_ID }}
+          FB_OIDC_CLIENT_ID: ${{ secrets.OIDC_CLIENT_ID }}
+          FB_OIDC_CLIENT_SECRET: ${{ secrets.OIDC_CLIENT_SECRET }}
+          FB_OIDC_ISSUER: ${{ secrets.OIDC_ISSUER }}
+          FB_OIDC_DISPLAY_NAME: ${{ secrets.OIDC_DISPLAY_NAME }}
+          FB_OIDC_SIGNING_ALGORITHM: ${{ secrets.OIDC_SIGNING_ALGORITHM }}
+          FB_MCP_OAUTH_JWKS_URL: ${{ secrets.MCP_OAUTH_JWKS_URL }}
+          FB_AUTH_SKIP_INVITE_FOR_SSO: ${{ secrets.AUTH_SKIP_INVITE_FOR_SSO }}
+          FB_AUTH_SSO_DEFAULT_ORGANIZATION_ID: ${{ secrets.AUTH_SSO_DEFAULT_ORGANIZATION_ID }}
+          FB_AUTH_SSO_DEFAULT_ORGANIZATION_ROLE: ${{ secrets.AUTH_SSO_DEFAULT_ORGANIZATION_ROLE }}
+          FB_AUTH_SSO_DEFAULT_TEAM_ID: ${{ secrets.AUTH_SSO_DEFAULT_TEAM_ID }}
+          # --- Integrations -------------------------------------------------------------------
+          FB_SLACK_CLIENT_ID: ${{ secrets.SLACK_CLIENT_ID }}
+          FB_SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
+          FB_NOTION_OAUTH_CLIENT_ID: ${{ secrets.NOTION_OAUTH_CLIENT_ID }}
+          FB_NOTION_OAUTH_CLIENT_SECRET: ${{ secrets.NOTION_OAUTH_CLIENT_SECRET }}
+          FB_AIRTABLE_CLIENT_ID: ${{ secrets.AIRTABLE_CLIENT_ID }}
+          FB_GOOGLE_SHEETS_CLIENT_ID: ${{ secrets.GOOGLE_SHEETS_CLIENT_ID }}
+          FB_GOOGLE_SHEETS_CLIENT_SECRET: ${{ secrets.GOOGLE_SHEETS_CLIENT_SECRET }}
+          FB_GOOGLE_SHEETS_REDIRECT_URL: ${{ secrets.GOOGLE_SHEETS_REDIRECT_URL }}
+          FB_STRIPE_PUBLISHABLE_KEY: ${{ secrets.STRIPE_PUBLISHABLE_KEY }}
+          FB_STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+          FB_STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          FB_BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          FB_BREVO_LIST_ID: ${{ secrets.BREVO_LIST_ID }}
+          FB_UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          FB_PLAIN_APP_ID: ${{ secrets.PLAIN_APP_ID }}
+          FB_PLAIN_CHAT_HMAC_SECRET: ${{ secrets.PLAIN_CHAT_HMAC_SECRET }}
+          FB_PLAIN_ACTIVE_CUSTOMER_LABEL_TYPE_ID: ${{ secrets.PLAIN_ACTIVE_CUSTOMER_LABEL_TYPE_ID }}
+          FB_ENTERPRISE_LICENSE_KEY: ${{ secrets.ENTERPRISE_LICENSE_KEY }}
+          # --- AI providers -------------------------------------------------------------------
+          FB_AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
+          FB_AI_MODEL: ${{ secrets.AI_MODEL }}
+          FB_AI_GOOGLE_CLOUD_PROJECT: ${{ secrets.AI_GOOGLE_CLOUD_PROJECT }}
+          FB_AI_GOOGLE_CLOUD_LOCATION: ${{ secrets.AI_GOOGLE_CLOUD_LOCATION }}
+          FB_AI_GOOGLE_CLOUD_CREDENTIALS_JSON: ${{ secrets.AI_GOOGLE_CLOUD_CREDENTIALS_JSON }}
+          FB_AI_GOOGLE_CLOUD_APPLICATION_CREDENTIALS: ${{ secrets.AI_GOOGLE_CLOUD_APPLICATION_CREDENTIALS }}
+          FB_AI_AWS_REGION: ${{ secrets.AI_AWS_REGION }}
+          FB_AI_AWS_ACCESS_KEY_ID: ${{ secrets.AI_AWS_ACCESS_KEY_ID }}
+          FB_AI_AWS_SECRET_ACCESS_KEY: ${{ secrets.AI_AWS_SECRET_ACCESS_KEY }}
+          FB_AI_AWS_SESSION_TOKEN: ${{ secrets.AI_AWS_SESSION_TOKEN }}
+          FB_AI_AZURE_BASE_URL: ${{ secrets.AI_AZURE_BASE_URL }}
+          FB_AI_AZURE_API_KEY: ${{ secrets.AI_AZURE_API_KEY }}
+          FB_AI_AZURE_API_VERSION: ${{ secrets.AI_AZURE_API_VERSION }}
+          FB_AI_AZURE_RESOURCE_NAME: ${{ secrets.AI_AZURE_RESOURCE_NAME }}
+          FB_AI_OPENAI_COMPATIBLE_BASE_URL: ${{ secrets.AI_OPENAI_COMPATIBLE_BASE_URL }}
+          FB_AI_OPENAI_COMPATIBLE_API_KEY: ${{ secrets.AI_OPENAI_COMPATIBLE_API_KEY }}
+          FB_AI_OPENAI_COMPATIBLE_PROVIDER_NAME: ${{ secrets.AI_OPENAI_COMPATIBLE_PROVIDER_NAME }}
+          FB_AI_OPENAI_COMPATIBLE_SUPPORTS_STRUCTURED_OUTPUTS: ${{ secrets.AI_OPENAI_COMPATIBLE_SUPPORTS_STRUCTURED_OUTPUTS }}
+          FB_AI_OPENAI_COMPATIBLE_HEADERS_JSON: ${{ secrets.AI_OPENAI_COMPATIBLE_HEADERS_JSON }}
+          FB_AI_OPENAI_COMPATIBLE_QUERY_PARAMS_JSON: ${{ secrets.AI_OPENAI_COMPATIBLE_QUERY_PARAMS_JSON }}
+          # --- Anti-bot -----------------------------------------------------------------------
+          FB_TURNSTILE_SITE_KEY: ${{ secrets.TURNSTILE_SITE_KEY }}
+          FB_TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          FB_RECAPTCHA_SITE_KEY: ${{ secrets.RECAPTCHA_SITE_KEY }}
+          FB_RECAPTCHA_SECRET_KEY: ${{ secrets.RECAPTCHA_SECRET_KEY }}
+          # --- Observability ------------------------------------------------------------------
+          FB_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          FB_SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          FB_SENTRY_ENVIRONMENT: ${{ secrets.SENTRY_ENVIRONMENT }}
+          FB_POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
+          FB_PROMETHEUS_ENABLED: ${{ secrets.PROMETHEUS_ENABLED }}
+          FB_PROMETHEUS_EXPORTER_PORT: ${{ secrets.PROMETHEUS_EXPORTER_PORT }}
+          # --- Cache / queue ------------------------------------------------------------------
+          FB_REDIS_URL: ${{ secrets.REDIS_URL }}
+          FB_BULLMQ_WORKER_ENABLED: ${{ secrets.BULLMQ_WORKER_ENABLED }}
+          FB_BULLMQ_EXTERNAL_WORKER_ENABLED: ${{ secrets.BULLMQ_EXTERNAL_WORKER_ENABLED }}
+          FB_BULLMQ_WORKER_COUNT: ${{ secrets.BULLMQ_WORKER_COUNT }}
+          FB_BULLMQ_WORKER_CONCURRENCY: ${{ secrets.BULLMQ_WORKER_CONCURRENCY }}
+          # --- Feature flags & behaviour ------------------------------------------------------
+          FB_EMAIL_AUTH_DISABLED: ${{ secrets.EMAIL_AUTH_DISABLED }}
+          FB_EMAIL_VERIFICATION_DISABLED: ${{ secrets.EMAIL_VERIFICATION_DISABLED }}
+          FB_INVITE_DISABLED: ${{ secrets.INVITE_DISABLED }}
+          FB_INVITE_RATE_LIMIT_PER_24_HOURS: ${{ secrets.INVITE_RATE_LIMIT_PER_24_HOURS }}
+          FB_PASSWORD_RESET_DISABLED: ${{ secrets.PASSWORD_RESET_DISABLED }}
+          FB_PASSWORD_RESET_TOKEN_LIFETIME_MINUTES: ${{ secrets.PASSWORD_RESET_TOKEN_LIFETIME_MINUTES }}
+          FB_PASSWORD_HIBP_CHECK_DISABLED: ${{ secrets.PASSWORD_HIBP_CHECK_DISABLED }}
+          FB_SIGNUP_DOMAIN_CHECK_ON_INVITES: ${{ secrets.SIGNUP_DOMAIN_CHECK_ON_INVITES }}
+          FB_RATE_LIMITING_DISABLED: ${{ secrets.RATE_LIMITING_DISABLED }}
+          FB_TELEMETRY_DISABLED: ${{ secrets.TELEMETRY_DISABLED }}
+          FB_USER_MANAGEMENT_MINIMUM_ROLE: ${{ secrets.USER_MANAGEMENT_MINIMUM_ROLE }}
+          FB_AUDIT_LOG_ENABLED: ${{ secrets.AUDIT_LOG_ENABLED }}
+          FB_AUDIT_LOG_GET_USER_IP: ${{ secrets.AUDIT_LOG_GET_USER_IP }}
+          FB_DEBUG: ${{ secrets.DEBUG }}
+          FB_DEBUG_SHOW_RESET_LINK: ${{ secrets.DEBUG_SHOW_RESET_LINK }}
+          FB_E2E_TESTING: ${{ secrets.E2E_TESTING }}
+          FB_SINGLE_USE_LEGACY_UNSIGNED_UNTIL: ${{ secrets.SINGLE_USE_LEGACY_UNSIGNED_UNTIL }}
+          FB_DANGEROUSLY_ALLOW_WEBHOOK_INTERNAL_URLS: ${{ secrets.DANGEROUSLY_ALLOW_WEBHOOK_INTERNAL_URLS }}
+          FB_WEBHOOK_DELIVERY_TIMEOUT_MS: ${{ secrets.WEBHOOK_DELIVERY_TIMEOUT_MS }}
+          FB_TRUSTED_PROXY_HOP_COUNT: ${{ secrets.TRUSTED_PROXY_HOP_COUNT }}
+          FB_SESSION_MAX_AGE: ${{ secrets.SESSION_MAX_AGE }}
+          FB_PUBLIC_URL: ${{ secrets.PUBLIC_URL }}
+          FB_IS_FORMBRICKS_CLOUD: ${{ secrets.IS_FORMBRICKS_CLOUD }}
+          FB_FORMBRICKS_WORKSPACE_ID: ${{ secrets.FORMBRICKS_WORKSPACE_ID }}
+          FB_FORMBRICKS_APP_URL: ${{ secrets.FORMBRICKS_APP_URL }}
+          # --- Legal / footer -----------------------------------------------------------------
+          FB_PRIVACY_URL: ${{ secrets.PRIVACY_URL }}
+          FB_TERMS_URL: ${{ secrets.TERMS_URL }}
+          FB_IMPRINT_URL: ${{ secrets.IMPRINT_URL }}
+          FB_IMPRINT_ADDRESS: ${{ secrets.IMPRINT_ADDRESS }}
+          # --- Survey scheduling --------------------------------------------------------------
+          FB_SURVEY_SCHEDULING_TIME_ZONE: ${{ secrets.SURVEY_SCHEDULING_TIME_ZONE }}
+          FB_SURVEY_SCHEDULING_LOCAL_HOUR: ${{ secrets.SURVEY_SCHEDULING_LOCAL_HOUR }}
+          FB_SURVEY_SCHEDULING_LOCAL_MINUTE: ${{ secrets.SURVEY_SCHEDULING_LOCAL_MINUTE }}
         run: |
           set -euo pipefail
-
-          if [[ -z "${ENV_FILE}" ]]; then
-            echo "::error::The ENV_FILE repository secret is empty. Paste your Formbricks .env content (WEBAPP_URL, DATABASE_URL, ENCRYPTION_KEY, BETTER_AUTH_SECRET, ...) into that single repository secret."
-            exit 1
-          fi
-
-          printf '%s\n' "${ENV_FILE}" > .env
 
           node <<'NODE'
           const fs = require("node:fs");
           const path = require("node:path");
 
           const workspace = process.env.GITHUB_WORKSPACE;
-          const lines = fs.readFileSync(path.join(workspace, ".env"), "utf8").split(/\r?\n/);
+          const prefix = "FB_";
 
           const entries = [];
-          for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (line === "" || line.startsWith("#")) continue;
-
-            const separator = line.indexOf("=");
-            if (separator === -1) continue;
-
-            const key = line.slice(0, separator).trim();
-            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-
-            let value = line.slice(separator + 1).trim();
-            const quoted =
-              value.length >= 2 &&
-              ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")));
-            if (quoted) value = value.slice(1, -1);
-
-            // Skip blanks on purpose: several variables are enums, URLs or bounded numbers that
-            // reject "" -- leaving one unset is fine, setting it empty fails validation at boot.
-            if (value === "") continue;
-
-            entries.push([key, value]);
+          for (const [key, value] of Object.entries(process.env)) {
+            if (!key.startsWith(prefix)) continue;
+            if (value === undefined || value === "") continue;
+            entries.push([key.slice(prefix.length), value]);
           }
 
           if (entries.length === 0) {
-            console.error("::error::ENV_FILE did not contain a single KEY=value pair.");
+            console.error(
+              "::error::None of the expected repository secrets are set. Create them under Settings -> Secrets and variables -> Actions. At minimum: WEBAPP_URL, BETTER_AUTH_URL, DATABASE_URL, ENCRYPTION_KEY, BETTER_AUTH_SECRET, CRON_SECRET and the AUTHZED_* values."
+            );
             process.exit(1);
           }
 
-          // Export into every later step. The heredoc form keeps spaces, quotes and `$` intact.
-          const delimiter = "__FORMBRICKS_ENV__";
-          let exported = "";
-          for (const [key, value] of entries) {
-            exported += `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
-          }
-          fs.appendFileSync(process.env.GITHUB_ENV, exported);
-
-          // Bulk payloads for `wrangler secret bulk`, so the Worker receives the same values the
-          // build ran with. The command accepts at most 100 secrets per call, so split into batches.
+          // `wrangler secret bulk` takes at most 100 secrets per call. `CLOUDFLARE_API_TOKEN`,
+          // `CLOUDFLARE_ACCOUNT_ID` and the build switches are deliberately not prefixed, so they
+          // are never pushed onto the Worker.
           const batchSize = 90;
           let batches = 0;
           for (let index = 0; index < entries.length; index += batchSize) {
@@ -161,8 +305,21 @@ jobs:
           }
           fs.writeFileSync(path.join(workspace, ".wrangler-secret-batches"), String(batches));
 
+          // A real `.env` too, so tooling that expects one still works. Values are JSON-quoted,
+          // which is exactly dotenv's double-quoted form.
+          let envFile = "";
+          for (const [key, value] of entries) envFile += `${key}=${JSON.stringify(value)}\n`;
+          fs.writeFileSync(path.join(workspace, ".env"), envFile);
+
+          // Everything after this step reads the variables from the job environment. The heredoc
+          // form keeps spaces, quotes and newlines intact.
+          const delimiter = "__FORMBRICKS_ENV__";
+          let exported = "";
+          for (const [key, value] of entries) exported += `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
+          fs.appendFileSync(process.env.GITHUB_ENV, exported);
+
           const names = entries.map(([key]) => key).sort();
-          console.log(`Exported ${names.length} environment variables in ${batches} batch(es): ${names.join(", ")}`);
+          console.log(`Collected ${names.length} environment variables in ${batches} batch(es): ${names.join(", ")}`);
           NODE
 
       # Dev-only tooling that other workflows recreate from scratch is deliberately not part of a
