@@ -560,36 +560,44 @@ describe("env", () => {
     expect(env.CUBEJS_JWT_ISSUER).toBe("formbricks-web");
   });
 
-  test("fails to load when the Cube API secret is missing", async () => {
+  test("leaves the Cube API secret unset when it is missing", async () => {
     setTestEnv({
       CUBEJS_API_SECRET: undefined,
     });
 
-    await expect(import("./env")).rejects.toThrow("Invalid environment variables");
+    const { env } = await import("./env");
+
+    expect(env.CUBEJS_API_SECRET).toBeUndefined();
   });
 
-  test("fails to load when the Cube API secret is empty", async () => {
+  test("normalizes an empty Cube API secret to unset", async () => {
     setTestEnv({
       CUBEJS_API_SECRET: "",
     });
 
-    await expect(import("./env")).rejects.toThrow("Invalid environment variables");
+    const { env } = await import("./env");
+
+    expect(env.CUBEJS_API_SECRET).toBeUndefined();
   });
 
-  test("fails to load when the Cube API URL is missing", async () => {
+  test("leaves the Cube API URL unset when it is missing", async () => {
     setTestEnv({
       CUBEJS_API_URL: undefined,
     });
 
-    await expect(import("./env")).rejects.toThrow("Invalid environment variables");
+    const { env } = await import("./env");
+
+    expect(env.CUBEJS_API_URL).toBeUndefined();
   });
 
-  test("fails to load when the Cube API URL is empty", async () => {
+  test("normalizes an empty Cube API URL to unset", async () => {
     setTestEnv({
       CUBEJS_API_URL: "",
     });
 
-    await expect(import("./env")).rejects.toThrow("Invalid environment variables");
+    const { env } = await import("./env");
+
+    expect(env.CUBEJS_API_URL).toBeUndefined();
   });
 
   test("fails to load when the Cube API URL is invalid", async () => {

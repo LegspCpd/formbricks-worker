@@ -28,6 +28,10 @@ const buildHubRequestUrl = (requestUrl: URL): URL | null => {
     return null;
   }
 
+  if (!HUB_API_URL) {
+    return null;
+  }
+
   const hubUrl = new URL(HUB_API_URL);
   hubUrl.pathname = hubPathname;
   hubUrl.search = requestUrl.search;

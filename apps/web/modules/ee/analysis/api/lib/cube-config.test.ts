@@ -97,27 +97,33 @@ describe("cube-config", () => {
     expect(getCubeApiCredentials().apiUrl).toBe("https://cube.formbricks.local/cubejs-api/v1");
   });
 
-  test("fails at env validation when CUBEJS_API_URL is missing", async () => {
+  test("throws when CUBEJS_API_URL is missing", async () => {
     setTestEnv({
       CUBEJS_API_URL: undefined,
     });
 
-    await expect(import("./cube-config")).rejects.toThrow("Invalid environment variables");
+    const { getCubeApiCredentials } = await import("./cube-config");
+
+    expect(() => getCubeApiCredentials()).toThrow("CUBEJS_API_URL");
   });
 
-  test("fails at env validation when CUBEJS_API_SECRET is missing", async () => {
+  test("throws when CUBEJS_API_SECRET is missing", async () => {
     setTestEnv({
       CUBEJS_API_SECRET: undefined,
     });
 
-    await expect(import("./cube-config")).rejects.toThrow("Invalid environment variables");
+    const { getCubeApiCredentials } = await import("./cube-config");
+
+    expect(() => getCubeApiCredentials()).toThrow("CUBEJS_API_SECRET");
   });
 
-  test("fails at env validation when CUBEJS_API_SECRET is an empty string", async () => {
+  test("throws when CUBEJS_API_SECRET is an empty string", async () => {
     setTestEnv({
       CUBEJS_API_SECRET: "",
     });
 
-    await expect(import("./cube-config")).rejects.toThrow("Invalid environment variables");
+    const { getCubeApiCredentials } = await import("./cube-config");
+
+    expect(() => getCubeApiCredentials()).toThrow("CUBEJS_API_SECRET");
   });
 });

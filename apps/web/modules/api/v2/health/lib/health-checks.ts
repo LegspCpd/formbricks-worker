@@ -43,7 +43,8 @@ export const checkCacheHealth = async (): Promise<Result<boolean, ApiErrorRespon
       });
     }
 
-    const isAvailable = await cacheServiceResult.data.isRedisAvailable();
+    const cacheService = cacheServiceResult.data;
+    const isAvailable = "isRedisAvailable" in cacheService ? await cacheService.isRedisAvailable() : true;
     if (isAvailable) {
       return ok(true);
     }

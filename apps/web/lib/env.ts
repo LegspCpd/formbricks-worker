@@ -454,14 +454,14 @@ const parsedEnv = createEnv({
     AI_OPENAI_COMPATIBLE_SUPPORTS_STRUCTURED_OUTPUTS: z.string().optional(),
     AI_OPENAI_COMPATIBLE_HEADERS_JSON: z.string().optional(),
     AI_OPENAI_COMPATIBLE_QUERY_PARAMS_JSON: z.string().optional(),
-    CUBEJS_API_SECRET: z.string().trim().min(1),
-    CUBEJS_API_URL: z.url(),
+    CUBEJS_API_SECRET: ZOptionalNonEmptyString,
+    CUBEJS_API_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
     CUBEJS_JWT_AUDIENCE: ZOptionalNonEmptyString,
     CUBEJS_JWT_ISSUER: ZOptionalNonEmptyString,
     HTTP_PROXY: z.url().optional(),
     HTTPS_PROXY: z.url().optional(),
-    HUB_API_URL: z.url(),
-    HUB_API_KEY: z.string().trim().min(1),
+    HUB_API_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
+    HUB_API_KEY: ZOptionalNonEmptyString,
     IMPRINT_URL: z
       .url()
       .optional()
@@ -496,7 +496,7 @@ const parsedEnv = createEnv({
     // changing its value, which invalidates every session and outstanding token. Warned about at boot
     // instead (`warnOnAuthSecretRisks`).
     BETTER_AUTH_SECRET: ZOptionalVerbatimSecret,
-    BETTER_AUTH_URL: z.url().optional(),
+    BETTER_AUTH_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
     MCP_OAUTH_JWKS_URL: ZMcpOauthJwksUrl.optional(),
     MAIL_FROM_NAME: z.string().optional(),
     NOTION_OAUTH_CLIENT_ID: z.string().optional(),
@@ -506,10 +506,7 @@ const parsedEnv = createEnv({
     OIDC_DISPLAY_NAME: z.string().optional(),
     OIDC_ISSUER: z.string().optional(),
     OIDC_SIGNING_ALGORITHM: z.string().optional(),
-    REDIS_URL:
-      process.env.NODE_ENV === "test"
-        ? z.string().optional()
-        : z.url("REDIS_URL is required for caching, rate limiting, and audit logging"),
+    REDIS_URL: z.preprocess(emptyStringToUndefined, z.url("REDIS_URL must be a valid URL").optional()),
     PASSWORD_HIBP_CHECK_DISABLED: z.enum(["1", "0"]).optional(),
     PASSWORD_RESET_DISABLED: z.enum(["1", "0"]).optional(),
     PASSWORD_RESET_TOKEN_LIFETIME_MINUTES: z.coerce.number().int().min(5).max(120).optional().default(30),
@@ -575,7 +572,7 @@ const parsedEnv = createEnv({
     TURNSTILE_SITE_KEY: z.string().optional(),
     RECAPTCHA_SITE_KEY: z.string().optional(),
     RECAPTCHA_SECRET_KEY: z.string().optional(),
-    WEBAPP_URL: z.url().optional(),
+    WEBAPP_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
     UNSPLASH_ACCESS_KEY: z.string().optional(),
 
     NODE_ENV: z.enum(["development", "production", "test"]).optional(),

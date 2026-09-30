@@ -30,8 +30,12 @@ const isGetDelUnsupportedError = (error: unknown): boolean => {
 
 const getClient = (): Promise<RedisClient> => {
   if (!clientPromise) {
+    const url = env.REDIS_URL;
+    if (!url) {
+      throw new Error("REDIS_URL is required for the Better Auth Redis secondary storage");
+    }
     const client = createClient({
-      url: env.REDIS_URL,
+      url,
       socket: { connectTimeout: 3000 },
       // Managed Redis services and their network paths can reap idle connections (for example,
       // Azure Cache for Redis documents a 10-minute idle timeout). Ping well inside that limit.

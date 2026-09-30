@@ -197,8 +197,9 @@ export const getHubClient = (): FormbricksHub | null => {
     return globalForHub.formbricksHubClientRepeatArrays;
   }
   const apiKey = env.HUB_API_KEY;
-  if (!apiKey) return null;
-  const client = new FormbricksHubWithRepeatedArrayParams({ apiKey, baseURL: env.HUB_API_URL });
+  const baseURL = env.HUB_API_URL;
+  if (!apiKey || !baseURL) return null;
+  const client = new FormbricksHubWithRepeatedArrayParams({ apiKey, baseURL });
   globalForHub.formbricksHubClientRepeatArrays = client;
   return client;
 };

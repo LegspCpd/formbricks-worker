@@ -38,12 +38,25 @@ export const normalizeCubeApiUrl = (baseUrl: string): string => {
   return `${normalizedBaseUrl}/cubejs-api/v1`;
 };
 
-export const getCubeApiCredentials = () => ({
-  apiUrl: normalizeCubeApiUrl(env.CUBEJS_API_URL),
-  apiSecret: env.CUBEJS_API_SECRET,
-  audience: env.CUBEJS_JWT_AUDIENCE ?? DEFAULT_CUBE_JWT_AUDIENCE,
-  issuer: env.CUBEJS_JWT_ISSUER ?? DEFAULT_CUBE_JWT_ISSUER,
-});
+export const getCubeApiCredentials = () => {
+  const apiUrl = env.CUBEJS_API_URL;
+  const apiSecret = env.CUBEJS_API_SECRET;
+
+  if (!apiUrl) {
+    throw new Error("CUBEJS_API_URL is required to query Cube analytics");
+  }
+
+  if (!apiSecret) {
+    throw new Error("CUBEJS_API_SECRET is required to query Cube analytics");
+  }
+
+  return {
+    apiUrl: normalizeCubeApiUrl(apiUrl),
+    apiSecret,
+    audience: env.CUBEJS_JWT_AUDIENCE ?? DEFAULT_CUBE_JWT_AUDIENCE,
+    issuer: env.CUBEJS_JWT_ISSUER ?? DEFAULT_CUBE_JWT_ISSUER,
+  };
+};
 
 export const createCubeApiToken = (
   apiSecret: string,

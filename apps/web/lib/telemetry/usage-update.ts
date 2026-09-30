@@ -180,7 +180,7 @@ export const sendTelemetryEvents = async () => {
     // EXECUTION: Send Telemetry
     // ============================================================
     // We've passed all checks and acquired the lock. Now execute telemetry.
-    await executeTelemetrySend(cache, lastSent, now);
+    await executeTelemetrySend(cache as CacheService, lastSent, now);
   } catch (error) {
     // Catch-all for any unexpected errors in the wrapper logic (cache failures, lock issues, etc.)
     // Log as warning since telemetry is non-essential functionality
