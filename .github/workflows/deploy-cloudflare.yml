@@ -54,7 +54,12 @@ jobs:
   deploy:
     name: Build & deploy worker
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Generous on purpose. `wrangler deploy` re-bundles the whole OpenNext output, and the Node.js
+    # middleware bundle is a ~1M-line file, so a run that hits a cold Next cache can legitimately
+    # spend a long time here. A job that hits its timeout is killed with `SIGTERM`, which the log
+    # reports as `Command failed with signal "SIGTERM"` -- that is indistinguishable from a manual
+    # cancel, and it is not worth risking.
+    timeout-minutes: 180
     env:
       # Credentials for the Cloudflare CLI and the resource setup script. Deliberately *not*
       # prefixed, so they are never pushed onto the Worker itself.
@@ -354,7 +359,31 @@ jobs:
       # announces twice. It also populates the remote R2 incremental cache and injects the deployment
       # mapping, which a bare `wrangler deploy` skips — the delegation exists precisely to add those.
       - name: Deploy the Worker
-        run: pnpm --filter @formbricks/web run deploy:cf
+        run: |
+          set -euo pipefail
+
+          # `wrangler` re-bundles the whole OpenNext output here, and esbuild prints thousands of
+          # harmless `[WARNING] Duplicate key ...` lines while it does. They bury the handful of
+          # lines that actually matter (`Total Upload`, `Deployed ... triggers`, or the real error),
+          # and they make the step look stuck. Keep the full output in a file and only surface the
+          # tail, so the log stays readable and a failure still shows esbuild's error block.
+          log="${RUNNER_TEMP}/deploy-cf.log"
+          echo "Running \`opennextjs-cloudflare deploy\` (full output captured in ${log})."
+          echo "esbuild re-bundling the worker can take several minutes; the warnings are suppressed."
+
+          set +e
+          pnpm --filter @formbricks/web run deploy:cf >"${log}" 2>&1
+          status=$?
+          set -e
+
+          if [ "${status}" -ne 0 ]; then
+            echo "::group::deploy:cf output (last 400 lines)"
+            tail -n 400 "${log}"
+            echo "::endgroup::"
+            exit "${status}"
+          fi
+
+          tail -n 40 "${log}"
 
       # `wrangler deploy` does not carry secrets, so push the same configuration onto the Worker's
       # own environment. This is what OpenNext's adapter reads at request time -- build-time inlining
