@@ -8,6 +8,7 @@
         "BASE_PATH",
         "BETTER_AUTH_URL",
         "E2E_TESTING",
+        "FORMBRICKS_SKIP_TYPECHECK",
         "NEXTAUTH_URL",
         "NODE_ENV",
         "POSTHOG_KEY",

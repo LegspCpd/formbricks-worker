@@ -96,6 +96,11 @@ const nextConfig = {
     proxyClientMaxBodySize: "16mb",
     turbopackFileSystemCacheForBuild: true,
   },
+  // Type errors never change the emitted build output, and the `tsc` pass is one of the most
+  // expensive phases of a cold build. Cloudflare Workers Builds caps every build at 20 minutes on a
+  // 2-vCPU box, so the CF build sets FORMBRICKS_SKIP_TYPECHECK=1 and relies on the dedicated
+  // `pnpm typecheck` task instead. Local `pnpm build` still type-checks.
+  typescript: { ignoreBuildErrors: process.env.FORMBRICKS_SKIP_TYPECHECK === "1" },
   transpilePackages: ["@formbricks/database", "@formbricks/workflows"],
   images: {
     // Optimize image processing to reduce CPU time and prevent timeouts
