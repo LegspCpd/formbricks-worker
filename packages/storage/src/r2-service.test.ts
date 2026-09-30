@@ -45,43 +45,45 @@ describe("r2-service", () => {
   });
 
   describe("createUploadSignature / verifyUploadSignature", () => {
-    test("signs HMAC-SHA256 over `${key}|${expires}`", () => {
+    test("signs HMAC-SHA256 over `${key}|${expires}`", async () => {
       const expires = 1_700_000_000_000;
       const expected = createHmac("sha256", SECRET).update(`a/b/c.txt|${expires}`).digest("hex");
 
-      expect(createUploadSignature("a/b/c.txt", expires, SECRET)).toBe(expected);
+      await expect(createUploadSignature("a/b/c.txt", expires, SECRET)).resolves.toBe(expected);
     });
 
-    test("verifies a signature it produced", () => {
+    test("verifies a signature it produced", async () => {
       const expires = Date.now() + 60_000;
-      const signature = createUploadSignature("a/b/c.txt", expires, SECRET);
+      const signature = await createUploadSignature("a/b/c.txt", expires, SECRET);
 
-      expect(verifyUploadSignature(signature, "a/b/c.txt", expires, SECRET)).toBe(true);
+      await expect(verifyUploadSignature(signature, "a/b/c.txt", expires, SECRET)).resolves.toBe(true);
     });
 
-    test("rejects a signature bound to a different key", () => {
+    test("rejects a signature bound to a different key", async () => {
       const expires = Date.now() + 60_000;
-      const signature = createUploadSignature("a/b/c.txt", expires, SECRET);
+      const signature = await createUploadSignature("a/b/c.txt", expires, SECRET);
 
-      expect(verifyUploadSignature(signature, "a/b/other.txt", expires, SECRET)).toBe(false);
+      await expect(verifyUploadSignature(signature, "a/b/other.txt", expires, SECRET)).resolves.toBe(false);
     });
 
-    test("rejects a signature bound to a different expiry", () => {
+    test("rejects a signature bound to a different expiry", async () => {
       const expires = Date.now() + 60_000;
-      const signature = createUploadSignature("a/b/c.txt", expires, SECRET);
+      const signature = await createUploadSignature("a/b/c.txt", expires, SECRET);
 
-      expect(verifyUploadSignature(signature, "a/b/c.txt", expires + 1, SECRET)).toBe(false);
+      await expect(verifyUploadSignature(signature, "a/b/c.txt", expires + 1, SECRET)).resolves.toBe(false);
     });
 
-    test("rejects a signature produced with a different secret", () => {
+    test("rejects a signature produced with a different secret", async () => {
       const expires = Date.now() + 60_000;
-      const signature = createUploadSignature("a/b/c.txt", expires, "another-secret");
+      const signature = await createUploadSignature("a/b/c.txt", expires, "another-secret");
 
-      expect(verifyUploadSignature(signature, "a/b/c.txt", expires, SECRET)).toBe(false);
+      await expect(verifyUploadSignature(signature, "a/b/c.txt", expires, SECRET)).resolves.toBe(false);
     });
 
-    test("rejects a malformed signature without throwing", () => {
-      expect(verifyUploadSignature("not-a-valid-signature", "a/b/c.txt", Date.now(), SECRET)).toBe(false);
+    test("rejects a malformed signature without throwing", async () => {
+      await expect(
+        verifyUploadSignature("not-a-valid-signature", "a/b/c.txt", Date.now(), SECRET)
+      ).resolves.toBe(false);
     });
   });
 
@@ -106,7 +108,7 @@ describe("r2-service", () => {
 
       expect(expiresParam).not.toBeNull();
       expect(Number.isFinite(expires)).toBe(true);
-      expect(verifyUploadSignature(signature, key, expires, SECRET)).toBe(true);
+      await expect(verifyUploadSignature(signature, key, expires, SECRET)).resolves.toBe(true);
     });
 
     test("returns an S3 client error when no bucket is configured", async () => {

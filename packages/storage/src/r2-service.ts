@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { logger } from "@formbricks/logger";
 import type { FileStreamResult } from "./service";
 import { type Result, type StorageError, StorageErrorCode, err, ok } from "./types/error";
@@ -86,22 +85,59 @@ export const setR2Bucket = (bucket: R2Bucket): void => {
 
 const UPLOAD_URL_TTL_MS = 2 * 60 * 1000;
 
-export const createUploadSignature = (key: string, expires: number, secret: string): string =>
-  createHmac("sha256", secret).update(`${key}|${expires}`).digest("hex");
+const toHex = (buffer: ArrayBuffer): string =>
+  Array.from(new Uint8Array(buffer))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 
-export const verifyUploadSignature = (
+/**
+ * HMAC-SHA256 over `${key}|${expires}` using the Web Crypto API so this package stays isomorphic —
+ * it is built for the browser as well, where `node:crypto` is not available.
+ */
+export const createUploadSignature = async (
+  key: string,
+  expires: number,
+  secret: string
+): Promise<string> => {
+  const encoder = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(`${key}|${expires}`));
+
+  return toHex(signature);
+};
+
+const constantTimeEqual = (left: string, right: string): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  let mismatch = 0;
+
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+
+  return mismatch === 0;
+};
+
+export const verifyUploadSignature = async (
   signature: string,
   key: string,
   expires: number,
   secret: string
-): boolean => {
-  const expected = Buffer.from(createUploadSignature(key, expires, secret), "utf8");
-  const provided = Buffer.from(signature, "utf8");
+): Promise<boolean> => {
+  const expected = await createUploadSignature(key, expires, secret);
 
-  return expected.length === provided.length && timingSafeEqual(expected, provided);
+  return constantTimeEqual(expected, signature);
 };
 
-export const getSignedUploadUrl = (
+export const getSignedUploadUrl = async (
   fileName: string,
   contentType: string,
   filePath: string,
@@ -110,32 +146,30 @@ export const getSignedUploadUrl = (
   try {
     const bucket = getR2Bucket();
     if (!bucket) {
-      return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
+      return err({ code: StorageErrorCode.S3ClientError });
     }
 
     const secret = process.env.ENCRYPTION_KEY;
     if (!secret) {
       logger.error({ fileName, filePath }, "ENCRYPTION_KEY is not set; cannot sign R2 upload URL");
-      return Promise.resolve(err({ code: StorageErrorCode.S3CredentialsError }));
+      return err({ code: StorageErrorCode.S3CredentialsError });
     }
 
     const key = `${filePath}/${fileName}`;
     const expires = Date.now() + UPLOAD_URL_TTL_MS;
-    const signature = createUploadSignature(key, expires, secret);
+    const signature = await createUploadSignature(key, expires, secret);
     const url = `/storage/upload/${encodeURIComponent(key)}?expires=${expires}&sig=${signature}`;
 
-    return Promise.resolve(
-      ok({
-        signedUrl: url,
-        presignedFields: {
-          key,
-          "Content-Type": contentType,
-        },
-      })
-    );
+    return ok({
+      signedUrl: url,
+      presignedFields: {
+        key,
+        "Content-Type": contentType,
+      },
+    });
   } catch (error) {
     logger.error({ error, fileName, filePath }, "Failed to get R2 signed upload URL");
-    return Promise.resolve(err({ code: StorageErrorCode.S3ClientError }));
+    return err({ code: StorageErrorCode.S3ClientError });
   }
 };
 
