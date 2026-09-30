@@ -445,3 +445,14 @@ patchedDependencies:
   # ENG-2559: a failed secondary-storage session read bypasses Better Auth's configured database
   # fallback. Remove this version-pinned patch once upstream handles Redis read failures here.
   "better-auth@1.7.0": patches/better-auth@1.7.0.patch
+  # `pg` (via `@prisma/adapter-pg`) needs `pg-cloudflare`'s real TCP implementation on Workers, but the
+  # package only exposes it behind the `workerd` export condition: `default` is a no-op stub
+  # (`./dist/empty.js`). Next's file tracer resolves the package with the `node` conditions, so it only
+  # copies the stub, while the OpenNext server bundle is built with `conditions: ["workerd"]` and needs
+  # `./dist/index.js` - failing the build with `Could not resolve "pg-cloudflare"`. OpenNext's Node.js
+  # middleware bundle (`conditions: ["module"]`) meanwhile resolved the stub, which leaves
+  # `CloudflareSocket` undefined at runtime and breaks the Proxy's session lookup. Pointing `default` at
+  # `./dist/index.js` makes every bundler pick the real implementation. Safe outside Workers: `pg` only
+  # requires it when `isCloudflareRuntime()` is true, and the `cloudflare:sockets` import is a lazy
+  # dynamic import that a Node process never evaluates.
+  pg-cloudflare@1.3.0: patches/pg-cloudflare@1.3.0.patch
