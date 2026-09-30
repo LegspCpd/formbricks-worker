@@ -40,12 +40,14 @@
       "service": "formbricks-worker"
     }
   ],
-  "queues": [
-    {
-      "name": "formbricks-jobs",
-      "binding": "JOBS_QUEUE"
-    }
-  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS_QUEUE",
+        "queue": "formbricks-jobs"
+      }
+    ]
+  },
   // 可选配置：
   // - 如果使用 Neon + Hyperdrive，取消下面的注释并填入你的 Hyperdrive id
   // - 如果不需要 Hyperdrive，保持注释状态即可

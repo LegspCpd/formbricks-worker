@@ -203,7 +203,7 @@ const updateWranglerConfig = (config: {
     /"bucket_name":\s*"formbricks-storage"/g,
     `"bucket_name": "${config.r2BucketName}"`
   );
-  content = content.replace(/"name":\s*"formbricks-jobs"/, `"name": "${config.queueName}"`);
+  content = content.replace(/"queue":\s*"formbricks-jobs"/, `"queue": "${config.queueName}"`);
 
   writeFileSync(wranglerPath, content);
   console.log("  Updated wrangler.jsonc with resource IDs");

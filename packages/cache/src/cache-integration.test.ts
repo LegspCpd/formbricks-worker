@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { logger } from "@formbricks/logger";
 import { createCacheKey } from "./cache-keys";
 import { getCacheService } from "./client";
-import type { CacheService } from "./service";
+import { CacheService } from "./service";
 
 // Check if Redis is available
 let isRedisAvailable = false;
@@ -24,10 +24,16 @@ async function checkRedisAvailability(): Promise<boolean> {
       return false;
     }
 
-    const isAvailable = await cacheServiceResult.data.isRedisAvailable();
+    const service = cacheServiceResult.data;
+    if (!(service instanceof CacheService)) {
+      logger.info("Cache service is KV-backed - Redis availability check skipped");
+      return false;
+    }
+
+    const isAvailable = await service.isRedisAvailable();
     if (isAvailable) {
       logger.info("Redis availability check successful - Redis is available");
-      cacheService = cacheServiceResult.data;
+      cacheService = service;
       return true;
     }
 

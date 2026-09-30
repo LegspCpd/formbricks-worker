@@ -1,6 +1,6 @@
 import { logger } from "@formbricks/logger";
 import type { RedisClient } from "@/types/client";
-import { type CacheError, CacheErrorClass, ErrorCode, type Result, err, ok } from "@/types/error";
+import { type CacheError, ErrorCode, type Result, err, ok } from "@/types/error";
 import type { CacheKey } from "@/types/keys";
 import { ZCacheKey } from "@/types/keys";
 import { ZTtlMs, ZTtlMsOptional } from "@/types/service";
@@ -15,8 +15,11 @@ interface NullableCacheBox<T> {
 
 interface KVNamespace {
   get(key: string): Promise<string | null>;
-  getWithMetadata(key: string): Promise<{ value: string | null; metadata: unknown } | null>;
-  put(key: string, value: string, options?: { expirationTtl?: number; expiration?: number; metadata?: unknown }): Promise<void>;
+  put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number; expiration?: number; metadata?: unknown }
+  ): Promise<void>;
   delete(key: string): Promise<void>;
   list(options?: { prefix?: string; limit?: number; cursor?: string }): Promise<{
     keys: { name: string; expiration?: number; metadata?: unknown }[];
@@ -160,10 +163,8 @@ export class KVCacheService {
     }
 
     const fresh = await fn();
-    if (fresh !== undefined) {
-      const box: NullableCacheBox<T> = { [NULLABLE_BOX_MARKER]: true, value: fresh };
-      await this.trySetCache(key, box, ttlMs);
-    }
+    const box: NullableCacheBox<T> = { [NULLABLE_BOX_MARKER]: true, value: fresh };
+    await this.trySetCache(key, box, ttlMs);
     return fresh;
   }
 
