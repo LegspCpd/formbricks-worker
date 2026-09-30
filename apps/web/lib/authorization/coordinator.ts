@@ -5,7 +5,7 @@ import type { TAuthorizationAction, TAuthorizationActor, TAuthorizationResourceF
 import type { AuthorizationEvaluator } from "./evaluator";
 import { recordAuthorizationDecision } from "./metrics";
 import { normalizeAuthorizationOperationalError } from "./operational-error";
-import { inProcessEvaluator } from "./inprocess-evaluator";
+import { spicedbEvaluator } from "./spicedb-evaluator";
 
 export const authorizationCoordinator: AuthorizationEvaluator = {
   async can<TAction extends TAuthorizationAction>(
@@ -22,7 +22,7 @@ export const authorizationCoordinator: AuthorizationEvaluator = {
     } as const;
 
     try {
-      const allowed = await inProcessEvaluator.can(actor, action, resource);
+      const allowed = await spicedbEvaluator.can(actor, action, resource);
       recordAuthorizationDecision({
         ...metric,
         durationMs: performance.now() - startedAt,

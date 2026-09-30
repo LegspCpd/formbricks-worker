@@ -1,11 +1,27 @@
 import { withSentryConfig } from "@sentry/nextjs";
 import createJiti from "jiti";
+import { existsSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Single source of truth for image-optimizer hosts (ENG-1678); shared with the runtime
 // `isExternalImageSrc` check in lib/image-hosts.ts so remotePatterns and the per-<Image>
 // `unoptimized` decision can never drift apart.
 import { LOOPBACK_HOSTS, OPTIMIZABLE_IMAGE_HOSTS } from "./lib/optimizable-image-hosts.mjs";
+
+// `apps/web/.env` is a tracked symlink to the repository-root `.env`, which is intentionally kept
+// untracked. On a fresh clone (notably Cloudflare Workers Builds) that target does not exist, so the
+// symlink dangles and Next's env loader aborts the build with `ENOENT: stat 'apps/web/.env'`.
+// Materialize an empty root `.env` when it is missing so the symlink resolves; real configuration
+// still comes from the process environment. The repo root is two levels up from this config file.
+const repositoryRootEnv = resolve(dirname(fileURLToPath(import.meta.url)), "../../.env");
+if (!existsSync(repositoryRootEnv)) {
+  try {
+    writeFileSync(repositoryRootEnv, "");
+  } catch {
+    // Read-only filesystem — leave it to Next to report the original failure if it still occurs.
+  }
+}
 
 const jiti = createJiti(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
