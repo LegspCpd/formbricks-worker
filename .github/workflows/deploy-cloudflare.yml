@@ -17,6 +17,15 @@ name: Deploy to Cloudflare Workers
 #     CLOUDFLARE_API_TOKEN    Workers Scripts: Edit + Workers KV: Edit + R2: Edit + Queues: Edit
 #     CLOUDFLARE_ACCOUNT_ID   the account that owns the Worker
 #
+#   Optional:
+#     CLOUDFLARE_WORKER_NAME      the Worker to deploy into, when it is not `formbricks-worker`.
+#                                 Whatever that Worker already binds -- KV, R2, queue, Hyperdrive,
+#                                 its own service binding -- is read from the API and reused, so an
+#                                 existing project is updated rather than duplicated.
+#     CLOUDFLARE_RESOURCE_PREFIX  prefix for the resources that have to be created because the
+#                                 Worker does not bind one yet. Default `formbricks`.
+#     CLOUDFLARE_HYPERDRIVE_ID    attach Hyperdrive even when the Worker does not use it yet.
+#
 #   Required by the app (the build and the Worker both refuse to start without them):
 #     WEBAPP_URL  BETTER_AUTH_URL  DATABASE_URL  ENCRYPTION_KEY  BETTER_AUTH_SECRET  CRON_SECRET
 #     AUTHZED_ENABLED=true  AUTHZED_ENDPOINT  AUTHZED_TOKEN  AUTHZED_SYSTEM_KEY  AUTHZED_CONSISTENCY
@@ -48,6 +57,12 @@ jobs:
       # prefixed, so they are never pushed onto the Worker itself.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Which Worker to update, and what to call the resources that still have to be created. An
+      # unset secret stays empty and the setup script falls back to its own default, so the default
+      # lives in exactly one place.
+      CLOUDFLARE_WORKER_NAME: ${{ secrets.CLOUDFLARE_WORKER_NAME }}
+      CLOUDFLARE_RESOURCE_PREFIX: ${{ secrets.CLOUDFLARE_RESOURCE_PREFIX }}
+      CLOUDFLARE_HYPERDRIVE_ID: ${{ secrets.CLOUDFLARE_HYPERDRIVE_ID }}
       # Same switches as apps/web's `build:cf*` scripts. workerd cannot host the Node OpenTelemetry
       # SDK, and the tsc pass does not change the emitted bundle; together they used to dominate the
       # build.

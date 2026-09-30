@@ -4,6 +4,15 @@ import { resolve } from "node:path";
 
 const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
 
+// The Worker that gets deployed. Nothing is created here: `wrangler deploy` owns the Worker itself,
+// this script only makes sure its bindings resolve to real resources. Override with
+// CLOUDFLARE_WORKER_NAME when the Worker in your account is named differently.
+const DEFAULT_WORKER_NAME = "formbricks-worker";
+
+// Prefix for the resources that have to be created when the Worker does not already bind one.
+// Override with CLOUDFLARE_RESOURCE_PREFIX to keep several deployments apart in one account.
+const DEFAULT_RESOURCE_PREFIX = "formbricks";
+
 interface CloudflareResponse<T> {
   success: boolean;
   errors: { code: number; message: string }[];
@@ -23,6 +32,29 @@ interface Queue {
   queue_id: string;
   queue_name: string;
   created_on: string;
+}
+
+// A subset of the entries returned by GET /accounts/{id}/workers/scripts/{name}/settings. Every
+// binding carries the resource it points at under a type-specific key.
+interface WorkerBinding {
+  name?: string;
+  type?: string;
+  namespace_id?: string;
+  bucket_name?: string;
+  queue_name?: string;
+  service?: string;
+  id?: string;
+  database_id?: string;
+}
+
+interface ResolvedBindings {
+  cacheKvId: string;
+  tagCacheKvId: string;
+  memoryCacheKvId: string;
+  r2BucketName: string;
+  queueName: string;
+  selfReference: string;
+  hyperdriveId: string | null;
 }
 
 const runDatabaseMigrations = (): void => {
@@ -85,6 +117,25 @@ const getCloudflareAccountId = (): string => {
   return accountId;
 };
 
+const getWorkerName = (): string => process.env.CLOUDFLARE_WORKER_NAME?.trim() || DEFAULT_WORKER_NAME;
+
+const getResourceNames = (): {
+  cacheKv: string;
+  tagCacheKv: string;
+  memoryCacheKv: string;
+  r2Bucket: string;
+  jobsQueue: string;
+} => {
+  const prefix = process.env.CLOUDFLARE_RESOURCE_PREFIX?.trim() || DEFAULT_RESOURCE_PREFIX;
+  return {
+    cacheKv: `${prefix}_cache_kv`,
+    tagCacheKv: `${prefix}_tag_cache_kv`,
+    memoryCacheKv: `${prefix}_memory_cache_kv`,
+    r2Bucket: `${prefix}-storage`,
+    jobsQueue: `${prefix}-jobs`,
+  };
+};
+
 const cloudflareApi = async <T>(path: string, options: RequestInit = {}): Promise<CloudflareResponse<T>> => {
   const token = getCloudflareApiToken();
   const response = await fetch(`${CLOUDFLARE_API_BASE}${path}`, {
@@ -101,6 +152,48 @@ const cloudflareApi = async <T>(path: string, options: RequestInit = {}): Promis
     throw new Error(`Cloudflare API error: ${data.errors.map((e) => e.message).join(", ")}`);
   }
   return data;
+};
+
+// Reads what the Worker in this account already has bound, so an existing deployment is reused
+// instead of duplicated. Returns null when the Worker does not exist yet.
+const fetchWorkerBindings = async (workerName: string): Promise<Map<string, WorkerBinding> | null> => {
+  const accountId = getCloudflareAccountId();
+  const token = getCloudflareApiToken();
+  const url = `${CLOUDFLARE_API_BASE}/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/settings`;
+
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (response.status === 404) {
+    return null;
+  }
+
+  const data = (await response.json()) as CloudflareResponse<{ bindings?: WorkerBinding[] }>;
+  if (!data.success) {
+    // A missing Workers Scripts:Read scope must not break a first deployment that has nothing to
+    // reuse anyway, so fall back to finding or creating the resources by name.
+    console.warn(
+      `  Could not read the settings of Worker "${workerName}": ${data.errors.map((e) => e.message).join(", ")}`
+    );
+    console.warn("  Falling back to looking the resources up by name.");
+    return null;
+  }
+
+  const bindings = new Map<string, WorkerBinding>();
+  for (const binding of data.result?.bindings ?? []) {
+    if (binding?.type && binding?.name) {
+      bindings.set(`${binding.type}:${binding.name}`, binding);
+    }
+  }
+  return bindings;
+};
+
+const reuseBinding = <K extends keyof WorkerBinding>(
+  bindings: Map<string, WorkerBinding> | null,
+  type: string,
+  bindingName: string,
+  key: K
+): string | null => {
+  const value = bindings?.get(`${type}:${bindingName}`)?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
 };
 
 const findKVNamespace = async (title: string): Promise<KVNamespace | null> => {
@@ -193,50 +286,146 @@ const ensureQueue = async (name: string): Promise<string> => {
   return created.queue_name;
 };
 
-const updateWranglerConfig = (config: {
-  cacheKvId: string;
-  tagCacheKvId: string;
-  memoryCacheKvId: string;
-  r2BucketName: string;
-  queueName: string;
-}): void => {
+const resolveBindings = async (
+  bindings: Map<string, WorkerBinding> | null,
+  names: ReturnType<typeof getResourceNames>,
+  workerName: string
+): Promise<ResolvedBindings> => {
+  const cacheKvId =
+    reuseBinding(bindings, "kv_namespace", "CACHE_KV", "namespace_id") ??
+    (await ensureKVNamespace(names.cacheKv));
+  const tagCacheKvId =
+    reuseBinding(bindings, "kv_namespace", "TAG_CACHE_KV", "namespace_id") ??
+    (await ensureKVNamespace(names.tagCacheKv));
+  const memoryCacheKvId =
+    reuseBinding(bindings, "kv_namespace", "MEMORY_CACHE_KV", "namespace_id") ??
+    (await ensureKVNamespace(names.memoryCacheKv));
+
+  // Both R2 bindings point at the same bucket: uploads and the incremental cache share it.
+  const r2BucketName =
+    reuseBinding(bindings, "r2_bucket", "STORAGE_R2", "bucket_name") ??
+    reuseBinding(bindings, "r2_bucket", "NEXT_INC_CACHE_R2_BUCKET", "bucket_name") ??
+    (await ensureR2Bucket(names.r2Bucket));
+
+  const queueName =
+    reuseBinding(bindings, "queue", "JOBS_QUEUE", "queue_name") ?? (await ensureQueue(names.jobsQueue));
+
+  const selfReference = reuseBinding(bindings, "service", "WORKER_SELF_REFERENCE", "service") ?? workerName;
+
+  // Hyperdrive is optional. Only add it when the Worker already uses it or one was handed to us.
+  const hyperdriveId =
+    process.env.CLOUDFLARE_HYPERDRIVE_ID?.trim() ||
+    reuseBinding(bindings, "hyperdrive", "HYPERDRIVE", "id") ||
+    null;
+
+  return { cacheKvId, tagCacheKvId, memoryCacheKvId, r2BucketName, queueName, selfReference, hyperdriveId };
+};
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Rewrites one key inside a binding object, whatever it currently holds. Matching the value rather
+// than a placeholder means the script also works when the file already carries real ids, and keeps
+// every comment in the file intact.
+const setBindingValue = (content: string, bindingName: string, key: string, value: string): string => {
+  const pattern = new RegExp(
+    `("binding"\\s*:\\s*"${escapeRegExp(bindingName)}"[^{}]*?"${escapeRegExp(key)}"\\s*:\\s*)"[^"]*"`
+  );
+  if (!pattern.test(content)) {
+    throw new Error(`Could not find "${key}" for binding "${bindingName}" in wrangler.jsonc`);
+  }
+  return content.replace(pattern, `$1"${value}"`);
+};
+
+const setWorkerName = (content: string, workerName: string): string => {
+  const pattern = /(^|\n)(\s*)"name"\s*:\s*"[^"]*"/;
+  if (!pattern.test(content)) {
+    throw new Error('Could not find the top-level "name" in wrangler.jsonc');
+  }
+  return content.replace(pattern, `$1$2"name": "${workerName}"`);
+};
+
+// Adds or replaces the (optional) Hyperdrive binding, reusing the commented-out placeholder that
+// ships with the repository so the surrounding explanation keeps working.
+const upsertHyperdrive = (content: string, id: string): string => {
+  const block = `"hyperdrive": [\n    {\n      "binding": "HYPERDRIVE",\n      "id": "${id}"\n    }\n  ],`;
+
+  const commented = /^[ \t]*\/\/\s*"hyperdrive"\s*:\s*\[[\s\S]*?^[ \t]*\/\/\s*\],[ \t]*\r?\n/gm;
+  if (commented.test(content)) {
+    return content.replace(commented, `  ${block}\n`);
+  }
+
+  const existing = /"hyperdrive"\s*:\s*\[[\s\S]*?\n[ \t]*\],[ \t]*\r?\n/;
+  if (existing.test(content)) {
+    return content.replace(existing, `  ${block}\n`);
+  }
+
+  const assets = /(^|\n)(\s*)"assets"\s*:/;
+  if (!assets.test(content)) {
+    throw new Error('Could not find the "assets" block in wrangler.jsonc to insert "hyperdrive" before');
+  }
+  return content.replace(assets, `$1  ${block}\n$1$2"assets":`);
+};
+
+const updateWranglerConfig = (workerName: string, resolved: ResolvedBindings): void => {
   const wranglerPath = resolve(__dirname, "../wrangler.jsonc");
   let content = readFileSync(wranglerPath, "utf-8");
 
-  content = content.replace(/"id":\s*"formbricks_cache_kv"/, `"id": "${config.cacheKvId}"`);
-  content = content.replace(/"id":\s*"formbricks_tag_cache_kv"/, `"id": "${config.tagCacheKvId}"`);
-  content = content.replace(/"id":\s*"formbricks_memory_cache_kv"/, `"id": "${config.memoryCacheKvId}"`);
-  content = content.replace(
-    /"bucket_name":\s*"formbricks-storage"/g,
-    `"bucket_name": "${config.r2BucketName}"`
-  );
-  content = content.replace(/"queue":\s*"formbricks-jobs"/, `"queue": "${config.queueName}"`);
+  content = setWorkerName(content, workerName);
+
+  content = setBindingValue(content, "CACHE_KV", "id", resolved.cacheKvId);
+  content = setBindingValue(content, "TAG_CACHE_KV", "id", resolved.tagCacheKvId);
+  content = setBindingValue(content, "MEMORY_CACHE_KV", "id", resolved.memoryCacheKvId);
+
+  // Both R2 entries have to end up on the same bucket, so rewrite them from the same value.
+  content = setBindingValue(content, "STORAGE_R2", "bucket_name", resolved.r2BucketName);
+  content = setBindingValue(content, "NEXT_INC_CACHE_R2_BUCKET", "bucket_name", resolved.r2BucketName);
+
+  content = setBindingValue(content, "JOBS_QUEUE", "queue", resolved.queueName);
+  content = setBindingValue(content, "WORKER_SELF_REFERENCE", "service", resolved.selfReference);
+
+  if (resolved.hyperdriveId) {
+    content = upsertHyperdrive(content, resolved.hyperdriveId);
+  }
 
   writeFileSync(wranglerPath, content);
-  console.log("  Updated wrangler.jsonc with resource IDs");
+  console.log(`  Updated ${wranglerPath}`);
 };
 
 const main = async (): Promise<void> => {
   console.log("=== Formbricks Cloudflare Setup ===\n");
 
+  const workerName = getWorkerName();
+  const names = getResourceNames();
+
+  console.log(`Worker:           ${workerName}`);
+  console.log(
+    `Resource prefix:  ${process.env.CLOUDFLARE_RESOURCE_PREFIX?.trim() || DEFAULT_RESOURCE_PREFIX}`
+  );
+
   try {
     runDatabaseMigrations();
 
-    console.log("\nSetting up Cloudflare resources...");
+    console.log("\nLooking for what this Worker already binds...");
+    const bindings = await fetchWorkerBindings(workerName);
+    if (bindings === null) {
+      console.warn(`  Worker "${workerName}" does not exist in this account yet.`);
+      console.warn("  `wrangler deploy` will create it. Set the CLOUDFLARE_WORKER_NAME secret if you");
+      console.warn("  meant to deploy into a Worker that already exists.");
+    } else if (bindings.size === 0) {
+      console.log("  The Worker exists but has no bindings yet.");
+    } else {
+      console.log(`  Found ${bindings.size} existing binding(s) to reuse:`);
+      for (const [key, binding] of bindings) {
+        const target =
+          binding.namespace_id ?? binding.bucket_name ?? binding.queue_name ?? binding.service ?? binding.id;
+        console.log(`    ${key}${target ? ` -> ${target}` : ""}`);
+      }
+    }
 
-    const cacheKvId = await ensureKVNamespace("formbricks_cache_kv");
-    const tagCacheKvId = await ensureKVNamespace("formbricks_tag_cache_kv");
-    const memoryCacheKvId = await ensureKVNamespace("formbricks_memory_cache_kv");
-    const r2BucketName = await ensureR2Bucket("formbricks-storage");
-    const queueName = await ensureQueue("formbricks-jobs");
+    console.log("\nResolving resources...");
+    const resolved = await resolveBindings(bindings, names, workerName);
 
-    updateWranglerConfig({
-      cacheKvId,
-      tagCacheKvId,
-      memoryCacheKvId,
-      r2BucketName,
-      queueName,
-    });
+    updateWranglerConfig(workerName, resolved);
 
     console.log("\n=== Setup complete! ===");
   } catch (error) {
