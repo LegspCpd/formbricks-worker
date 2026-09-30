@@ -73,9 +73,15 @@ const nextConfig = {
   // Heavy server-only libraries stay out of Turbopack's module graph; OpenNext bundles them with
   // esbuild afterwards, which is far cheaper than type-checking/compiling them as part of the app.
   // `googleapis` alone is ~190 MB / 1.8k files and dominated the build.
+  //
+  // `@aws-sdk/*` is deliberately NOT listed, even though it is just as heavy. It is reachable from a
+  // chunk that OpenNext bundles into the Node.js middleware, and the traced node_modules copy used
+  // there only carries the `dist-cjs` files while those packages resolve `module` to `dist-es/*`,
+  // which produced 44 "Could not resolve" errors (@smithy/*, @aws-sdk/core, @aws/lambda-invoke-store,
+  // tslib). Bundling them into the app keeps the middleware bundle self-contained. The entries below
+  // are server-only routes and never reach the middleware.
   serverExternalPackages: [
     "@authzed/authzed-node",
-    "@aws-sdk",
     "@grpc/grpc-js",
     "@prisma/instrumentation",
     "googleapis",
