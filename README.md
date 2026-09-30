@@ -102,17 +102,29 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 5. 在 **Account Resources** 中选择你的账号
 6. 复制生成的 Token
 
-#### 第三步：在 Cloudflare 创建 Worker（只需一次）
+#### 第三步：在 Cloudflare 创建 Worker
 
 1. 进入 **Workers & Pages**，点击 **Create application**
 2. 选择 **Workers** 标签，点击 **Create Worker**
 3. 命名为 `formbricks-worker`，点击 **Deploy**
+4. 进入 Worker 的 **Settings → Integrations → Git**，点击 **Connect to Git**，选择你 Fork 的 `formbricks-worker` 仓库
+5. 配置构建设置（构建与部署是分开的两步）：
 
-> **不要连接 Git**。本项目的构建在 GitHub Actions 上完成——Cloudflare 自带的构建机只有 2 vCPU 且单次构建上限 20 分钟，编译这个 Next.js 应用会超时。如果你之前连过 Git，请在 **Settings → Build** 里断开，避免每次推送重复构建。
+| 设置项 | 值 | 说明 |
+|--------|-----|------|
+| **Root directory** | `apps/web` | 应用根目录 |
+| **Build command** | `pnpm build:cf:full` | 编译项目（含数据库迁移、资源自动创建） |
+| **Deploy command** | `npx wrangler deploy` | 把构建产物发布到 Workers |
+| **Build output directory** | `.open-next` | 构建产物目录 |
 
-#### 第四步：在 GitHub 配置 Secrets
+> Cloudflare 会按 lockfile 自动安装依赖，**不要在 Build command 里再写 `pnpm install`**，否则只是重复安装、白白浪费时间。
 
-进入你 Fork 的仓库，打开 **Settings → Secrets and variables → Actions → New repository secret**，逐个添加下表变量。构建、数据库迁移、Cloudflare 资源自动创建以及 Worker 运行时都会用到这些值：
+6. 进入 **Settings → Build → Build cache**，确认已 **Enable**。开启后 Cloudflare 会缓存 `.next/cache`（Turbopack 增量缓存），之后的构建只重新编译改动的部分，构建时间会大幅缩短。
+7. 添加环境变量（见第四步），点击 **Save and Deploy**
+
+#### 第四步：配置环境变量
+
+在 Cloudflare Worker 的 **Settings → Variables and Secrets** 中添加以下变量（构建、数据库迁移、资源自动创建与 Worker 运行时都会用到）：
 
 | 变量名 | 说明 | 示例 |
 |--------|------|------|
@@ -126,20 +138,9 @@ Formbricks 是一个免费开源的问卷调查平台，也是一个隐私优先
 | `CRON_SECRET` | Cron 任务密钥 | `openssl rand -hex 32` |
 | `LOG_LEVEL` | 日志级别 | `info` |
 
-#### 第五步：触发构建与部署
+#### 第五步：触发部署
 
-推送到 `cloudflare-workers` 分支即自动触发；也可以进入仓库的 **Actions** 页面，选择 **Deploy to Cloudflare Workers**，点击 **Run workflow** 手动触发。
-
-工作流会依次执行：
-
-1. 安装依赖
-2. `pnpm build:cf:full`——构建所有 workspace 包、执行数据库迁移、自动创建缺失的 KV / R2 / Queue 资源、生成 OpenNext 产物
-3. `pnpm deploy:cf`——通过 `wrangler deploy` 发布 Worker
-4. 将上表的运行时变量同步到 Worker（`wrangler secret put`）
-
-> **提示**：工作流会缓存 `apps/web/.next/cache`，之后的构建只重编译改动的部分，速度会明显变快。
-
-> **如果是 Fork 的仓库**：首次进入 **Actions** 页面时，GitHub 可能会提示需要先启用工作流，点击确认启用即可。
+点击 **Save and Deploy** 后，Cloudflare 会自动执行 Build command（编译、迁移、创建资源）与 Deploy command（发布 Worker）。之后每次推送到 `cloudflare-workers` 分支都会自动重新构建部署。
 
 **数据库配置说明**：Hyperdrive 是**可选**的，以下两种方式任选其一：
 

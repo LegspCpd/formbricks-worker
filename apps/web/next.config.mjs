@@ -70,13 +70,21 @@ const nextConfig = {
   poweredByHeader: false,
   // Enable source maps only when uploading to Sentry (CI/production); skip for faster local builds
   productionBrowserSourceMaps: !!process.env.SENTRY_AUTH_TOKEN,
+  // Heavy server-only libraries stay out of Turbopack's module graph; OpenNext bundles them with
+  // esbuild afterwards, which is far cheaper than type-checking/compiling them as part of the app.
+  // `googleapis` alone is ~190 MB / 1.8k files and dominated the build.
   serverExternalPackages: [
+    "@authzed/authzed-node",
     "@aws-sdk",
+    "@grpc/grpc-js",
     "@prisma/instrumentation",
+    "googleapis",
     "pino",
     "pino-pretty",
     "pino-opentelemetry-transport",
     "posthog-node",
+    "stripe",
+    "xlsx",
   ],
   outputFileTracingIncludes: {
     "/api/auth/**/*": ["../../node_modules/jose/**/*"],
