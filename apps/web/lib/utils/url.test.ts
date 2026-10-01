@@ -115,7 +115,7 @@ describe("getValidatedCallbackUrl", () => {
 
   /**
    * A callback rides in the request line, and nginx returns a bare 414 once that exceeds one 8K buffer.
-   * Rejecting it here gives every caller something to act on: `proxy.ts` answers 400, the auth flows
+   * Rejecting it here gives every caller something to act on: `middleware.ts` answers 400, the auth flows
    * fall back to WEBAPP_URL (ENG-2783).
    */
   test("rejects a callback URL longer than the cap", () => {

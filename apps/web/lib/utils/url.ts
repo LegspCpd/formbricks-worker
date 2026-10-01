@@ -40,7 +40,7 @@ export const testURLmatch = (
  * A callback rides in a request line, and nginx's `large_client_header_buffers` defaults to `4 8k` with
  * the rule that a request line must fit inside ONE buffer — so an over-long callback comes back as a
  * bare `414 Request-URI Too Large`, a blank page with nothing to act on. Rejecting it here turns that
- * into something diagnosable instead: `proxy.ts` answers `400 {"error":"Invalid callback URL"}`, and
+ * into something diagnosable instead: `middleware.ts` answers `400 {"error":"Invalid callback URL"}`, and
  * the auth flows fall back to `WEBAPP_URL` the same way they do for any other invalid callback.
  *
  * 2048 is the conventional safe maximum, and it is not a new constraint on this codebase:

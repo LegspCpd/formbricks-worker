@@ -94,7 +94,6 @@ const nextConfig = {
     "@authzed/authzed-node",
     "@grpc/grpc-js",
     "@prisma/instrumentation",
-    "googleapis",
     "pino",
     "pino-pretty",
     "pino-opentelemetry-transport",

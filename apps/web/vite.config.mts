@@ -70,7 +70,7 @@ export default defineConfig({
         "lingodotdev/**/*.ts",
         "instrumentation-node-config.ts",
         "instrumentation-jobs.ts",
-        "proxy.ts",
+        "middleware.ts",
       ],
       // ENG-2432: `**/route.{ts,tsx}`, `**/actions.ts` and `**/action.ts` used to sit in this list, so
       // the API route handlers and server actions — the layer that does authorization and input

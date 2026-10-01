@@ -385,8 +385,17 @@ const validateAuthConfiguration = (values: TAuthConfigurationEnv, ctx: z.Refinem
   }
 };
 
+// `process.env.NEXT_RUNTIME` is statically inlined per bundle by Next (`define-env.js`), so this is a
+// compile-time constant: `true` in the Edge (middleware) bundle, `false` in the Node bundles. The
+// middleware graph imports this module (via `constants.ts`), and in the Edge lane the full server env
+// (DATABASE_URL, ENCRYPTION_KEY, …) is legitimately absent. Validation there would throw at module
+// evaluation and take the Worker down before it serves a single request, so we skip it and let the
+// modules that actually need those values fail loudly (or fall back) on their own.
+const IS_EDGE_RUNTIME = process.env.NEXT_RUNTIME === "edge";
+
 const parsedEnv = createEnv({
   onValidationError: throwEnvValidationError,
+  skipValidation: IS_EDGE_RUNTIME,
   /*
    * Serverside Environment variables, not available on the client.
    * Will throw if you access these variables on the client.
@@ -770,10 +779,15 @@ const parsedEnv = createEnv({
 const ZPostParseEnv = ZAIConfigurationEnv.extend(ZAuthzedConfigurationEnv.shape)
   .superRefine(validateActiveAIProviderConfiguration)
   .superRefine(validateAuthzedConfiguration);
-const postParseResult = ZPostParseEnv.safeParse(parsedEnv);
 
-if (!postParseResult.success) {
-  throwEnvValidationError(postParseResult.error.issues);
+// Also skipped in the Edge lane: `parsedEnv` is the raw, unvalidated runtime env there, so parsing it
+// would fail on the same legitimately-absent server variables the `createEnv` call above skips.
+if (!IS_EDGE_RUNTIME) {
+  const postParseResult = ZPostParseEnv.safeParse(parsedEnv);
+
+  if (!postParseResult.success) {
+    throwEnvValidationError(postParseResult.error.issues);
+  }
 }
 
 export const env = parsedEnv;

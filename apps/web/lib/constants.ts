@@ -1,5 +1,6 @@
 import "server-only";
 import { TUserLocale } from "@formbricks/types/user";
+import { version as packageJsonVersion } from "@/package.json";
 import { env } from "./env";
 
 export { DEFAULT_BRAND_COLOR } from "./brand-color";
@@ -271,7 +272,12 @@ export const RATE_LIMITING_DISABLED = env.RATE_LIMITING_DISABLED === "1";
  * tell clients apart until an operator set this. Deployments with a longer proxy chain must raise it;
  * setting it higher than the real chain lets a caller spoof the address by prepending entries.
  */
-export const TRUSTED_PROXY_HOP_COUNT = env.TRUSTED_PROXY_HOP_COUNT ?? 1;
+// `Number(...)` rather than a bare `?? 1`: in the Edge (middleware) lane `env` is the unvalidated raw
+// runtime env (see `IS_EDGE_RUNTIME` in lib/env.ts), where this still arrives as the raw string. `0` is
+// meaningful here (it disables IP resolution), so this must not fall back on falsiness.
+const configuredTrustedProxyHopCount = env.TRUSTED_PROXY_HOP_COUNT;
+export const TRUSTED_PROXY_HOP_COUNT =
+  configuredTrustedProxyHopCount === undefined ? 1 : Number(configuredTrustedProxyHopCount);
 export const TELEMETRY_DISABLED = env.TELEMETRY_DISABLED === "1";
 
 // Opt-out for the Have-I-Been-Pwned breach check (ENG-1587). Set to "1" on air-gapped /
@@ -329,23 +335,12 @@ export const RECAPTCHA_SITE_KEY = env.RECAPTCHA_SITE_KEY;
 export const RECAPTCHA_SECRET_KEY = env.RECAPTCHA_SECRET_KEY;
 export const IS_RECAPTCHA_CONFIGURED = Boolean(RECAPTCHA_SITE_KEY && RECAPTCHA_SECRET_KEY);
 
-// Use the app version for Sentry release (updated during build in production)
-// Fallback to environment variable if package.json is not accessible
-export const SENTRY_RELEASE = (() => {
-  if (!IS_PRODUCTION) {
-    return undefined;
-  }
-
-  // Try to read from package.json with proper error handling
-  try {
-    const pkg = require("../package.json");
-    return pkg.version === "0.0.0" ? undefined : `${pkg.version}`;
-  } catch {
-    // If package.json can't be read (e.g., in some deployment scenarios),
-    // return undefined and let Sentry work without release tracking
-    return undefined;
-  }
-})();
+// The version is imported statically rather than `require`d: lib/constants.ts is pulled into the Edge
+// middleware bundle, where there is no `require` and the build rejects it outright. The bundler inlines
+// the value at build time, identical to the old runtime read. Undefined outside production and for the
+// unbumped 0.0.0 that marks a local/self-hosted build.
+export const SENTRY_RELEASE =
+  IS_PRODUCTION && packageJsonVersion !== "0.0.0" ? packageJsonVersion : undefined;
 export const SENTRY_ENVIRONMENT = env.SENTRY_ENVIRONMENT;
 export const SENTRY_DSN = env.SENTRY_DSN;
 

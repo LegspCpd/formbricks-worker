@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { OAuth2Client } from "google-auth-library";
 import { NextRequest } from "next/server";
 import { logger } from "@formbricks/logger";
 import { responses } from "@/app/lib/api/response";
@@ -39,7 +39,11 @@ export const GET = async (req: NextRequest) => {
   if (!client_id) return responses.internalServerErrorResponse("Google client id is missing");
   if (!client_secret) return responses.internalServerErrorResponse("Google client secret is missing");
   if (!redirect_uri) return responses.internalServerErrorResponse("Google redirect url is missing");
-  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uri);
+  const oAuth2Client = new OAuth2Client({
+    clientId: client_id,
+    clientSecret: client_secret,
+    redirectUri: redirect_uri,
+  });
   let state: string;
   try {
     state = await createIntegrationOAuthState({

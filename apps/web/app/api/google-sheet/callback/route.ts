@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { OAuth2Client } from "google-auth-library";
 import { logger } from "@formbricks/logger";
 import { TIntegrationGoogleSheetsConfig } from "@formbricks/types/integration/google-sheet";
 import { responses } from "@/app/lib/api/response";
@@ -55,7 +55,13 @@ const getGoogleSheetsOAuthClient = () => {
     return { response: responses.internalServerErrorResponse("Google redirect url is missing") };
   }
 
-  return { client: new google.auth.OAuth2(client_id, client_secret, redirect_uri) };
+  return {
+    client: new OAuth2Client({
+      clientId: client_id,
+      clientSecret: client_secret,
+      redirectUri: redirect_uri,
+    }),
+  };
 };
 
 const captureGoogleSheetsConnectedEvent = async (userId: string, workspaceId: string) => {
@@ -131,9 +137,14 @@ export const GET = async (req: Request) => {
   }
 
   oAuth2Client.setCredentials({ access_token: key.access_token });
-  const oauth2 = google.oauth2({ auth: oAuth2Client, version: "v2" });
-  const userInfo = await oauth2.userinfo.get();
-  const userEmail = userInfo.data.email;
+  const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+    headers: { Authorization: `Bearer ${key.access_token}` },
+  });
+  if (!userInfoResponse.ok) {
+    return responses.internalServerErrorResponse("Failed to get user email");
+  }
+  const userInfo = (await userInfoResponse.json()) as { email?: string };
+  const userEmail = userInfo.email;
 
   if (!userEmail) {
     return responses.internalServerErrorResponse("Failed to get user email");

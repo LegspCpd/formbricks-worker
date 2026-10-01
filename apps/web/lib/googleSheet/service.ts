@@ -1,5 +1,5 @@
 import "server-only";
-import { google } from "googleapis";
+import { OAuth2Client } from "google-auth-library";
 import { z } from "zod";
 import { Prisma } from "@formbricks/database/prisma";
 import { ZString } from "@formbricks/types/common";
@@ -28,23 +28,59 @@ import { createOrUpdateIntegration } from "@/lib/integration/service";
 import { truncateText } from "../utils/strings";
 import { validateInputs } from "../utils/validate";
 
+const SHEETS_API_BASE_URL = "https://sheets.googleapis.com/v4/spreadsheets";
+
 /**
- * ENG-2250: `sheets.spreadsheets.values.*` take a node-style callback, so a `throw` inside one escapes
- * the surrounding `try/catch` and lands as an unhandled rejection — the write fails, the sheet silently
- * stops receiving responses and the caller is never told. Wrap the call so the error rejects a promise
- * the caller awaits instead. `invoke` receives the callback rather than the method being detached, to
- * keep googleapis' own `this` binding intact.
+ * Extracts Google's human-readable error message from a failed Sheets API response so the same error
+ * taxonomy (scope vs. permission vs. everything else) can be applied to it. Falls back to the HTTP
+ * status line when the body is not the expected JSON envelope.
  */
-const runSheetsWrite = (invoke: (callback: (err: Error | null) => void) => void): Promise<void> =>
-  new Promise((resolve, reject) => {
-    invoke((err) => {
-      if (err) {
-        reject(new UnknownError(`Error while appending data: ${err.message}`));
-        return;
-      }
-      resolve();
-    });
+const readGoogleErrorMessage = async (response: Response): Promise<string> => {
+  try {
+    const body = (await response.json()) as { error?: { message?: string } };
+    const message = body?.error?.message;
+    if (typeof message === "string" && message.length > 0) {
+      return message;
+    }
+  } catch {
+    // Not a JSON error envelope — fall through to the status line.
+  }
+  return `${response.status} ${response.statusText}`;
+};
+
+const getAccessTokenOrThrow = async (authClient: OAuth2Client): Promise<string> => {
+  const { token } = await authClient.getAccessToken();
+  if (!token) {
+    throw new AuthenticationError(GOOGLE_SHEET_INTEGRATION_INVALID_GRANT);
+  }
+  return token;
+};
+
+/**
+ * ENG-2250: the write must reject the promise the caller awaits. The previous implementation bridged
+ * googleapis' node-style callback into a promise for exactly this reason — a `throw` raised inside the
+ * callback escaped `writeData`'s own `try/catch`, so the pipeline recorded a success while the sheet
+ * silently stopped receiving responses. Fetch keeps the failure on the awaited path.
+ */
+const sendSheetsWrite = async (
+  authClient: OAuth2Client,
+  url: string,
+  init: { method: "PUT" | "POST"; body: unknown }
+): Promise<void> => {
+  const accessToken = await getAccessTokenOrThrow(authClient);
+  const response = await fetch(url, {
+    method: init.method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(init.body),
   });
+
+  if (!response.ok) {
+    throw new UnknownError(`Error while appending data: ${await readGoogleErrorMessage(response)}`);
+  }
+};
 
 export const writeData = async (
   integrationData: TIntegrationGoogleSheets,
@@ -61,7 +97,6 @@ export const writeData = async (
 
   try {
     const authClient = await authorize(integrationData);
-    const sheets = google.sheets({ version: "v4", auth: authClient });
     const responsesMapped = {
       values: [
         responses.map((response) =>
@@ -73,28 +108,17 @@ export const writeData = async (
     };
 
     const element = { values: [elements] };
-    await runSheetsWrite((callback) =>
-      sheets.spreadsheets.values.update(
-        {
-          spreadsheetId: spreadsheetId,
-          range: "A1",
-          valueInputOption: "RAW",
-          requestBody: element,
-        },
-        callback
-      )
+
+    await sendSheetsWrite(
+      authClient,
+      `${SHEETS_API_BASE_URL}/${encodeURIComponent(spreadsheetId)}/values/A1?valueInputOption=RAW`,
+      { method: "PUT", body: element }
     );
 
-    await runSheetsWrite((callback) =>
-      sheets.spreadsheets.values.append(
-        {
-          spreadsheetId: spreadsheetId,
-          range: "A2",
-          valueInputOption: "RAW",
-          requestBody: responsesMapped,
-        },
-        callback
-      )
+    await sendSheetsWrite(
+      authClient,
+      `${SHEETS_API_BASE_URL}/${encodeURIComponent(spreadsheetId)}/values/A2:append?valueInputOption=RAW`,
+      { method: "POST", body: responsesMapped }
     );
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
@@ -123,44 +147,40 @@ export const getSpreadsheetNameById = async (
 
   try {
     const authClient = await authorize(googleSheetIntegrationData);
-    const sheets = google.sheets({ version: "v4", auth: authClient });
+    const accessToken = await getAccessTokenOrThrow(authClient);
 
-    return new Promise((resolve, reject) => {
-      sheets.spreadsheets.get(
-        { spreadsheetId },
-        (
-          err: Error | null,
-          response?: { data: { properties?: { title?: string | null } | null } } | null
-        ) => {
-          if (err) {
-            const msg = err.message?.toLowerCase() ?? "";
-            // The stored grant lacks the Sheets scope (e.g. the box was unticked on Google's consent
-            // screen). Google phrases this without the word "permission", and the way out is to
-            // reconnect, not to share the spreadsheet, so it gets its own code.
-            const isScopeError = msg.includes("insufficient authentication scopes");
-            const isPermissionError =
-              msg.includes("permission") ||
-              msg.includes("caller does not have") ||
-              msg.includes("insufficient permission") ||
-              msg.includes("access denied");
-            if (isScopeError) {
-              reject(new OperationNotAllowedError(GOOGLE_SHEET_INTEGRATION_INSUFFICIENT_SCOPES));
-            } else if (isPermissionError) {
-              reject(new OperationNotAllowedError(GOOGLE_SHEET_INTEGRATION_INSUFFICIENT_PERMISSION));
-            } else {
-              reject(new UnknownError(`Error while fetching spreadsheet data: ${err.message}`));
-            }
-            return;
-          }
-          const spreadsheetTitle = response?.data.properties?.title;
-          if (!spreadsheetTitle) {
-            reject(new UnknownError("Error while fetching spreadsheet data: no title on the response"));
-            return;
-          }
-          resolve(spreadsheetTitle);
-        }
-      );
-    });
+    const response = await fetch(
+      `${SHEETS_API_BASE_URL}/${encodeURIComponent(spreadsheetId)}?fields=properties.title`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    if (!response.ok) {
+      const message = await readGoogleErrorMessage(response);
+      const msg = message.toLowerCase();
+      // The stored grant lacks the Sheets scope (e.g. the box was unticked on Google's consent
+      // screen). Google phrases this without the word "permission", and the way out is to
+      // reconnect, not to share the spreadsheet, so it gets its own code.
+      const isScopeError = msg.includes("insufficient authentication scopes");
+      const isPermissionError =
+        msg.includes("permission") ||
+        msg.includes("caller does not have") ||
+        msg.includes("insufficient permission") ||
+        msg.includes("access denied");
+      if (isScopeError) {
+        throw new OperationNotAllowedError(GOOGLE_SHEET_INTEGRATION_INSUFFICIENT_SCOPES);
+      }
+      if (isPermissionError) {
+        throw new OperationNotAllowedError(GOOGLE_SHEET_INTEGRATION_INSUFFICIENT_PERMISSION);
+      }
+      throw new UnknownError(`Error while fetching spreadsheet data: ${message}`);
+    }
+
+    const data = (await response.json()) as { properties?: { title?: string | null } | null };
+    const spreadsheetTitle = data.properties?.title;
+    if (!spreadsheetTitle) {
+      throw new UnknownError("Error while fetching spreadsheet data: no title on the response");
+    }
+    return spreadsheetTitle;
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       throw new DatabaseError(error.message);
@@ -195,11 +215,15 @@ const isAccessTokenValid = async (accessToken: string): Promise<boolean> => {
   }
 };
 
-const authorize = async (googleSheetIntegrationData: TIntegrationGoogleSheets) => {
+const authorize = async (googleSheetIntegrationData: TIntegrationGoogleSheets): Promise<OAuth2Client> => {
   const client_id = GOOGLE_SHEETS_CLIENT_ID;
   const client_secret = GOOGLE_SHEETS_CLIENT_SECRET;
   const redirect_uri = GOOGLE_SHEETS_REDIRECT_URL;
-  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uri);
+  const oAuth2Client = new OAuth2Client({
+    clientId: client_id,
+    clientSecret: client_secret,
+    redirectUri: redirect_uri,
+  });
   const key = googleSheetIntegrationData.config.key;
 
   const hasStoredCredentials =
@@ -210,7 +234,7 @@ const authorize = async (googleSheetIntegrationData: TIntegrationGoogleSheets) =
     return oAuth2Client;
   }
 
-  // Without a refresh token there is nothing to refresh, and googleapis surfaces that as a bare
+  // Without a refresh token there is nothing to refresh, and the client surfaces that as a bare
   // "No refresh token is set." which reaches the user as a raw toast. Treat it as the reconnect case
   // instead, which is the only way out of it. `ZGoogleCredential` types both tokens as `z.string()`,
   // so an empty string is schema-valid and has to be checked for here.

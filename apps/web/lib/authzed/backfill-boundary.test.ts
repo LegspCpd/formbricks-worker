@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
 /**
@@ -14,7 +15,7 @@ import { describe, expect, test } from "vitest";
  * in front and the whole-deployment scope removed — not an exemption added to this list.
  */
 
-const WEB_ROOT = new URL("../../", import.meta.url).pathname;
+const WEB_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 /** Modules that may reach the backfill: the tooling itself, and the CLI entry points. */
 const ALLOWED_IMPORTER_PREFIXES = ["lib/authzed/", "scripts/"];
@@ -27,7 +28,7 @@ const RESTRICTED_MODULES = ["backfill", "backfill-cli", "backfill-diff", "backfi
 /**
  * Every directory holding application source, plus `apps/web`'s own root modules.
  *
- * `instrumentation*.ts` and `proxy.ts` live at the root rather than under a directory and are as
+ * `instrumentation*.ts` and `middleware.ts` live at the root rather than under a directory and are as
  * request-path as anything in `app/` — omitting them would leave the most sensitive files unchecked.
  */
 const SEARCH_ROOTS = [".", "app", "integration", "lib", "modules", "scripts"];
@@ -74,6 +75,14 @@ const restrictedSpecifierPattern = (moduleName: string): RegExp =>
 const importsRestrictedModule = (source: string): boolean =>
   RESTRICTED_MODULES.some((moduleName) => restrictedSpecifierPattern(moduleName).test(source));
 
+/**
+ * `relative()` yields OS-native separators, so on Windows every path comes back with backslashes and
+ * neither the forward-slash allowlist nor the root-file check above would ever match. Normalizing to
+ * POSIX separators makes the boundary identical on every platform — the specifiers in the allowlists
+ * are written the way they appear in source, which is always forward-slash.
+ */
+const toPosix = (path: string): string => path.replaceAll("\\", "/");
+
 describe("backfill module boundary", () => {
   const files = SEARCH_ROOTS.flatMap((root) => collectSourceFiles(join(WEB_ROOT, root), root !== "."));
 
@@ -81,18 +90,18 @@ describe("backfill module boundary", () => {
     expect(files.length).toBeGreaterThan(500);
   });
 
-  test("searches apps/web's root modules, which hold the request-path proxy and instrumentation", () => {
+  test("searches apps/web's root modules, which hold the request-path middleware and instrumentation", () => {
     const rootModules = files
-      .map((absolute) => relative(WEB_ROOT, absolute))
+      .map((absolute) => toPosix(relative(WEB_ROOT, absolute)))
       .filter((relativePath) => !relativePath.includes("/"));
 
-    expect(rootModules).toContain("proxy.ts");
+    expect(rootModules).toContain("middleware.ts");
     expect(rootModules).toContain("instrumentation.ts");
   });
 
   test("is imported only by the tooling itself and its command entry points", () => {
     const offenders = files
-      .map((absolute) => ({ absolute, relativePath: relative(WEB_ROOT, absolute) }))
+      .map((absolute) => ({ absolute, relativePath: toPosix(relative(WEB_ROOT, absolute)) }))
       .filter(
         ({ relativePath }) =>
           !ALLOWED_IMPORTERS.includes(relativePath) &&

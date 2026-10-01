@@ -9,7 +9,9 @@
   ],
   // OpenNext 的中间件打包器刻意不压缩（它需要在产物上做字符串替换），所以
   // `.open-next/middleware/handler.mjs` 里会带着 node_modules 的未压缩源码，动辄上百万行。
-  // 交给 wrangler 在最后打包时压缩，能显著减小上传体积（Workers 有 3 MiB / 10 MiB 的压缩体积上限）。
+  // 交给 wrangler 在最后打包时压缩，能减小上传体积与启动时间。
+  // 注意：Cloudflare 现在只校验「未压缩」体积上限 64 MiB（免费版与付费版相同），
+  // 压缩后的 3 MiB / 10 MiB 限制已于 2026-09 取消。
   // keep_names 默认为 true，压缩后类名/函数名仍会保留。
   "minify": true,
   "observability": {

@@ -6,11 +6,9 @@ import { getSessionTokenFromCookieHeader, getSessionTokenFromCookieStore } from 
 // already-resolved BETTER_AUTH_SECRET/NEXTAUTH_SECRET value — which of the two wins is constants.ts's
 // business and is covered by lib/constants.test.ts. Mocking the raw env vars here would no longer
 // steer this module at all.
-// ENCRYPTION_KEY is reached transitively: lib/crypto.ts (constantTimeEqual) reads it at module load.
 const { mockConstants } = vi.hoisted(() => ({
-  mockConstants: { ENCRYPTION_KEY: "0".repeat(64) } as {
+  mockConstants: {} as {
     AUTH_SECRET?: string;
-    ENCRYPTION_KEY: string;
   },
 }));
 vi.mock("@/lib/constants", () => mockConstants);

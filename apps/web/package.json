@@ -119,7 +119,7 @@
     "disposable-email-domains": "1.0.62",
     "dompurify": "3.4.13",
     "framer-motion": "12.35.2",
-    "googleapis": "171.4.0",
+    "google-auth-library": "10.6.1",
     "heic-convert": "2.1.0",
     "i18next": "catalog:",
     "i18next-icu": "catalog:",

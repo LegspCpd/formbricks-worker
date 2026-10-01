@@ -2,18 +2,17 @@ import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { FORMBRICKS_CLIENT_IP_HEADER } from "@/lib/utils/client-ip";
-import { config, proxy } from "./proxy";
+import { config, middleware } from "./middleware";
 
-const { mockGetProxySession, mockIsPublicDomainConfigured, mockIsRequestFromPublicDomain } = vi.hoisted(
-  () => ({
-    mockGetProxySession: vi.fn(),
+const { mockGetSessionTokenFromCookieStore, mockIsPublicDomainConfigured, mockIsRequestFromPublicDomain } =
+  vi.hoisted(() => ({
+    mockGetSessionTokenFromCookieStore: vi.fn(),
     mockIsPublicDomainConfigured: vi.fn(),
     mockIsRequestFromPublicDomain: vi.fn(),
-  })
-);
+  }));
 
-vi.mock("@/modules/auth/lib/proxy-session", () => ({
-  getProxySession: mockGetProxySession,
+vi.mock("@/modules/auth/lib/session-cookie", () => ({
+  getSessionTokenFromCookieStore: mockGetSessionTokenFromCookieStore,
 }));
 
 vi.mock("@/app/middleware/domain-utils", () => ({
@@ -54,7 +53,7 @@ vi.mock("@formbricks/logger", () => ({
   },
 }));
 
-describe("proxy", () => {
+describe("middleware", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsPublicDomainConfigured.mockReturnValue(false);
@@ -62,9 +61,9 @@ describe("proxy", () => {
   });
 
   test("redirects unauthenticated protected routes to login with callbackUrl", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
-    const response = await proxy(new NextRequest("http://localhost:3000/environments/test"));
+    const response = await middleware(new NextRequest("http://localhost:3000/environments/test"));
 
     expect(response.status).toBe(307);
     expect(response.headers.get("location")).toBe(
@@ -73,9 +72,9 @@ describe("proxy", () => {
   });
 
   test("rejects invalid callback URLs", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
-    const response = await proxy(
+    const response = await middleware(
       new NextRequest("http://localhost:3000/auth/login?callbackUrl=https%3A%2F%2Fevil.example")
     );
 
@@ -84,9 +83,9 @@ describe("proxy", () => {
   });
 
   test("rejects callback URLs that only match the hostname on a different port", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
-    const response = await proxy(
+    const response = await middleware(
       new NextRequest(
         "http://localhost:3000/auth/login?callbackUrl=http%3A%2F%2Flocalhost%3A4000%2Fenvironments%2Ftest"
       )
@@ -97,12 +96,9 @@ describe("proxy", () => {
   });
 
   test("redirects authenticated callback requests to the callback URL", async () => {
-    mockGetProxySession.mockResolvedValue({
-      userId: "user-1",
-      expires: new Date(Date.now() + 60_000),
-    });
+    mockGetSessionTokenFromCookieStore.mockReturnValue("session-token-1");
 
-    const response = await proxy(
+    const response = await middleware(
       new NextRequest(
         "http://localhost:3000/auth/login?callbackUrl=http%3A%2F%2Flocalhost%3A3000%2Fenvironments%2Ftest"
       )
@@ -113,17 +109,17 @@ describe("proxy", () => {
   });
 
   test("sets the active-workspace cookie from a /workspaces/[workspaceId] path", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
-    const response = await proxy(new NextRequest("http://localhost:3000/workspaces/ws-123/surveys"));
+    const response = await middleware(new NextRequest("http://localhost:3000/workspaces/ws-123/surveys"));
 
     expect(response.cookies.get("formbricks-workspace-id")?.value).toBe("ws-123");
   });
 
   test("does not set the active-workspace cookie on non-workspace paths", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
-    const response = await proxy(
+    const response = await middleware(
       new NextRequest("http://localhost:3000/organizations/org-1/settings/general")
     );
 
@@ -131,23 +127,23 @@ describe("proxy", () => {
   });
 
   test("does not re-set the active-workspace cookie when the request already carries the same value", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
     const request = new NextRequest("http://localhost:3000/workspaces/ws-123/surveys");
     request.cookies.set("formbricks-workspace-id", "ws-123");
 
-    const response = await proxy(request);
+    const response = await middleware(request);
 
     expect(response.cookies.get("formbricks-workspace-id")).toBeUndefined();
   });
 
   test("updates the active-workspace cookie when navigating to a different workspace", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
     const request = new NextRequest("http://localhost:3000/workspaces/ws-456/surveys");
     request.cookies.set("formbricks-workspace-id", "ws-123");
 
-    const response = await proxy(request);
+    const response = await middleware(request);
 
     expect(response.cookies.get("formbricks-workspace-id")?.value).toBe("ws-456");
   });
@@ -157,7 +153,7 @@ describe("proxy", () => {
     ["next-router-segment-prefetch"],
     ["next-instant-navigation-testing-prefetch"],
   ])("leaves the active-workspace cookie alone on a %s request", async (prefetchHeader) => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
     // The router keeps prefetching the links of a tree it rendered earlier, so after a workspace is
     // deleted it still prefetches that workspace's links. Honouring one would overwrite the
@@ -167,13 +163,13 @@ describe("proxy", () => {
     });
     request.cookies.set("formbricks-workspace-id", "ws-surviving");
 
-    const response = await proxy(request);
+    const response = await middleware(request);
 
     expect(response.cookies.get("formbricks-workspace-id")).toBeUndefined();
   });
 
   test("still sets the active-workspace cookie on a client-side navigation to a workspace", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
 
     // A soft navigation is an RSC request too; only the prefetch headers separate it from a
     // prefetch, so excluding prefetches must not stop the cookie from following a real route change.
@@ -182,13 +178,13 @@ describe("proxy", () => {
     });
     request.cookies.set("formbricks-workspace-id", "ws-123");
 
-    const response = await proxy(request);
+    const response = await middleware(request);
 
     expect(response.cookies.get("formbricks-workspace-id")?.value).toBe("ws-456");
   });
 
   test("overwrites a caller-supplied private IP header with the canonical trusted hop", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
     const request = new NextRequest("http://localhost:3000/api/auth/sign-in/email", {
       headers: {
         [FORMBRICKS_CLIENT_IP_HEADER]: "198.51.100.99",
@@ -196,14 +192,14 @@ describe("proxy", () => {
       },
     });
 
-    const response = await proxy(request);
+    const response = await middleware(request);
 
     expect(response.headers.get(`x-middleware-request-${FORMBRICKS_CLIENT_IP_HEADER}`)).toBe("203.0.113.7");
     expect(response.headers.get(FORMBRICKS_CLIENT_IP_HEADER)).toBeNull();
   });
 
   test("removes a caller-supplied private IP header when trusted-hop resolution fails", async () => {
-    mockGetProxySession.mockResolvedValue(null);
+    mockGetSessionTokenFromCookieStore.mockReturnValue(null);
     const request = new NextRequest("http://localhost:3000/api/auth/sign-in/email", {
       headers: {
         [FORMBRICKS_CLIENT_IP_HEADER]: "198.51.100.99",
@@ -211,7 +207,7 @@ describe("proxy", () => {
       },
     });
 
-    const response = await proxy(request);
+    const response = await middleware(request);
 
     expect(response.headers.get(`x-middleware-request-${FORMBRICKS_CLIENT_IP_HEADER}`)).toBeNull();
     expect(response.headers.get("x-middleware-override-headers")?.split(",")).not.toContain(
@@ -221,7 +217,7 @@ describe("proxy", () => {
   });
 });
 
-describe("proxy matcher", () => {
+describe("middleware matcher", () => {
   test.each([
     "/api/auth/sign-in/email",
     "/api/auth/sso-recovery/request",

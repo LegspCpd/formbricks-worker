@@ -7,12 +7,17 @@ import { TRUSTED_PROXY_HOP_COUNT, WEBAPP_URL } from "@/lib/constants";
 import { FORMBRICKS_WORKSPACE_ID_COOKIE } from "@/lib/localStorage";
 import { FORMBRICKS_CLIENT_IP_HEADER, resolveClientIp } from "@/lib/utils/client-ip";
 import { getValidatedCallbackUrl } from "@/lib/utils/url";
-import { getProxySession } from "@/modules/auth/lib/proxy-session";
+import { getSessionTokenFromCookieStore } from "@/modules/auth/lib/session-cookie";
 
-const handleAuth = async (request: NextRequest): Promise<NextResponse | null> => {
-  const session = await getProxySession(request);
+const handleAuth = (request: NextRequest): NextResponse | null => {
+  // Gate on the signed session cookie alone: only Better Auth's signer can produce it, so a valid
+  // signature proves an authenticated session was issued. The per-request `isActive` re-check that
+  // used to run here (a Prisma read) is enforced downstream instead — `getSession` performs it, and
+  // every protected `app/**/layout.tsx` awaits `getSession`. This module compiles into the Edge
+  // middleware bundle, which cannot load Prisma at all.
+  const hasSession = getSessionTokenFromCookieStore(request.cookies) !== null;
 
-  if (isAuthProtectedRoute(request.nextUrl.pathname) && !session) {
+  if (isAuthProtectedRoute(request.nextUrl.pathname) && !hasSession) {
     const loginUrl = `${WEBAPP_URL}/auth/login?callbackUrl=${encodeURIComponent(WEBAPP_URL + request.nextUrl.pathname + request.nextUrl.search)}`;
     return NextResponse.redirect(loginUrl);
   }
@@ -24,7 +29,7 @@ const handleAuth = async (request: NextRequest): Promise<NextResponse | null> =>
     return NextResponse.json({ error: "Invalid callback URL" }, { status: 400 });
   }
 
-  if (session && validatedCallbackUrl) {
+  if (hasSession && validatedCallbackUrl) {
     return NextResponse.redirect(validatedCallbackUrl);
   }
 
@@ -73,7 +78,7 @@ const NEXT_PREFETCH_HEADERS = [
 const isPrefetchRequest = (request: NextRequest): boolean =>
   NEXT_PREFETCH_HEADERS.some((header) => request.headers.has(header));
 
-export const proxy = async (originalRequest: NextRequest) => {
+export const middleware = async (originalRequest: NextRequest) => {
   // Handle domain-aware routing first
   const domainResponse = handleDomainAwareRouting(originalRequest);
   if (domainResponse) return domainResponse;
@@ -103,7 +108,7 @@ export const proxy = async (originalRequest: NextRequest) => {
   });
 
   // Handle authentication
-  const authResponse = await handleAuth(request);
+  const authResponse = handleAuth(request);
   if (authResponse) return authResponse;
 
   // Remember the active workspace so the workspace-agnostic org-settings shell can resolve it

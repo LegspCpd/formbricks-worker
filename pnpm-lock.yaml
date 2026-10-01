@@ -626,9 +626,9 @@ importers:
       framer-motion:
         specifier: 12.35.2
         version: 12.35.2(@emotion/is-prop-valid@1.4.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      googleapis:
-        specifier: 171.4.0
-        version: 171.4.0
+      google-auth-library:
+        specifier: 10.6.1
+        version: 10.6.1
       heic-convert:
         specifier: 2.1.0
         version: 2.1.0
