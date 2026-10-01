@@ -15,11 +15,12 @@
  * cannot measure, so a diagnostic never fails the pipeline.
  *
  * Usage: node scripts/compute-server-shards.mjs [buildRoot] [budgetMiB]
- *   buildRoot defaults to the first of `.open-next/server-functions/default/apps/web/.next`,
- *   `.open-next/server-functions/default/.next`, or `apps/web/.next` that exists.
+ *   buildRoot defaults to whichever candidate build output holds the most route traces (the deployed
+ *   `.open-next` copy keeps only a handful; `apps/web/.next` keeps all of them).
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // One Worker also carries the Edge middleware (~1.2 MiB) plus the adapter runtime, so a shard's own
 // server bundle is budgeted below the 64 MiB cap rather than at it.
@@ -142,10 +143,11 @@ const main = () => {
   let baseBytes = 0;
   for (const file of base) baseBytes += routes[0].files.get(file) ?? sizeOf(file);
 
-  // `copyTracedFiles` also copies the Next server runtime plus the `instrumentation` and `middleware`
-  // closures into EVERY function, whatever its routes are (see the unconditional `processNftFile`
-  // calls in @opennextjs/aws build/copyTracedFiles.js). Those two traces are the largest fixed cost,
-  // so treating them as part of the floor keeps the shard count honest.
+  // `copyTracedFiles` copies the instrumentation and middleware closures into EVERY function, but a
+  // copied file is not a bundled file: the server bundle is what esbuild inlines from `index.mjs`, and
+  // it tree-shakes the rest (the deployed metafile lists no @opentelemetry even though the
+  // instrumentation trace does). So this is reported for context only — folding it into every shard
+  // would assume copied == bundled and over-count by an order of magnitude.
   const alwaysIncluded = new Map();
   for (const name of ["instrumentation.js.nft.json", "middleware.js.nft.json"]) {
     const traceFile = path.join(serverDir, name);
@@ -168,10 +170,10 @@ const main = () => {
   const serverLevelTraces = new Set(["instrumentation", "middleware"]);
   const packable = routes.filter((route) => !serverLevelTraces.has(route.route));
 
-  // Best-fit-decreasing: place each route (largest first) into the shard it grows the least while
-  // still fitting the budget, otherwise open a new shard. This keeps shared files from being paid
-  // for twice as far as a naive first-fit would. Every shard starts from `alwaysIncluded`, because
-  // `copyTracedFiles` copies those into every function no matter which routes it is given.
+  // Best-fit-decreasing over the routes' own traced closures: place each route (largest first) into
+  // the shard it grows the least while still fitting the budget, else open a new shard. A shard's
+  // bundle is approximated by the union of its routes' traced files, which is how the full-app union
+  // (179 MiB) lined up against the measured 150 MiB bundle.
   const shards = [];
   for (const route of [...packable].sort((a, b) => b.bytes - a.bytes)) {
     let best = null;
@@ -193,22 +195,14 @@ const main = () => {
       }
       best.routes.push(route.route);
     } else {
-      const files = new Map(alwaysIncluded);
-      let bytes = 0;
-      for (const size of files.values()) bytes += size;
-      for (const [file, size] of route.files) {
-        if (!files.has(file)) {
-          files.set(file, size);
-          bytes += size;
-        }
-      }
-      shards.push({ files, bytes, routes: [route.route] });
+      const files = new Map(route.files);
+      shards.push({ files, bytes: route.bytes, routes: [route.route] });
     }
   }
 
   shards.sort((a, b) => b.bytes - a.bytes);
   const mib = (n) => (n / 1048576).toFixed(2);
-  const union = new Map(alwaysIncluded);
+  const union = new Map();
   for (const route of routes) for (const [file, size] of route.files) union.set(file, size);
   const unionBytes = [...union.values()].reduce((sum, size) => sum + size, 0);
   const fixedBytes = [...alwaysIncluded.values()].reduce((sum, size) => sum + size, 0);
@@ -217,7 +211,9 @@ const main = () => {
   console.log(`build output:     ${root}`);
   console.log(`routes traced:    ${routes.length}`);
   console.log(`shared floor:     ${mib(baseBytes)} MiB (files every route needs)`);
-  console.log(`always-included:  ${mib(fixedBytes)} MiB (instrumentation + middleware, every function)`);
+  console.log(
+    `copied-but-unbundled: ${mib(fixedBytes)} MiB (instrumentation + middleware traces, context only)`
+  );
   console.log(`union:            ${mib(unionBytes)} MiB (distinct files across all routes)`);
   console.log(`budget / shard:   ${budgetMiB} MiB`);
   console.log(`shards needed:    ${shards.length}\n`);
