@@ -95,6 +95,15 @@ const main = () => {
   const budget = budgetMiB * 1024 * 1024;
   const serverDir = path.join(root, "server");
 
+  // A route whose trace pulls in `@vercel/og` must always stay in the `default` function, whatever
+  // shard it lands in. The adapter's `patchVercelOgLibrary` (run while bundling `default`) globs
+  // EVERY route trace -- not just the ones this shard owns -- and copies the Edge build of the
+  // library next to the route. A shard that merely *claims* such a route in `functions` never copies
+  // its files, so that copy throws `ENOENT ... @vercel/og/index.edge.js` and the whole build dies.
+  // Keeping these routes unclaimed puts them back in `default` for every shard, which is also what
+  // the router expects: they are served identically by whichever shard gets the request.
+  const OG_MARKER = "@vercel/og/index.node.js";
+
   const traceFiles = collectTraces(serverDir, []);
   if (traceFiles.length < 5) {
     console.log(
@@ -170,12 +179,35 @@ const main = () => {
   const serverLevelTraces = new Set(["instrumentation", "middleware"]);
   const packable = routes.filter((route) => !serverLevelTraces.has(route.route));
 
+  // Routes whose trace pulls in `@vercel/og` end up in EVERY shard's `default` (see OG_MARKER above),
+  // so they are pulled out of the packing below and re-added to every shard instead. They are tiny
+  // compared with a shard, and keeping them everywhere is what makes `patchVercelOgLibrary` work.
+  // Keys are absolute paths, so normalise the separator before matching the forward-slash marker.
+  const pinnedRoutes = packable.filter((route) =>
+    [...route.files.keys()].some((file) => file.split(path.sep).join("/").endsWith(OG_MARKER))
+  );
+  const pinnedNames = new Set(pinnedRoutes.map((route) => route.route));
+  const pinnedFiles = new Map();
+  for (const route of pinnedRoutes) for (const [file, size] of route.files) pinnedFiles.set(file, size);
+  let pinnedBytes = 0;
+  for (const size of pinnedFiles.values()) pinnedBytes += size;
+
   // Best-fit-decreasing over the routes' own traced closures: place each route (largest first) into
   // the shard it grows the least while still fitting the budget, else open a new shard. A shard's
   // bundle is approximated by the union of its routes' traced files, which is how the full-app union
   // (179 MiB) lined up against the measured 150 MiB bundle.
+  //
+  // Every shard starts pre-seeded with the pinned routes, so they count against each shard's budget
+  // and appear in every shard's route list.
   const shards = [];
-  for (const route of [...packable].sort((a, b) => b.bytes - a.bytes)) {
+  const openShard = () => ({
+    files: new Map(pinnedFiles),
+    bytes: pinnedBytes,
+    routes: [...pinnedNames].sort(),
+  });
+  for (const route of [...packable]
+    .filter((route) => !pinnedNames.has(route.route))
+    .sort((a, b) => b.bytes - a.bytes)) {
     let best = null;
     let bestGrowth = Infinity;
     for (const shard of shards) {
@@ -195,10 +227,18 @@ const main = () => {
       }
       best.routes.push(route.route);
     } else {
-      const files = new Map(route.files);
-      shards.push({ files, bytes: route.bytes, routes: [route.route] });
+      const shard = openShard();
+      for (const [file, size] of route.files) {
+        if (!shard.files.has(file)) {
+          shard.files.set(file, size);
+          shard.bytes += size;
+        }
+      }
+      shard.routes.push(route.route);
+      shards.push(shard);
     }
   }
+  if (shards.length === 0) shards.push(openShard());
 
   shards.sort((a, b) => b.bytes - a.bytes);
   const mib = (n) => (n / 1048576).toFixed(2);
@@ -235,6 +275,8 @@ const main = () => {
     generatedAt: new Date().toISOString(),
     budgetBytes: budget,
     sharedFloorBytes: baseBytes,
+    // Present in every shard and never claimed, so `default` always keeps them (see OG_MARKER).
+    pinnedRoutes: [...pinnedNames].sort(),
     shards: shards.map((shard, index) => ({
       name: `shard-${index + 1}`,
       bytes: shard.bytes,

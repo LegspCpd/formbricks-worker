@@ -47,6 +47,10 @@ const buildShard = () => {
     throw new Error(`FORMBRICKS_SHARD=${shardName} matches no shard in server-shards.json.`);
   }
 
+  // Any route in `pinnedRoutes` appears in every shard already, so claiming it would only remove it
+  // from this shard's `default` (the reverse of what is wanted). They are never claimed.
+  const pinned = new Set(plan.pinnedRoutes ?? []);
+
   // One claim entry for every other shard's routes, not one per shard. `bundleServer` bundles only
   // `default`, so these entries are never deployed -- their entire purpose is to register the route
   // as "already handled" so `createServerBundle` leaves it out of `default`'s remaining routes.
@@ -56,7 +60,7 @@ const buildShard = () => {
   // Route templates are the trace paths verbatim (`app/<path>/page` or `app/<path>/route`), which is
   // exactly the `RouteTemplate` format these options expect, and exactly the format
   // `createServerBundle` derives when it walks the standalone server for `remainingRoutes`.
-  const claimedRoutes = others.flatMap((other) => other.routes);
+  const claimedRoutes = others.flatMap((other) => other.routes).filter((route) => !pinned.has(route));
   return { functions: { others: { routes: claimedRoutes, patterns: [] } } };
 };
 

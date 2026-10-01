@@ -66,9 +66,15 @@ const main = () => {
   }
 
   if (command === "others") {
+    // Routes in `pinnedRoutes` are present in every shard and must stay in `default`, so they are
+    // never part of a claim list -- matches `open-next.config.ts`.
+    const pinned = new Set(manifest.pinnedRoutes ?? []);
     for (const other of shards) {
       if (other.name === shardName) continue;
-      for (const route of other.routes) console.log(toRouteTemplate(route));
+      for (const route of other.routes) {
+        if (pinned.has(route)) continue;
+        console.log(toRouteTemplate(route));
+      }
     }
     return;
   }
