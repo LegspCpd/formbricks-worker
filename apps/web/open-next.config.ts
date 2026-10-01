@@ -31,6 +31,12 @@ import path from "node:path";
 //    solely when `FORMBRICKS_SHARD` is set -- a build-time-only variable the Worker never defines.
 const shardName = process.env.FORMBRICKS_SHARD;
 
+// `FORMBRICKS_SHARD=floor` is a diagnostic, not a shard: it claims every route so `default` keeps
+// nothing, measuring the irreducible floor (the Next server runtime plus whatever the adapter always
+// bundles). If that floor is already over 64 MiB, no route split can ever fit and the topology has to
+// change; if it is well under, a small enough shard is achievable.
+const FLOOR_SHARD = "floor";
+
 /** Claims every other shard's routes so `default` keeps only this shard's. Build-time only. */
 const buildShard = () => {
   const manifestPath = path.join(process.cwd(), "server-shards.json");
@@ -42,6 +48,18 @@ const buildShard = () => {
   }
 
   const plan = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const pinned = new Set(plan.pinnedRoutes ?? []);
+
+  // The floor probe claims every claimable route so `default` keeps only what it cannot give up:
+  // the pinned routes (which the adapter requires in `default`) plus the always-included server
+  // runtime. There is no "other shard", so this branch must run before the others check.
+  if (shardName === FLOOR_SHARD) {
+    const allRoutes = [...new Set((plan.shards ?? []).flatMap((shard) => shard.routes))];
+    return {
+      functions: { others: { routes: allRoutes.filter((route) => !pinned.has(route)), patterns: [] } },
+    };
+  }
+
   const others = (plan.shards ?? []).filter((shard) => shard.name !== shardName);
   if (others.length === 0) {
     throw new Error(`FORMBRICKS_SHARD=${shardName} matches no shard in server-shards.json.`);
@@ -49,8 +67,6 @@ const buildShard = () => {
 
   // Any route in `pinnedRoutes` appears in every shard already, so claiming it would only remove it
   // from this shard's `default` (the reverse of what is wanted). They are never claimed.
-  const pinned = new Set(plan.pinnedRoutes ?? []);
-
   // One claim entry for every other shard's routes, not one per shard. `bundleServer` bundles only
   // `default`, so these entries are never deployed -- their entire purpose is to register the route
   // as "already handled" so `createServerBundle` leaves it out of `default`'s remaining routes.

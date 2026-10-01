@@ -415,17 +415,20 @@ jobs:
           handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
           cap=$((64 * 1024 * 1024))
           report="${RUNNER_TEMP}/shard-sizes.txt"
+          floor_report="${RUNNER_TEMP}/floor-size.txt"
           : >"${report}"
+          : >"${floor_report}"
           over=0
 
-          for shard in ${shard_names}; do
-            echo "::group::Building shard ${shard} (skipNextBuild)"
-            ( cd apps/web && FORMBRICKS_SHARD="${shard}" pnpm exec opennextjs-cloudflare build --skipNextBuild ) \
-              >"${RUNNER_TEMP}/shard-${shard}.log" 2>&1 || true
-            tail -n 5 "${RUNNER_TEMP}/shard-${shard}.log"
-            echo "::endgroup::"
+          measure_one() {
+            local label="$1" shard_env="$2" sink="$3"
+            echo "::group::Building ${label} (skipNextBuild)"
+            ( cd apps/web && FORMBRICKS_SHARD="${shard_env}" pnpm exec opennextjs-cloudflare build --skipNextBuild ) \
+              >"${RUNNER_TEMP}/shard-${label}.log" 2>&1 || true
+            tail -n 5 "${RUNNER_TEMP}/shard-${label}.log"; echo "::endgroup::"
 
             if [[ -f "${handler}" ]]; then
+              local bytes mib status
               bytes="$(stat --printf='%s' "${handler}")"
               mib="$(awk -v b="${bytes}" 'BEGIN { printf "%.2f", b / 1048576 }')"
               status="ok"
@@ -433,12 +436,24 @@ jobs:
                 status="OVER 64 MiB"
                 over=$((over + 1))
               fi
-              printf '%8s  %8s MiB  %s\n' "${shard}" "${mib}" "${status}" >>"${report}"
+              printf '%8s  %8s MiB  %s\n' "${label}" "${mib}" "${status}" >>"${sink}"
             else
-              printf '%8s  %8s      %s\n' "${shard}" "-" "no handler.mjs" >>"${report}"
+              printf '%8s  %8s      %s\n' "${label}" "-" "no handler.mjs" >>"${sink}"
             fi
             rm -rf apps/web/.open-next
+          }
+
+          shard_count=0
+          for shard in ${shard_names}; do
+            shard_count=$((shard_count + 1))
+            measure_one "${shard}" "${shard}" "${report}"
           done
+
+          # The irreducible floor: `FORMBRICKS_SHARD=floor` claims every claimable route, so `default`
+          # keeps only what no shard can give up (the pinned og route plus whatever the adapter always
+          # bundles). If THIS is already over 64 MiB, no route split can ever fit and the topology
+          # itself has to change -- so it is the single number that decides whether sharding is viable.
+          measure_one "floor" "floor" "${floor_report}"
 
           echo "::group::Shard bundle sizes: predicted vs measured"
           echo "predicted (route-trace model):"
@@ -446,10 +461,13 @@ jobs:
           echo
           echo "measured (real handler.mjs):"
           cat "${report}"
+          echo
+          echo "irreducible floor (every claimable route removed from default):"
+          cat "${floor_report}"
           echo "::endgroup::"
 
           if (( over > 0 )); then
-            echo "::warning::${over} of $(echo "${shard_names}" | wc -l) shard(s) exceed the 64 MiB cap; lower the pre-flight budget and re-plan."
+            echo "::warning::${over} of $((shard_count + 1)) measured bundle(s) (shards + floor) exceed the 64 MiB cap; the floor is the hard limit a route split cannot go below."
           else
             echo "Every shard fits the 64 MiB cap."
           fi
