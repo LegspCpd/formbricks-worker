@@ -354,6 +354,16 @@ jobs:
       - name: Build the OpenNext Worker
         run: pnpm --filter @formbricks/web run build:cf:full
 
+      # Pre-flight: the app does not fit in one Worker, so before anything is uploaded, work out how
+      # many Workers it *would* need and how big each one would be. This is read-only -- it inspects
+      # the build output and (re)writes `server-shards.json`, and never touches the deploy -- so it
+      # can run on every push. It answers the one question the sharding work depends on: how many
+      # shards, and does any single shard still exceed the 64 MiB cap?
+      # `continue-on-error` so a measurement problem can never block the pipeline.
+      - name: Pre-flight shard check
+        continue-on-error: true
+        run: node apps/web/scripts/compute-server-shards.mjs
+
       # Cloudflare rejects a script whose *uncompressed* size exceeds 64 MiB, and its error only names
       # the five largest files. Measure the real thing instead of inferring it: `wrangler deploy
       # --dry-run` performs the exact bundling and minification the real deploy does, reports
