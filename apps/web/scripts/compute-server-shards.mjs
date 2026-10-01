@@ -35,10 +35,22 @@ const CANDIDATE_ROOTS = [
 ];
 
 const findRoot = () => {
+  // The `.open-next` copy is what gets deployed, but it does not retain every per-route
+  // `<route>.js.nft.json` manifest -- only a handful survive the copy. The untouched `apps/web/.next`
+  // has the full set, and the traced file list is what a shard's size depends on, so prefer whichever
+  // candidate actually contains the most traces rather than the first that merely has a `server/` dir.
+  let best = null;
+  let bestCount = 0;
   for (const candidate of CANDIDATE_ROOTS) {
-    if (fs.existsSync(path.join(candidate, "server"))) return candidate;
+    const serverDir = path.join(candidate, "server");
+    if (!fs.existsSync(serverDir)) continue;
+    const count = collectTraces(serverDir, []).length;
+    if (count > bestCount) {
+      bestCount = count;
+      best = candidate;
+    }
   }
-  return null;
+  return best;
 };
 
 const collectTraces = (dir, acc) => {
