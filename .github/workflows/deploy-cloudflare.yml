@@ -364,30 +364,41 @@ jobs:
         continue-on-error: true
         run: node apps/web/scripts/compute-server-shards.mjs
 
-      # Validate the sharding mechanism itself before building the router or the per-shard deploy:
-      # build ONE shard as the `default` function and check its `handler.mjs` actually shrank. If a
-      # shard's bundle is not well under 64 MiB, the whole shard topology is wrong and everything after
-      # this would be wasted. Reuses the `next build` output from the step above (skipNextBuild), so it
-      # is one OpenNext bundle, not a second Next compile.
+      # Validate the shard plan before anything is deployed: build EVERY shard as the `default`
+      # function and measure its real `handler.mjs`. The pre-flight's route-trace model is a close
+      # approximation, not the truth -- it has been both high (union 179 MiB vs a 150 MiB bundle) and
+      # low (one shard 69.87 MiB predicted vs 75.23 MiB measured) -- and a shard that is even one byte
+      # over 64 MiB is rejected by Cloudflare at deploy time (code 10027). This step is the check that
+      # actually decides whether the topology is viable.
+      #
+      # Reuses the `next build` output from the step above (`--skipNextBuild`), so each shard is one
+      # OpenNext bundle, not another Next compile.
       #
       # `opennextjs-cloudflare build` wipes its output dir first (`initOutputDir` does
-      # `rm -rf .open-next`), so a probe would otherwise overwrite the *complete* bundle the deploy
-      # step uploads -- silently turning the deploy into a single-shard Worker with 404s for every
-      # other route. Stash `.open-next` and restore it from a `trap`, so the deployable bundle is
-      # intact no matter how the probe ends. `continue-on-error` so a probe can never mask the deploy.
-      - name: Probe one shard's bundle size
+      # `rm -rf .open-next`), so this would otherwise overwrite the *complete* bundle the deploy step
+      # uploads -- silently turning the deploy into a single-shard Worker with 404s for every other
+      # route. Stash `.open-next` and restore it from a `trap`, so the deployable bundle is intact no
+      # matter how this step ends. `continue-on-error` so a measurement can never mask the deploy.
+      - name: Measure every shard's bundle size
         continue-on-error: true
         run: |
-          # No `-e`: every branch below has to reach the `trap`, and a failed probe is a diagnostic,
-          # not a reason to stop the step before it restores the real bundle.
+          # No `-e`: every branch has to reach the `trap`, and a failed measurement is a diagnostic,
+          # not a reason to stop before the real bundle is restored.
           set -uo pipefail
 
           full_dir="apps/web/.open-next"
           stash_dir="apps/web/.open-next-full-stash"
           if [[ ! -d "${full_dir}" ]]; then
-            echo "::warning::No ${full_dir} to probe against; skipping the shard probe."
+            echo "::warning::No ${full_dir} to measure; skipping the shard measurement."
             exit 0
           fi
+
+          shard_names="$(node apps/web/scripts/server-shard-config.mjs list | cut -f1)"
+          if [[ -z "${shard_names}" ]]; then
+            echo "::warning::server-shards.json has no shards; skipping the shard measurement."
+            exit 0
+          fi
+          echo "Shards to measure: $(echo "${shard_names}" | tr '\n' ' ')"
 
           rm -rf "${stash_dir}"
           mv "${full_dir}" "${stash_dir}"
@@ -397,32 +408,51 @@ jobs:
           }
           trap restore_full_bundle EXIT
 
-          first_shard="$(node apps/web/scripts/server-shard-config.mjs list | head -n 1 | cut -f1)"
-          if [[ -z "${first_shard}" ]]; then
-            echo "::warning::server-shards.json has no shards; skipping the shard probe."
-            exit 0
-          fi
-          echo "Full bundle stashed at ${stash_dir}; probing shard ${first_shard}."
+          # Predicted size per shard, from the same plan the builds consume, so prediction and reality
+          # sit side by side and the model's error is visible instead of assumed.
+          node apps/web/scripts/server-shard-config.mjs list >"${RUNNER_TEMP}/shard-predicted.txt" || true
 
-          echo "::group::Building shard ${first_shard} (skipNextBuild)"
-          ( cd apps/web && FORMBRICKS_SHARD="${first_shard}" pnpm exec opennextjs-cloudflare build --skipNextBuild ) 2>&1 | tail -n 20 || true
-          echo "::endgroup::"
+          handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
+          cap=$((64 * 1024 * 1024))
+          report="${RUNNER_TEMP}/shard-sizes.txt"
+          : >"${report}"
+          over=0
 
-          echo "::group::Shard bundle size"
-          shard_handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
-          if [[ -f "${shard_handler}" ]]; then
-            stat --printf='%s\t%n\n' "${shard_handler}" \
-              | awk '{ printf "%9.2f MiB  %s\n", $1/1048576, $2 }'
-            size_bytes="$(stat --printf='%s' "${shard_handler}")"
-            if (( size_bytes > 64*1024*1024 )); then
-              echo "::warning::shard ${first_shard} is still over the 64 MiB cap."
+          for shard in ${shard_names}; do
+            echo "::group::Building shard ${shard} (skipNextBuild)"
+            ( cd apps/web && FORMBRICKS_SHARD="${shard}" pnpm exec opennextjs-cloudflare build --skipNextBuild ) \
+              >"${RUNNER_TEMP}/shard-${shard}.log" 2>&1 || true
+            tail -n 5 "${RUNNER_TEMP}/shard-${shard}.log"
+            echo "::endgroup::"
+
+            if [[ -f "${handler}" ]]; then
+              bytes="$(stat --printf='%s' "${handler}")"
+              mib="$(awk -v b="${bytes}" 'BEGIN { printf "%.2f", b / 1048576 }')"
+              status="ok"
+              if (( bytes > cap )); then
+                status="OVER 64 MiB"
+                over=$((over + 1))
+              fi
+              printf '%8s  %8s MiB  %s\n' "${shard}" "${mib}" "${status}" >>"${report}"
             else
-              echo "shard ${first_shard} fits the 64 MiB cap."
+              printf '%8s  %8s      %s\n' "${shard}" "-" "no handler.mjs" >>"${report}"
             fi
-          else
-            echo "::warning::no shard handler.mjs at ${shard_handler}"
-          fi
+            rm -rf apps/web/.open-next
+          done
+
+          echo "::group::Shard bundle sizes: predicted vs measured"
+          echo "predicted (route-trace model):"
+          cat "${RUNNER_TEMP}/shard-predicted.txt"
+          echo
+          echo "measured (real handler.mjs):"
+          cat "${report}"
           echo "::endgroup::"
+
+          if (( over > 0 )); then
+            echo "::warning::${over} of $(echo "${shard_names}" | wc -l) shard(s) exceed the 64 MiB cap; lower the pre-flight budget and re-plan."
+          else
+            echo "Every shard fits the 64 MiB cap."
+          fi
 
       # Cloudflare rejects a script whose *uncompressed* size exceeds 64 MiB, and its error only names
       # the five largest files. Measure the real thing instead of inferring it: `wrangler deploy

@@ -180,15 +180,23 @@ const main = () => {
   const packable = routes.filter((route) => !serverLevelTraces.has(route.route));
 
   // Routes whose trace pulls in `@vercel/og` end up in EVERY shard's `default` (see OG_MARKER above),
-  // so they are pulled out of the packing below and re-added to every shard instead. They are tiny
-  // compared with a shard, and keeping them everywhere is what makes `patchVercelOgLibrary` work.
-  // Keys are absolute paths, so normalise the separator before matching the forward-slash marker.
+  // so they are pulled out of the packing below and seeded into every shard instead. Keys are absolute
+  // paths, so normalise the separator before matching the forward-slash marker.
+  //
+  // Only the `@vercel/og` package files are charged to every shard, not the route's whole traced
+  // closure: a copied-but-tree-shaken file does not ship, and the rest of that closure (sharp, otlp,
+  // jsdom, ...) is already carried by nearly every other route's closure anyway. Charging the whole
+  // closure here is what once turned a 4-shard plan into 14.
   const pinnedRoutes = packable.filter((route) =>
     [...route.files.keys()].some((file) => file.split(path.sep).join("/").endsWith(OG_MARKER))
   );
   const pinnedNames = new Set(pinnedRoutes.map((route) => route.route));
   const pinnedFiles = new Map();
-  for (const route of pinnedRoutes) for (const [file, size] of route.files) pinnedFiles.set(file, size);
+  for (const route of pinnedRoutes) {
+    for (const [file, size] of route.files) {
+      if (file.split(path.sep).join("/").includes("/@vercel/og/")) pinnedFiles.set(file, size);
+    }
+  }
   let pinnedBytes = 0;
   for (const size of pinnedFiles.values()) pinnedBytes += size;
 
