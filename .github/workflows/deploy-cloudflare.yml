@@ -440,6 +440,13 @@ jobs:
             else
               printf '%8s  %8s      %s\n' "${label}" "-" "no handler.mjs" >>"${sink}"
             fi
+            # Keep this build's esbuild metafile. The composition step further down only ever sees the
+            # restored FULL bundle, so without this the FLOOR's composition -- the single number the
+            # whole sharding decision rests on -- is never visible. `initOutputDir` wipes `.open-next`
+            # on the next `measure_one`, so it has to be pulled out now.
+            if [[ -f "${handler}.meta.json" ]]; then
+              cp "${handler}.meta.json" "${RUNNER_TEMP}/meta-${label}.json"
+            fi
             rm -rf apps/web/.open-next
           }
 
@@ -465,6 +472,43 @@ jobs:
           echo "irreducible floor (every claimable route removed from default):"
           cat "${floor_report}"
           echo "::endgroup::"
+
+          # The size warning above is only actionable if we know WHAT fills the floor. `copyTracedFiles`
+          # always copies `next-server.js.nft.json` plus the instrumentation and middleware traces into
+          # the `default` function no matter which routes it claims, and `bundleServer` esbuilds all of
+          # that into `handler.mjs`; if that shared runtime is what makes the floor ~62 MiB, then no
+          # route split can ever fit and the topology has to change (e.g. shrink what the "server
+          # files" trace drags in). Print the floor's own esbuild inputs -- and top packages -- so that
+          # question is answered from data instead of inferred from the route model.
+          floor_meta="${RUNNER_TEMP}/meta-floor.json"
+          if [[ -f "${floor_meta}" ]]; then
+            echo "::group::What fills the irreducible floor (floor esbuild metafile)"
+            node -e '
+              const fs = require("node:fs");
+              const meta = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const inputs = Object.entries(meta.inputs ?? {})
+                .map(([file, info]) => [file, info.bytes ?? 0])
+                .sort((a, b) => b[1] - a[1]);
+              console.log("largest inputs:");
+              for (const [file, bytes] of inputs.slice(0, 40)) {
+                console.log(`${(bytes / 1048576).toFixed(2).padStart(9)} MiB  ${file}`);
+              }
+              const groups = {};
+              for (const [file, info] of Object.entries(meta.inputs ?? {})) {
+                const marker = "node_modules/";
+                const at = file.lastIndexOf(marker);
+                const key = at === -1 ? "<app>" : file.slice(at + marker.length).split("/").slice(0, 2).join("/");
+                groups[key] = (groups[key] ?? 0) + (info.bytes ?? 0);
+              }
+              console.log("\ncontributions by package:");
+              for (const [key, bytes] of Object.entries(groups).sort((a, b) => b[1] - a[1]).slice(0, 30)) {
+                console.log(`${(bytes / 1048576).toFixed(2).padStart(9)} MiB  ${key}`);
+              }
+            ' "${floor_meta}"
+            echo "::endgroup::"
+          else
+            echo "::warning::No floor metafile captured; cannot show what fills the floor."
+          fi
 
           if (( over > 0 )); then
             echo "::warning::${over} of $((shard_count + 1)) measured bundle(s) (shards + floor) exceed the 64 MiB cap; the floor is the hard limit a route split cannot go below."
