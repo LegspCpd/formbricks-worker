@@ -9,6 +9,7 @@
         "BETTER_AUTH_URL",
         "E2E_TESTING",
         "FORMBRICKS_OTEL_ENABLED",
+        "FORMBRICKS_SHARD",
         "FORMBRICKS_SKIP_TYPECHECK",
         "NEXTAUTH_URL",
         "NODE_ENV",

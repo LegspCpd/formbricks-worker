@@ -364,6 +364,66 @@ jobs:
         continue-on-error: true
         run: node apps/web/scripts/compute-server-shards.mjs
 
+      # Validate the sharding mechanism itself before building the router or the per-shard deploy:
+      # build ONE shard as the `default` function and check its `handler.mjs` actually shrank. If a
+      # shard's bundle is not well under 64 MiB, the whole shard topology is wrong and everything after
+      # this would be wasted. Reuses the `next build` output from the step above (skipNextBuild), so it
+      # is one OpenNext bundle, not a second Next compile.
+      #
+      # `opennextjs-cloudflare build` wipes its output dir first (`initOutputDir` does
+      # `rm -rf .open-next`), so a probe would otherwise overwrite the *complete* bundle the deploy
+      # step uploads -- silently turning the deploy into a single-shard Worker with 404s for every
+      # other route. Stash `.open-next` and restore it from a `trap`, so the deployable bundle is
+      # intact no matter how the probe ends. `continue-on-error` so a probe can never mask the deploy.
+      - name: Probe one shard's bundle size
+        continue-on-error: true
+        run: |
+          # No `-e`: every branch below has to reach the `trap`, and a failed probe is a diagnostic,
+          # not a reason to stop the step before it restores the real bundle.
+          set -uo pipefail
+
+          full_dir="apps/web/.open-next"
+          stash_dir="apps/web/.open-next-full-stash"
+          if [[ ! -d "${full_dir}" ]]; then
+            echo "::warning::No ${full_dir} to probe against; skipping the shard probe."
+            exit 0
+          fi
+
+          rm -rf "${stash_dir}"
+          mv "${full_dir}" "${stash_dir}"
+          restore_full_bundle() {
+            rm -rf "${full_dir}"
+            mv "${stash_dir}" "${full_dir}"
+          }
+          trap restore_full_bundle EXIT
+
+          first_shard="$(node apps/web/scripts/server-shard-config.mjs list | head -n 1 | cut -f1)"
+          if [[ -z "${first_shard}" ]]; then
+            echo "::warning::server-shards.json has no shards; skipping the shard probe."
+            exit 0
+          fi
+          echo "Full bundle stashed at ${stash_dir}; probing shard ${first_shard}."
+
+          echo "::group::Building shard ${first_shard} (skipNextBuild)"
+          ( cd apps/web && FORMBRICKS_SHARD="${first_shard}" pnpm exec opennextjs-cloudflare build --skipNextBuild ) 2>&1 | tail -n 20 || true
+          echo "::endgroup::"
+
+          echo "::group::Shard bundle size"
+          shard_handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
+          if [[ -f "${shard_handler}" ]]; then
+            stat --printf='%s\t%n\n' "${shard_handler}" \
+              | awk '{ printf "%9.2f MiB  %s\n", $1/1048576, $2 }'
+            size_bytes="$(stat --printf='%s' "${shard_handler}")"
+            if (( size_bytes > 64*1024*1024 )); then
+              echo "::warning::shard ${first_shard} is still over the 64 MiB cap."
+            else
+              echo "shard ${first_shard} fits the 64 MiB cap."
+            fi
+          else
+            echo "::warning::no shard handler.mjs at ${shard_handler}"
+          fi
+          echo "::endgroup::"
+
       # Cloudflare rejects a script whose *uncompressed* size exceeds 64 MiB, and its error only names
       # the five largest files. Measure the real thing instead of inferring it: `wrangler deploy
       # --dry-run` performs the exact bundling and minification the real deploy does, reports
