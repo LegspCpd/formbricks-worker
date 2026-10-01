@@ -62,6 +62,23 @@ const getUniqueValues = (values) => [...new Set(values.filter(Boolean))];
 // alike. Enforced by lib/turbo-build-env.test.ts. Read env vars directly (`process.env.<NAME>` or
 // `process.env["<NAME>"]`), not via destructuring, so that guardrail can detect them.
 
+// The pino OpenTelemetry log transport (`otlp-logger` → `@opentelemetry/*` → `protobufjs`) is ~15 MB of
+// files, and it is only ever loaded when the runtime logger enables it: `packages/logger` gates the
+// transport on `NEXT_RUNTIME === "nodejs" && OTEL_LOGS_ENABLED === "1" && OTEL_EXPORTER_OTLP_ENDPOINT`,
+// and the Workers build sets `FORMBRICKS_OTEL_ENABLED=0`, which compiles `instrumentation-node` (the only
+// thing that can turn OTEL_LOGS_ENABLED on) out of the graph. Tracing these files in unconditionally put
+// ~15 MB of never-executed code into the 64 MiB-capped Worker bundle, so they are included only when the
+// build actually ships OTEL. `outputFileTracingIncludes` cannot be conditional on its own, so the list is
+// built here.
+const OTEL_LOG_TRANSPORT_INCLUDES =
+  process.env.FORMBRICKS_OTEL_ENABLED === "0"
+    ? []
+    : [
+        "../../node_modules/pino-opentelemetry-transport/**/*",
+        "../../node_modules/pino-abstract-transport/**/*",
+        "../../node_modules/otlp-logger/**/*",
+      ];
+
 /** @type {import('next').NextConfig} */
 
 const nextConfig = {
@@ -106,12 +123,7 @@ const nextConfig = {
     // only traces static imports and misses these runtime-loaded files.
     // Include the full pino package (worker.js needs transport-stream.js, etc.)
     // and its transport targets with their dependencies.
-    "/*": [
-      "../../node_modules/pino/**/*",
-      "../../node_modules/pino-opentelemetry-transport/**/*",
-      "../../node_modules/pino-abstract-transport/**/*",
-      "../../node_modules/otlp-logger/**/*",
-    ],
+    "/*": ["../../node_modules/pino/**/*", ...OTEL_LOG_TRANSPORT_INCLUDES],
   },
   turbopack: {},
   experimental: {
