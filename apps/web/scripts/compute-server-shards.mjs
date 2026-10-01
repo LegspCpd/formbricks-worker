@@ -142,11 +142,38 @@ const main = () => {
   let baseBytes = 0;
   for (const file of base) baseBytes += routes[0].files.get(file) ?? sizeOf(file);
 
+  // `copyTracedFiles` also copies the Next server runtime plus the `instrumentation` and `middleware`
+  // closures into EVERY function, whatever its routes are (see the unconditional `processNftFile`
+  // calls in @opennextjs/aws build/copyTracedFiles.js). Those two traces are the largest fixed cost,
+  // so treating them as part of the floor keeps the shard count honest.
+  const alwaysIncluded = new Map();
+  for (const name of ["instrumentation.js.nft.json", "middleware.js.nft.json"]) {
+    const traceFile = path.join(serverDir, name);
+    if (!fs.existsSync(traceFile)) continue;
+    let partial;
+    try {
+      partial = JSON.parse(fs.readFileSync(traceFile, "utf8"));
+    } catch {
+      continue;
+    }
+    const traceDir = path.dirname(traceFile);
+    for (const rel of partial.files ?? []) {
+      const abs = path.resolve(traceDir, rel);
+      const size = sizeOf(abs);
+      if (size > 0) alwaysIncluded.set(abs, size);
+    }
+  }
+  // Routes that describe the always-included traces rather than a page/route, and so must not be
+  // listed as a shard's own routes.
+  const serverLevelTraces = new Set(["instrumentation", "middleware"]);
+  const packable = routes.filter((route) => !serverLevelTraces.has(route.route));
+
   // Best-fit-decreasing: place each route (largest first) into the shard it grows the least while
   // still fitting the budget, otherwise open a new shard. This keeps shared files from being paid
-  // for twice as far as a naive first-fit would.
+  // for twice as far as a naive first-fit would. Every shard starts from `alwaysIncluded`, because
+  // `copyTracedFiles` copies those into every function no matter which routes it is given.
   const shards = [];
-  for (const route of [...routes].sort((a, b) => b.bytes - a.bytes)) {
+  for (const route of [...packable].sort((a, b) => b.bytes - a.bytes)) {
     let best = null;
     let bestGrowth = Infinity;
     for (const shard of shards) {
@@ -166,24 +193,34 @@ const main = () => {
       }
       best.routes.push(route.route);
     } else {
-      const files = new Map(route.files);
-      shards.push({ files, bytes: route.bytes, routes: [route.route] });
+      const files = new Map(alwaysIncluded);
+      let bytes = 0;
+      for (const size of files.values()) bytes += size;
+      for (const [file, size] of route.files) {
+        if (!files.has(file)) {
+          files.set(file, size);
+          bytes += size;
+        }
+      }
+      shards.push({ files, bytes, routes: [route.route] });
     }
   }
 
   shards.sort((a, b) => b.bytes - a.bytes);
   const mib = (n) => (n / 1048576).toFixed(2);
-  const union = new Map();
+  const union = new Map(alwaysIncluded);
   for (const route of routes) for (const [file, size] of route.files) union.set(file, size);
   const unionBytes = [...union.values()].reduce((sum, size) => sum + size, 0);
+  const fixedBytes = [...alwaysIncluded.values()].reduce((sum, size) => sum + size, 0);
 
   console.log("::group::Shard feasibility (pre-flight)");
-  console.log(`build output:   ${root}`);
-  console.log(`routes traced:  ${routes.length}`);
-  console.log(`shared floor:   ${mib(baseBytes)} MiB (required by every route)`);
-  console.log(`union:          ${mib(unionBytes)} MiB (distinct files across all routes)`);
-  console.log(`budget / shard: ${budgetMiB} MiB`);
-  console.log(`shards needed:  ${shards.length}\n`);
+  console.log(`build output:     ${root}`);
+  console.log(`routes traced:    ${routes.length}`);
+  console.log(`shared floor:     ${mib(baseBytes)} MiB (files every route needs)`);
+  console.log(`always-included:  ${mib(fixedBytes)} MiB (instrumentation + middleware, every function)`);
+  console.log(`union:            ${mib(unionBytes)} MiB (distinct files across all routes)`);
+  console.log(`budget / shard:   ${budgetMiB} MiB`);
+  console.log(`shards needed:    ${shards.length}\n`);
 
   for (const [index, shard] of shards.entries()) {
     const top = [...shard.routes].sort().slice(0, 3).join(", ");
@@ -208,7 +245,7 @@ const main = () => {
       routes: shard.routes.sort(),
     })),
   };
-  const manifestPath = path.join(process.cwd(), "server-shards.json");
+  const manifestPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "server-shards.json");
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(`Wrote ${manifestPath}`);
 };
