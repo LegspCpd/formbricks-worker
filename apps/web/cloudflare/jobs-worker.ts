@@ -19,6 +19,7 @@
  *
  * There are no Cron Triggers here, deliberately: see `jobs-scheduler.ts`.
  */
+import { logger } from "@formbricks/logger";
 import { type CloudflareJobsEnv, type CloudflareQueueBatch } from "@/lib/jobs/cf";
 import { type WorkerEnv, applyWorkerEnv } from "./worker-env";
 
@@ -46,7 +47,19 @@ const ensureSchedule = async (env: WorkerEnv | undefined): Promise<void> => {
 const jobsWorker = {
   async fetch(_request: Request, env: WorkerEnv): Promise<Response> {
     applyWorkerEnv(env);
-    await ensureSchedule(env);
+
+    try {
+      await ensureSchedule(env);
+    } catch (error) {
+      // The message goes in the body rather than only to the logs: this Worker serves no user traffic and
+      // is never routed, so the body is read by whoever (or whatever) is starting the schedule — the
+      // deploy workflow pokes this endpoint and prints this response when the schedule does not start.
+      logger.error({ err: error }, "Could not start the recurring schedule");
+
+      const message = error instanceof Error ? error.message : String(error);
+
+      return new Response(`Could not start the recurring schedule: ${message}`, { status: 500 });
+    }
 
     return new Response("Formbricks jobs worker", { status: 200 });
   },

@@ -27,6 +27,8 @@ yarn-error.log*
 
 # local env files
 .env*.local
+# Wrangler's local secrets file, used by `wrangler dev` against wrangler*.jsonc
+.dev.vars
 
 # vercel
 .vercel

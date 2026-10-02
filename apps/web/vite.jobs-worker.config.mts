@@ -3,27 +3,22 @@ import { type Plugin, defineConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
 
 /**
- * A stand-in for the module URL, which workerd does not implement: `import.meta.url` is `undefined`
- * inside a Worker.
+ * A literal substitution the emitted chunks need because they run on workerd rather than Node. Applied
+ * in `renderChunk` rather than through `define`, which Vite does not honour for an SSR build: only the
+ * rendered chunk is guaranteed to hold the expression as Prisma ships it.
  *
- * Prisma's generated client needs it at module scope — `packages/database/generated/prisma/client.ts`
- * starts with `globalThis['__dirname'] = path.dirname(fileURLToPath(import.meta.url))` — and
- * `fileURLToPath` rejects `undefined` with a TypeError. Because that runs while Cloudflare *validates*
- * the upload, the deploy fails with `code: 10021` before the Worker is ever invoked. The generated file
- * cannot be patched (it is rewritten by `prisma generate` on every build), and Vite's `define` does not
- * replace `import.meta.url`, so the substitution has to happen on the emitted chunk.
- *
- * A literal file URL is all that is needed: `__dirname` only exists to locate files on disk, which a
- * Worker never does — the query engine ships as the bundled base64 WASM module.
+ * `import.meta.url` is `undefined` on workerd, and Prisma's generated client needs it at module scope:
+ * `packages/database/generated/prisma/client.ts` starts with
+ * `globalThis['__dirname'] = path.dirname(fileURLToPath(import.meta.url))`, which `fileURLToPath`
+ * rejects with a TypeError. That runs while Cloudflare *validates* the upload, so it failed every
+ * deploy with `code: 10021`. The file is rewritten by `prisma generate` on every build, so it cannot be
+ * patched in place. A literal file URL is enough: `__dirname` only exists to locate files on disk, which
+ * a Worker never does — the query engine ships as the bundled base64 WASM module.
  */
 const WORKERD_MODULE_URL = "file:///formbricks-jobs-worker/index.mjs";
 
-const workerdImportMetaUrl: Plugin = {
-  name: "formbricks:workerd-import-meta-url",
-  // `renderChunk` rather than `transform`: which module bundling step compiled the Prisma client is an
-  // implementation detail, and only the rendered chunk is guaranteed to hold the expression in its
-  // final form. Every use of `import.meta.url` is replaced, not just Prisma's — on workerd the value is
-  // undefined everywhere, so a constant is strictly better than leaving it as-is.
+const workerdLiterals: Plugin = {
+  name: "formbricks:workerd-literals",
   renderChunk(code) {
     if (!code.includes("import.meta.url")) {
       return null;
@@ -48,7 +43,7 @@ const workerdImportMetaUrl: Plugin = {
  * them at runtime. `wrangler` then bundles and minifies this single file for deploy.
  */
 export default defineConfig({
-  plugins: [workerdImportMetaUrl, tsconfigPaths()],
+  plugins: [workerdLiterals, tsconfigPaths()],
   resolve: {
     alias: [
       // Mirror the Workers build's engine alias (next.config.mjs `turbopack.resolveAlias`): the job

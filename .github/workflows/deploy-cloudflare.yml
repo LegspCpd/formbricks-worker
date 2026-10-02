@@ -651,11 +651,18 @@ jobs:
           fi
 
           echo "Requesting ${url} to start the schedule"
-          if curl --silent --show-error --fail --max-time 60 "${url}" >/dev/null; then
+          body="${RUNNER_TEMP}/poke-jobs-worker.txt"
+          status="$(curl --silent --show-error --output "${body}" --write-out '%{http_code}' --max-time 60 "${url}" || true)"
+
+          if [[ "${status}" == "200" ]]; then
             echo "Schedule started."
-          else
-            echo "::warning::${url} did not answer; the schedule will start with the first job that flows through."
+            exit 0
           fi
+
+          # The endpoint answers with the reason it could not start the schedule, which is the only
+          # place that reason is reachable without dashboard access.
+          echo "::warning::${url} answered ${status:-no status}; the schedule will start with the first job that flows through."
+          cat "${body}" 2>/dev/null || true
 
       # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
       # project and shells out to exactly this command anyway, through one extra `npx` process it
