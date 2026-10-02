@@ -1,6 +1,40 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { type Plugin, defineConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
+
+/**
+ * A stand-in for the module URL, which workerd does not implement: `import.meta.url` is `undefined`
+ * inside a Worker.
+ *
+ * Prisma's generated client needs it at module scope — `packages/database/generated/prisma/client.ts`
+ * starts with `globalThis['__dirname'] = path.dirname(fileURLToPath(import.meta.url))` — and
+ * `fileURLToPath` rejects `undefined` with a TypeError. Because that runs while Cloudflare *validates*
+ * the upload, the deploy fails with `code: 10021` before the Worker is ever invoked. The generated file
+ * cannot be patched (it is rewritten by `prisma generate` on every build), and Vite's `define` does not
+ * replace `import.meta.url`, so the substitution has to happen on the emitted chunk.
+ *
+ * A literal file URL is all that is needed: `__dirname` only exists to locate files on disk, which a
+ * Worker never does — the query engine ships as the bundled base64 WASM module.
+ */
+const WORKERD_MODULE_URL = "file:///formbricks-jobs-worker/index.mjs";
+
+const workerdImportMetaUrl: Plugin = {
+  name: "formbricks:workerd-import-meta-url",
+  // `renderChunk` rather than `transform`: which module bundling step compiled the Prisma client is an
+  // implementation detail, and only the rendered chunk is guaranteed to hold the expression in its
+  // final form. Every use of `import.meta.url` is replaced, not just Prisma's — on workerd the value is
+  // undefined everywhere, so a constant is strictly better than leaving it as-is.
+  renderChunk(code) {
+    if (!code.includes("import.meta.url")) {
+      return null;
+    }
+
+    return {
+      code: code.replaceAll("import.meta.url", JSON.stringify(WORKERD_MODULE_URL)),
+      map: null,
+    };
+  },
+};
 
 /**
  * Builds the dedicated Jobs Worker bundle from `cloudflare/jobs-worker.ts`.
@@ -14,7 +48,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
  * them at runtime. `wrangler` then bundles and minifies this single file for deploy.
  */
 export default defineConfig({
-  plugins: [tsconfigPaths()],
+  plugins: [workerdImportMetaUrl, tsconfigPaths()],
   resolve: {
     alias: [
       // Mirror the Workers build's engine alias (next.config.mjs `turbopack.resolveAlias`): the job
