@@ -519,7 +519,9 @@ jobs:
       - name: Deploy the shard router
         run: |
           set -euo pipefail
-          ( cd apps/web && OPEN_NEXT_DEPLOY=true pnpm exec wrangler deploy --config wrangler.router.jsonc )
+          log="${RUNNER_TEMP}/deploy-cf-router.log"
+          ( cd apps/web && OPEN_NEXT_DEPLOY=true pnpm exec wrangler deploy --config wrangler.router.jsonc ) \
+            | tee "${log}"
 
       # `wrangler deploy` does not carry secrets, so push the same configuration onto every shard's
       # own environment. This is what OpenNext's adapter reads at request time -- build-time inlining
@@ -545,3 +547,38 @@ jobs:
                 --config "wrangler.${shard}.jsonc"
             done
           done
+
+      # A successful deploy only proves the uploads were accepted -- it says nothing about whether the
+      # router actually reaches a shard. `/health` is a page route in the plan, so asking the public
+      # URL for it exercises the whole path: the router matches it, forwards over the shard's service
+      # binding, and the shard's Next server answers. A missing or mistyped service binding would show
+      # up here as the router's 502 instead. The 404 check is the fallback shard rendering Next's own
+      # not-found boundary.
+      #
+      # Non-fatal on purpose: a smoke check must not turn a good deploy red, and `curl` reaching
+      # `*.workers.dev` is not something this deploy depends on. It reports, and the run stays green.
+      - name: Smoke-test the deployed router
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+
+          url="$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' "${RUNNER_TEMP}/deploy-cf-router.log" 2>/dev/null | tail -n 1 || true)"
+          if [[ -z "${url}" ]]; then
+            echo "::warning::No workers.dev URL in the router's deploy output; skipping the smoke test."
+            exit 0
+          fi
+          echo "Smoke-testing ${url}"
+
+          check() {
+            local path="$1" expect="$2"
+            local code
+            code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 60 "${url}${path}" || true)"
+            if [[ "${code}" == "${expect}" ]]; then
+              echo "  ${path} -> ${code} (ok)"
+            else
+              echo "::warning::${path} returned ${code:-no status}, expected ${expect}"
+            fi
+          }
+
+          check "/health" 200
+          check "/this-route-does-not-exist-smoke-test" 404
