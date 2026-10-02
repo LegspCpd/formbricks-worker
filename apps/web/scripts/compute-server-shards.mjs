@@ -34,10 +34,6 @@ import { fileURLToPath } from "node:url";
 // carrying the most content, and halving a shard's content is what brings it under the cap.
 const PER_SHARD_BUDGET_MIB = 40;
 
-// A guard against a runaway plan, not a target: with a budget the packer opens exactly as many shards
-// as it needs, and this only stops a pathological plan from spanning dozens of Workers.
-const MAX_SHARDS = 12;
-
 // One Worker also carries the Edge middleware (~1.2 MiB) plus the adapter runtime, so a shard's own
 // server bundle is budgeted below the 64 MiB cap rather than at it.
 const DEFAULT_BUDGET_MIB = 60;
@@ -251,9 +247,11 @@ const main = () => {
     let bestGrowth = Infinity;
     for (const shard of shards) {
       const growth = growthIn(shard);
-      // A shard may only take the route if it stays inside the budget. At the ceiling the routes have
-      // to go somewhere, so the least-growth shard takes them and the overflow is reported instead.
-      if (shards.length < MAX_SHARDS && shard.bytes + growth > contentBudget) continue;
+      // The budget always applies: a shard that would exceed it is not a candidate, and when no shard
+      // is, a new one opens below. Gating this on the shard count was a bug -- once the count hit the
+      // ceiling every route was forced into an existing shard, so one shard collected everything the
+      // others could not take and shipped at 86.48 MiB while its eleven siblings sat at 40-48.
+      if (shard.bytes + growth > contentBudget) continue;
       if (growth < bestGrowth) {
         bestGrowth = growth;
         target = shard;
@@ -288,8 +286,7 @@ const main = () => {
   );
   console.log(`union:            ${mib(unionBytes)} MiB (distinct files across all routes)`);
   console.log(`cap / shard:      ${budgetMiB} MiB (whole handler.mjs)`);
-  console.log(`content / shard:  ${PER_SHARD_BUDGET_MIB} MiB (traced union budget)`);
-  console.log(`shard ceiling:    ${MAX_SHARDS}\n`);
+  console.log(`content / shard:  ${PER_SHARD_BUDGET_MIB} MiB (traced union budget)\n`);
 
   for (const [index, shard] of shards.entries()) {
     const top = [...shard.routes].sort().slice(0, 3).join(", ");
@@ -317,7 +314,6 @@ const main = () => {
     generatedAt: new Date().toISOString(),
     budgetBytes: budget,
     contentBudgetBytes: contentBudget,
-    maxShards: MAX_SHARDS,
     sharedFloorBytes: baseBytes,
     // Present in every shard and never claimed, so `default` always keeps them (see OG_MARKER).
     pinnedRoutes: [...pinnedNames].sort(),
