@@ -354,235 +354,26 @@ jobs:
       - name: Build the OpenNext Worker
         run: pnpm --filter @formbricks/web run build:cf:full
 
-      # Pre-flight: the app does not fit in one Worker, so before anything is uploaded, work out how
-      # many Workers it *would* need and how big each one would be. This is read-only -- it inspects
-      # the build output and (re)writes `server-shards.json`, and never touches the deploy -- so it
-      # can run on every push. It answers the one question the sharding work depends on: how many
-      # shards, and does any single shard still exceed the 64 MiB cap?
-      # `continue-on-error` so a measurement problem can never block the pipeline.
-      - name: Pre-flight shard check
-        continue-on-error: true
-        run: node apps/web/scripts/compute-server-shards.mjs
-
-      # Validate the shard plan before anything is deployed: build EVERY shard as the `default`
-      # function and measure its real `handler.mjs`. The pre-flight's route-trace model is a close
-      # approximation, not the truth -- it has been both high (union 179 MiB vs a 150 MiB bundle) and
-      # low (one shard 69.87 MiB predicted vs 75.23 MiB measured) -- and a shard that is even one byte
-      # over 64 MiB is rejected by Cloudflare at deploy time (code 10027). This step is the check that
-      # actually decides whether the topology is viable.
+      # The app does not fit in one Worker (the OpenNext server bundle is ~125 MiB against the 64 MiB
+      # cap), so it is deployed as several shard Workers plus a router. This step derives that topology
+      # from the build above and writes everything the deploys below consume:
+      #   - `apps/web/server-shards.json`  the plan (which routes share a Worker), read by the per-shard
+      #                                    builds through `open-next.config.ts`
+      #   - `apps/web/wrangler.shard-<n>.jsonc`  one Wrangler config per shard
+      #   - `apps/web/wrangler.router.jsonc`     the router that fronts them
+      #   - `apps/web/cloudflare/shard-plan.ts`  the router's generated route table
+      # `compute-server-shards.mjs` reads Next's own route traces from `apps/web/.next`, which the
+      # build above produced.
       #
-      # Reuses the `next build` output from the step above (`--skipNextBuild`), so each shard is one
-      # OpenNext bundle, not another Next compile.
-      #
-      # `opennextjs-cloudflare build` wipes its output dir first (`initOutputDir` does
-      # `rm -rf .open-next`), so this would otherwise overwrite the *complete* bundle the deploy step
-      # uploads -- silently turning the deploy into a single-shard Worker with 404s for every other
-      # route. Stash `.open-next` and restore it from a `trap`, so the deployable bundle is intact no
-      # matter how this step ends. `continue-on-error` so a measurement can never mask the deploy.
-      - name: Measure every shard's bundle size
-        continue-on-error: true
-        run: |
-          # No `-e`: every branch has to reach the `trap`, and a failed measurement is a diagnostic,
-          # not a reason to stop before the real bundle is restored.
-          set -uo pipefail
-
-          full_dir="apps/web/.open-next"
-          stash_dir="apps/web/.open-next-full-stash"
-          if [[ ! -d "${full_dir}" ]]; then
-            echo "::warning::No ${full_dir} to measure; skipping the shard measurement."
-            exit 0
-          fi
-
-          shard_names="$(node apps/web/scripts/server-shard-config.mjs list | cut -f1)"
-          if [[ -z "${shard_names}" ]]; then
-            echo "::warning::server-shards.json has no shards; skipping the shard measurement."
-            exit 0
-          fi
-          echo "Shards to measure: $(echo "${shard_names}" | tr '\n' ' ')"
-
-          rm -rf "${stash_dir}"
-          mv "${full_dir}" "${stash_dir}"
-          restore_full_bundle() {
-            rm -rf "${full_dir}"
-            mv "${stash_dir}" "${full_dir}"
-          }
-          trap restore_full_bundle EXIT
-
-          # Predicted size per shard, from the same plan the builds consume, so prediction and reality
-          # sit side by side and the model's error is visible instead of assumed.
-          node apps/web/scripts/server-shard-config.mjs list >"${RUNNER_TEMP}/shard-predicted.txt" || true
-
-          handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
-          cap=$((64 * 1024 * 1024))
-          report="${RUNNER_TEMP}/shard-sizes.txt"
-          floor_report="${RUNNER_TEMP}/floor-size.txt"
-          : >"${report}"
-          : >"${floor_report}"
-          over=0
-
-          measure_one() {
-            local label="$1" shard_env="$2" sink="$3"
-            echo "::group::Building ${label} (skipNextBuild)"
-            ( cd apps/web && FORMBRICKS_SHARD="${shard_env}" pnpm exec opennextjs-cloudflare build --skipNextBuild ) \
-              >"${RUNNER_TEMP}/shard-${label}.log" 2>&1 || true
-            tail -n 5 "${RUNNER_TEMP}/shard-${label}.log"; echo "::endgroup::"
-
-            if [[ -f "${handler}" ]]; then
-              local bytes mib status
-              bytes="$(stat --printf='%s' "${handler}")"
-              mib="$(awk -v b="${bytes}" 'BEGIN { printf "%.2f", b / 1048576 }')"
-              status="ok"
-              if (( bytes > cap )); then
-                status="OVER 64 MiB"
-                over=$((over + 1))
-              fi
-              printf '%8s  %8s MiB  %s\n' "${label}" "${mib}" "${status}" >>"${sink}"
-            else
-              printf '%8s  %8s      %s\n' "${label}" "-" "no handler.mjs" >>"${sink}"
-            fi
-            # Keep this build's esbuild metafile. The composition step further down only ever sees the
-            # restored FULL bundle, so without this the FLOOR's composition -- the single number the
-            # whole sharding decision rests on -- is never visible. `initOutputDir` wipes `.open-next`
-            # on the next `measure_one`, so it has to be pulled out now.
-            if [[ -f "${handler}.meta.json" ]]; then
-              cp "${handler}.meta.json" "${RUNNER_TEMP}/meta-${label}.json"
-            fi
-            rm -rf apps/web/.open-next
-          }
-
-          shard_count=0
-          for shard in ${shard_names}; do
-            shard_count=$((shard_count + 1))
-            measure_one "${shard}" "${shard}" "${report}"
-          done
-
-          # The irreducible floor: `FORMBRICKS_SHARD=floor` claims every claimable route, so `default`
-          # keeps only what no shard can give up (the pinned og route plus whatever the adapter always
-          # bundles). If THIS is already over 64 MiB, no route split can ever fit and the topology
-          # itself has to change -- so it is the single number that decides whether sharding is viable.
-          measure_one "floor" "floor" "${floor_report}"
-
-          echo "::group::Shard bundle sizes: predicted vs measured"
-          echo "predicted (route-trace model):"
-          cat "${RUNNER_TEMP}/shard-predicted.txt"
-          echo
-          echo "measured (real handler.mjs):"
-          cat "${report}"
-          echo
-          echo "irreducible floor (every claimable route removed from default):"
-          cat "${floor_report}"
-          echo "::endgroup::"
-
-          # The size warning above is only actionable if we know WHAT fills the floor. `copyTracedFiles`
-          # always copies `next-server.js.nft.json` plus the instrumentation and middleware traces into
-          # the `default` function no matter which routes it claims, and `bundleServer` esbuilds all of
-          # that into `handler.mjs`; if that shared runtime is what makes the floor ~62 MiB, then no
-          # route split can ever fit and the topology has to change (e.g. shrink what the "server
-          # files" trace drags in). Print the floor's own esbuild inputs -- and top packages -- so that
-          # question is answered from data instead of inferred from the route model.
-          floor_meta="${RUNNER_TEMP}/meta-floor.json"
-          if [[ -f "${floor_meta}" ]]; then
-            echo "::group::What fills the irreducible floor (floor esbuild metafile)"
-            node -e '
-              const fs = require("node:fs");
-              const meta = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-              const inputs = Object.entries(meta.inputs ?? {})
-                .map(([file, info]) => [file, info.bytes ?? 0])
-                .sort((a, b) => b[1] - a[1]);
-              console.log("largest inputs:");
-              for (const [file, bytes] of inputs.slice(0, 40)) {
-                console.log(`${(bytes / 1048576).toFixed(2).padStart(9)} MiB  ${file}`);
-              }
-              const groups = {};
-              for (const [file, info] of Object.entries(meta.inputs ?? {})) {
-                const marker = "node_modules/";
-                const at = file.lastIndexOf(marker);
-                const key = at === -1 ? "<app>" : file.slice(at + marker.length).split("/").slice(0, 2).join("/");
-                groups[key] = (groups[key] ?? 0) + (info.bytes ?? 0);
-              }
-              console.log("\ncontributions by package:");
-              for (const [key, bytes] of Object.entries(groups).sort((a, b) => b[1] - a[1]).slice(0, 30)) {
-                console.log(`${(bytes / 1048576).toFixed(2).padStart(9)} MiB  ${key}`);
-              }
-            ' "${floor_meta}"
-            echo "::endgroup::"
-          else
-            echo "::warning::No floor metafile captured; cannot show what fills the floor."
-          fi
-
-          if (( over > 0 )); then
-            echo "::warning::${over} of $((shard_count + 1)) measured bundle(s) (shards + floor) exceed the 64 MiB cap; the floor is the hard limit a route split cannot go below."
-          else
-            echo "Every shard fits the 64 MiB cap."
-          fi
-
-      # Cloudflare rejects a script whose *uncompressed* size exceeds 64 MiB, and its error only names
-      # the five largest files. Measure the real thing instead of inferring it: `wrangler deploy
-      # --dry-run` performs the exact bundling and minification the real deploy does, reports
-      # `Total Upload` / `gzip`, and writes the bundle out -- without ever talking to Cloudflare.
-      # `continue-on-error` so a diagnostic that cannot run never hides the deploy result, and
-      # `OPEN_NEXT_DEPLOY=true` so wrangler does not hand the command back to `opennextjs-cloudflare`.
-      - name: Measure the Worker bundle
-        continue-on-error: true
+      # Hard-fails on purpose, unlike the diagnostics below: without the plan there is nothing to
+      # deploy, and a run that cannot derive it should stop rather than ship an empty topology.
+      - name: Plan the shards and generate their Wrangler configs
         run: |
           set -euo pipefail
-          echo "::group::.open-next total"
-          du -sh apps/web/.open-next
-          echo "::endgroup::"
-          echo "::group::Largest files in .open-next"
-          find apps/web/.open-next -type f -printf '%s\t%p\n' | sort -rn | head -n 25 \
-            | awk '{ printf "%9.2f MiB  %s\n", $1/1048576, $2 }'
-          echo "::endgroup::"
-          echo "::group::Bundled worker (dry run)"
-          cd apps/web
-          OPEN_NEXT_DEPLOY=true pnpm exec wrangler deploy --dry-run --outdir="${RUNNER_TEMP}/cf-dry-run" 2>&1 | tail -n 60
-          find "${RUNNER_TEMP}/cf-dry-run" -type f -printf '%s\t%p\n' | sort -rn | head -n 10 \
-            | awk '{ printf "%9.2f MiB  %s\n", $1/1048576, $2 }'
-          echo "::endgroup::"
-
-      # `handler.mjs` is a single esbuild output, so a directory listing only ever shows the one file.
-      # The adapter writes an esbuild metafile next to it; the `inputs` map in there is the ground truth
-      # on which sources were inlined and how many bytes each contributed. Print the largest ones --
-      # that is what a size cut has to target, instead of inferring it from the route chunks.
-      - name: Analyze the server bundle composition
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          meta="apps/web/.open-next/server-functions/default/apps/web/handler.mjs.meta.json"
-          if [[ ! -f "${meta}" ]]; then
-            echo "::warning::No esbuild metafile at ${meta}; skipping composition analysis."
-            exit 0
-          fi
-          echo "::group::Largest esbuild inputs in the server bundle"
-          node -e '
-            const fs = require("node:fs");
-            const meta = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            const inputs = Object.entries(meta.inputs ?? {})
-              .map(([file, info]) => [file, info.bytes ?? 0])
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 40);
-            for (const [file, bytes] of inputs) {
-              console.log(`${(bytes / 1048576).toFixed(2).padStart(9)} MiB  ${file}`);
-            }
-            const total = Object.values(meta.inputs ?? {}).reduce((sum, info) => sum + (info.bytes ?? 0), 0);
-            console.log(`\nTotal inputs: ${(total / 1048576).toFixed(2)} MiB across ${Object.keys(meta.inputs ?? {}).length} files`);
-          ' "${meta}"
-          echo "::endgroup::"
-          echo "::group::Largest esbuild contributions by package"
-          node -e '
-            const fs = require("node:fs");
-            const meta = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            const groups = {};
-            for (const [file, info] of Object.entries(meta.inputs ?? {})) {
-              const marker = "node_modules/";
-              const at = file.lastIndexOf(marker);
-              const key = at === -1 ? "<app>" : file.slice(at + marker.length).split("/").slice(0, 2).join("/");
-              groups[key] = (groups[key] ?? 0) + (info.bytes ?? 0);
-            }
-            for (const [key, bytes] of Object.entries(groups).sort((a, b) => b[1] - a[1]).slice(0, 30)) {
-              console.log(`${(bytes / 1048576).toFixed(2).padStart(9)} MiB  ${key}`);
-            }
-          ' "${meta}"
+          node apps/web/scripts/compute-server-shards.mjs
+          node apps/web/scripts/generate-shard-configs.mjs
+          echo "::group::Shard plan"
+          node apps/web/scripts/server-shard-config.mjs list
           echo "::endgroup::"
 
       # Deployed *before* the app Worker on purpose: this is the queue consumer and the Cron Triggers
@@ -673,70 +464,68 @@ jobs:
           echo "::warning::${url} answered ${status:-no status} after 5 attempts; the schedule will start with the first job that flows through."
           cat "${body}" 2>/dev/null || true
 
-      # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
-      # project and shells out to exactly this command anyway, through one extra `npx` process it
-      # announces twice. It also populates the remote R2 incremental cache and injects the deployment
-      # mapping, which a bare `wrangler deploy` skips — the delegation exists precisely to add those.
-      - name: Deploy the Worker
+      # The app ships as N shard Workers plus a router: one OpenNext bundle is ~125 MiB against
+      # Cloudflare's 64 MiB uncompressed cap, so no single Worker can hold the whole app. The plan and
+      # one Wrangler config per Worker were written by the "Plan the shards" step above.
+      #
+      # Each shard is rebuilt from the same `next build` output with `FORMBRICKS_SHARD=<name>` (no
+      # second Next compile), so its `default` function carries only its own routes -- see
+      # `open-next.config.ts`. `opennextjs-cloudflare deploy --config` is used rather than a bare
+      # `wrangler deploy`: it populates the remote R2 incremental cache and injects the deployment
+      # mapping, exactly as the previous single-Worker deploy did, while taking this shard's config.
+      #
+      # Deployed before the router on purpose: the router's service bindings point at these Workers,
+      # and a binding to a Worker that does not exist yet is the one ordering that fails.
+      #
+      # `handler.mjs` is printed for each shard because it is the file Cloudflare measures against the
+      # cap; a shard over 64 MiB is rejected at upload (code 10027), and checking here names the
+      # offending shard instead of leaving a bare deploy error.
+      - name: Build and deploy the shard Workers
         run: |
           set -euo pipefail
 
-          # `wrangler` re-bundles the whole OpenNext output here, and esbuild prints thousands of
-          # harmless `[WARNING] Duplicate key ...` lines while it does. They bury the handful of lines
-          # that matter (`Total Upload`, `Deployed ... triggers`, or the real error), and a step that
-          # prints nothing for a long time is indistinguishable from a hung one.
-          #
-          # So: keep the full output in a file, and report a heartbeat instead. The step log stays
-          # short *and* shows that work is still happening. The heartbeat also carries the elapsed
-          # time, which is what tells us why a run died when the runner kills the step with SIGTERM
-          # (`Error: Process completed with exit code 143`) -- the heartbeats are already flushed by
-          # then, so the last one is the last thing that happened.
-          log="${RUNNER_TEMP}/deploy-cf.log"
-          started=$(date +%s)
-
-          # A run that is stopped from the outside -- someone cancelling it, or the runner being shut
-          # down -- kills this step with SIGTERM, which surfaces only as
-          # `Error: Process completed with exit code 143`. Dump whatever was captured at that point so
-          # the kill stops being a black box.
-          handle_signal() {
-            echo "::warning::deploy:cf was signalled (SIGTERM/SIGINT) from outside the step; dumping the captured output"
-            echo "::group::deploy-cf.log (last 200 lines)"
-            tail -n 200 "${log}" 2>/dev/null || true
-            echo "::endgroup::"
-            exit 143
-          }
-          trap handle_signal TERM INT
-
-          echo "Running \`opennextjs-cloudflare deploy\` (full output captured in ${log})."
-
-          pnpm --filter @formbricks/web run deploy:cf >"${log}" 2>&1 &
-          deploy_pid=$!
-
-          while kill -0 "${deploy_pid}" 2>/dev/null; do
-            sleep 20
-            if kill -0 "${deploy_pid}" 2>/dev/null; then
-              # First line of every real progress message, skipping esbuild's indented warning block.
-              step="$(grep -vE '^[[:space:]]|^▲' "${log}" | tail -n 1 || true)"
-              echo "[+$(( $(date +%s) - started ))s] deploy:cf running | ${step:-<no output yet>}"
-            fi
-          done
-
-          status=0
-          wait "${deploy_pid}" || status=$?
-
-          if [ "${status}" -ne 0 ]; then
-            echo "::group::deploy:cf full output (last 400 lines)"
-            tail -n 400 "${log}"
-            echo "::endgroup::"
-            exit "${status}"
+          shard_names="$(node apps/web/scripts/server-shard-config.mjs list | cut -f1)"
+          if [[ -z "${shard_names}" ]]; then
+            echo "::error::server-shards.json has no shards; the plan step did not run."
+            exit 1
           fi
 
-          tail -n 40 "${log}"
+          for shard in ${shard_names}; do
+            echo "::group::${shard}: build"
+            ( cd apps/web && FORMBRICKS_SHARD="${shard}" pnpm run build:cf:shard )
+            echo "::endgroup::"
 
-      # `wrangler deploy` does not carry secrets, so push the same configuration onto the Worker's
+            handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
+            if [[ -f "${handler}" ]]; then
+              bytes="$(stat --printf='%s' "${handler}")"
+              awk -v b="${bytes}" \
+                'BEGIN { printf "  handler.mjs: %.2f MiB\n", b / 1048576; if (b > 64 * 1024 * 1024) exit 1 }' \
+                || { echo "::error::${shard} exceeds the 64 MiB cap."; exit 1; }
+            fi
+
+            echo "::group::${shard}: deploy"
+            ( cd apps/web && pnpm exec opennextjs-cloudflare deploy --config "wrangler.${shard}.jsonc" )
+            echo "::endgroup::"
+          done
+
+      # The router is not an OpenNext build: it matches the route table and forwards over service
+      # bindings, and it is the Worker that owns the static assets and keeps the public name. A bare
+      # `wrangler deploy` is used (not `opennextjs-cloudflare deploy`, which reads an OpenNext bundle
+      # this project does not have for the router); `OPEN_NEXT_DEPLOY=true` stops wrangler from
+      # delegating back to the adapter.
+      #
+      # It owns `.open-next/assets`, which the last shard build above refreshed, so the asset layer
+      # serves `/_next/static/...` and the `public/` files before the router's `fetch` ever runs.
+      - name: Deploy the shard router
+        run: |
+          set -euo pipefail
+          ( cd apps/web && OPEN_NEXT_DEPLOY=true pnpm exec wrangler deploy --config wrangler.router.jsonc )
+
+      # `wrangler deploy` does not carry secrets, so push the same configuration onto every shard's
       # own environment. This is what OpenNext's adapter reads at request time -- build-time inlining
-      # only covers NEXT_RUNTIME / NODE_ENV / TURBOPACK.
-      - name: Publish environment variables to the Worker
+      # only covers NEXT_RUNTIME / NODE_ENV / TURBOPACK. The router needs none of these: it only
+      # matches paths and forwards, so it is deliberately left out.
+      - name: Publish environment variables to the shard Workers
         run: |
           set -euo pipefail
 
@@ -746,8 +535,13 @@ jobs:
             exit 0
           fi
 
+          shard_names="$(node apps/web/scripts/server-shard-config.mjs list | cut -f1)"
           batches="$(cat "${batches_file}")"
-          for index in $(seq 1 "${batches}"); do
-            echo "Publishing environment variables (batch ${index}/${batches})"
-            pnpm --filter @formbricks/web exec wrangler secret bulk "${GITHUB_WORKSPACE}/.wrangler-secrets-${index}.json"
+          for shard in ${shard_names}; do
+            for index in $(seq 1 "${batches}"); do
+              echo "Publishing environment variables to ${shard} (batch ${index}/${batches})"
+              pnpm --filter @formbricks/web exec wrangler secret bulk \
+                "${GITHUB_WORKSPACE}/.wrangler-secrets-${index}.json" \
+                --config "wrangler.${shard}.jsonc"
+            done
           done

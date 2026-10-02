@@ -117,6 +117,12 @@ const main = () => {
   // the router expects: they are served identically by whichever shard gets the request.
   const OG_MARKER = "@vercel/og/index.node.js";
 
+  // Next's internal 404 boundaries, which any shard may have to render (`notFound()` resolves through
+  // them wherever it is called). They are pinned into every shard for the same reason as the OG
+  // routes: a shard that merely *claims* them never copies them into its own `default`, so a
+  // `notFound()` in that shard would have no boundary to render.
+  const PINNED_INTERNAL_ROUTES = ["app/_not-found/page", "app/_global-error/page"];
+
   const traceFiles = collectTraces(serverDir, []);
   if (traceFiles.length < 5) {
     console.log(
@@ -200,14 +206,21 @@ const main = () => {
   // closure: a copied-but-tree-shaken file does not ship, and the rest of that closure (sharp, otlp,
   // jsdom, ...) is already carried by nearly every other route's closure anyway. Charging the whole
   // closure here is what once turned a 4-shard plan into 14.
-  const pinnedRoutes = packable.filter((route) =>
-    [...route.files.keys()].some((file) => file.split(path.sep).join("/").endsWith(OG_MARKER))
+  const pinnedRoutes = packable.filter(
+    (route) =>
+      PINNED_INTERNAL_ROUTES.includes(route.route) ||
+      [...route.files.keys()].some((file) => file.split(path.sep).join("/").endsWith(OG_MARKER))
   );
   const pinnedNames = new Set(pinnedRoutes.map((route) => route.route));
   const pinnedFiles = new Map();
   for (const route of pinnedRoutes) {
-    for (const [file, size] of route.files) {
-      if (file.split(path.sep).join("/").includes("/@vercel/og/")) pinnedFiles.set(file, size);
+    // Only the `@vercel/og` package files are charged to every shard. The internal 404 boundaries are
+    // pinned as routes (so `default` keeps them) but their own closure is not charged: they are tiny
+    // and already traced into every shard through the Next server runtime every shard bundles.
+    if (!PINNED_INTERNAL_ROUTES.includes(route.route)) {
+      for (const [file, size] of route.files) {
+        if (file.split(path.sep).join("/").includes("/@vercel/og/")) pinnedFiles.set(file, size);
+      }
     }
   }
   let pinnedBytes = 0;
