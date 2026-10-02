@@ -652,16 +652,25 @@ jobs:
 
           echo "Requesting ${url} to start the schedule"
           body="${RUNNER_TEMP}/poke-jobs-worker.txt"
-          status="$(curl --silent --show-error --output "${body}" --write-out '%{http_code}' --max-time 60 "${url}" || true)"
 
-          if [[ "${status}" == "200" ]]; then
-            echo "Schedule started."
-            exit 0
-          fi
+          # Retried, not fired once: this runs a second or two after the deploy that created the version, and
+          # a freshly deployed version with a brand-new Durable Object namespace can answer 500 for a
+          # moment while it is being picked up. A single attempt reported that as "the schedule did not
+          # start" even though the next request would have succeeded — and the first job through starts it
+          # anyway, so the retry only has to outlast the rollout.
+          status=""
+          for attempt in 1 2 3 4 5; do
+            status="$(curl --silent --show-error --output "${body}" --write-out '%{http_code}' --max-time 60 "${url}" || true)"
+            if [[ "${status}" == "200" ]]; then
+              echo "Schedule started (attempt ${attempt})."
+              exit 0
+            fi
+            sleep 15
+          done
 
-          # The endpoint answers with the reason it could not start the schedule, which is the only
-          # place that reason is reachable without dashboard access.
-          echo "::warning::${url} answered ${status:-no status}; the schedule will start with the first job that flows through."
+          # The endpoint answers with the reason it could not start the schedule, which is the only place
+          # that reason is reachable without dashboard access.
+          echo "::warning::${url} answered ${status:-no status} after 5 attempts; the schedule will start with the first job that flows through."
           cat "${body}" 2>/dev/null || true
 
       # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
