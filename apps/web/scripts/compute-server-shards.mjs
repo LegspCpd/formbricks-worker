@@ -233,52 +233,53 @@ const main = () => {
   //
   // A shard's size is the union of its routes' traced files, and that union already contains the
   // shared runtime (every route needs it), so the budget is checked against the union directly.
-  const shards = [];
-  const openShard = () => ({
+  // The number of shards is fixed, not derived from a size budget, because the model below is not
+  // accurate enough to decide it. CI measures every shard's real `handler.mjs`, and the gap between
+  // what this model predicts and what esbuild emits is large and not one-directional -- it called one
+  // shard 59.87 MiB that measured 75.81, and another 58.85 MiB that measured 55.12. A budget-driven
+  // packer would act on those numbers and open the wrong number of shards. What the model *is* good
+  // for is the relative sizes, which is what balancing needs, so it partitions into a fixed count and
+  // CI decides whether that count was enough.
+  //
+  // N-way LPT: seed N shards, then place each route (largest first) into whichever shard it grows the
+  // least. Even shards matter because the 64 MiB cap applies per shard -- it is the largest that
+  // decides viability -- and the previous best-fit packer produced 77.91 MiB beside 48.01 MiB.
+  const shards = Array.from({ length: MAX_SHARDS }, () => ({
     files: new Map(pinnedFiles),
     bytes: pinnedBytes,
     routes: [...pinnedNames].sort(),
-  });
+  }));
+
   for (const route of [...packable]
     .filter((route) => !pinnedNames.has(route.route))
     .sort((a, b) => b.bytes - a.bytes)) {
-    // How much this route would actually add to a shard: only the files that shard does not already
-    // have. Routes overlap heavily (that is the whole reason a shard's bundle is smaller than the sum
-    // of its routes), so charging a route its full size would open new shards long before one is
-    // needed and, with the cap in place, leave the extra bytes piled onto whatever shard came last.
+    // What this route would actually add to a shard: only the files that shard does not already have.
+    // Routes overlap heavily -- that is why a shard's bundle is smaller than the sum of its routes --
+    // so charging a route its full size would spread the routes out for the wrong reason.
     const growthIn = (shard) => {
       let growth = 0;
       for (const [file, size] of route.files) if (!shard.files.has(file)) growth += size;
       return growth;
     };
 
-    let target = null;
+    let target = shards[0];
     let smallest = Infinity;
     for (const shard of shards) {
-      const growth = growthIn(shard);
-      // Under the cap a shard may only take the route if it still fits; at the cap the routes have to
-      // go somewhere, so the smallest shard takes them and the overflow is reported instead.
-      if (shards.length < MAX_SHARDS && shard.bytes + growth > budget) continue;
-      // LPT: keep the resulting sizes as even as possible, because the cap applies to the largest.
-      if (shard.bytes + growth < smallest) {
-        smallest = shard.bytes + growth;
+      const size = shard.bytes + growthIn(shard);
+      if (size < smallest) {
+        smallest = size;
         target = shard;
       }
     }
 
-    // No shard can take it without going over: open one (only possible while under the cap; at the cap
-    // `target` is always set, so this never runs).
-    const shard = target ?? openShard();
     for (const [file, size] of route.files) {
-      if (!shard.files.has(file)) {
-        shard.files.set(file, size);
-        shard.bytes += size;
+      if (!target.files.has(file)) {
+        target.files.set(file, size);
+        target.bytes += size;
       }
     }
-    shard.routes.push(route.route);
-    if (!shards.includes(shard)) shards.push(shard);
+    target.routes.push(route.route);
   }
-  if (shards.length === 0) shards.push(openShard());
 
   shards.sort((a, b) => b.bytes - a.bytes);
   const mib = (n) => (n / 1048576).toFixed(2);
