@@ -22,31 +22,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The ceiling on how many Workers the app is split across.
+// The size a shard's traced union is allowed to reach. The union approximates the whole `handler.mjs`
+// -- it already contains the shared runtime, because every route needs it -- so the budget is the
+// 64 MiB cap less a margin for the Edge middleware and the adapter runtime that the union does not
+// model. 60 rather than 64 for that margin.
 //
-// Measured, not assumed. CI builds every shard and reports its real `handler.mjs`. Two numbers came
-// out of that, and together they decide this constant:
-//
-//   * every shard carries the same irreducible runtime -- 34.67 MiB, measured by building
-//     `FORMBRICKS_SHARD=floor`;
-//   * between them the routes need 123.68 MiB of shard-local content on top of it.
-//
-// Four shards would give each one 64 - 34.67 = 29.33 MiB of content room, so 4 x 29.33 = 117.3 MiB
-// against the 123.68 MiB the routes actually need: 6.4 MiB short, and CI duly measured 75.81 and
-// 78.06 MiB shards. The shortfall is structural, not a packing failure -- no assignment of routes to
-// four shards can get the total below what the routes weigh. Five shards give 146.6 MiB of room,
-// which clears it with margin for the route-trace model being imperfect.
-const MAX_SHARDS = 5;
+// The trace model is inaccurate in both directions (CI has seen it call a 75.81 MiB shard 59.87 MiB),
+// so this budget is not what decides the outcome -- CI's measurement is. It only keeps the plan sane.
+const PER_SHARD_BUDGET_MIB = 60;
+
+// A guard against a runaway plan, not a target: with a budget the packer opens exactly as many shards
+// as it needs, and this only stops a pathological plan from spanning dozens of Workers.
+const MAX_SHARDS = 8;
 
 // One Worker also carries the Edge middleware (~1.2 MiB) plus the adapter runtime, so a shard's own
 // server bundle is budgeted below the 64 MiB cap rather than at it.
-//
-// No separate "floor" is subtracted from this: a route's traced file list already includes the Next
-// server runtime and the Prisma engine, because every route needs them, so the union of a shard's
-// routes IS its bundle -- the shared runtime is counted once inside it, not added on top. (CI
-// confirms it: a shard the model put at 60.00 MiB measured 56.40 MiB; adding a ~34 MiB floor would
-// have predicted ~94.) `FORMBRICKS_SHARD=floor` is still measured by CI, but as a *diagnostic* of how
-// much no route split can remove -- not as a term in this budget.
 const DEFAULT_BUDGET_MIB = 60;
 
 const CANDIDATE_ROOTS = [
@@ -116,6 +106,7 @@ const main = () => {
 
   const budgetMiB = Number(process.argv[3]) || DEFAULT_BUDGET_MIB;
   const budget = budgetMiB * 1024 * 1024;
+  const contentBudget = PER_SHARD_BUDGET_MIB * 1024 * 1024;
   const serverDir = path.join(root, "server");
 
   // A route whose trace pulls in `@vercel/og` must always stay in the `default` function, whatever
@@ -223,63 +214,60 @@ const main = () => {
   let pinnedBytes = 0;
   for (const size of pinnedFiles.values()) pinnedBytes += size;
 
-  // Longest-processing-time-first, over the routes' own traced closures: place each route (largest
-  // first) into the shard that is currently smallest. Best-fit-decreasing -- which the previous
-  // version used -- packs greedily into whichever shard has room, and that produced wildly uneven
-  // shards: CI measured 77.91 MiB beside 48.01 MiB. Uneven shards are the failure mode here, because
-  // the cap applies per shard, so it is the *largest* shard that decides whether the plan is viable.
-  // LPT is the standard 4/3-approximation of the minimum makespan, so it keeps the largest shard as
-  // small as the model allows.
+  // Best-fit-decreasing over the routes' own traced closures, against a per-shard budget.
   //
-  // A shard's size is the union of its routes' traced files, and that union already contains the
-  // shared runtime (every route needs it), so the budget is checked against the union directly.
-  // The number of shards is fixed, not derived from a size budget, because the model below is not
-  // accurate enough to decide it. CI measures every shard's real `handler.mjs`, and the gap between
-  // what this model predicts and what esbuild emits is large and not one-directional -- it called one
-  // shard 59.87 MiB that measured 75.81, and another 58.85 MiB that measured 55.12. A budget-driven
-  // packer would act on those numbers and open the wrong number of shards. What the model *is* good
-  // for is the relative sizes, which is what balancing needs, so it partitions into a fixed count and
-  // CI decides whether that count was enough.
+  // Best-fit, not balanced. Balancing (LPT) was tried and CI measured the result: it spread the heavy
+  // shared files across every shard, so five shards came to 375 MiB total where four best-fit shards
+  // came to 262 MiB -- the same app, 113 MiB more of it, because a file two shards share is stored
+  // twice. Best-fit keeps related routes together so they share, which is what actually keeps the
+  // largest shard small; CI measured 53-55 MiB shards under it where balancing gave 72-77 MiB.
   //
-  // N-way LPT: seed N shards, then place each route (largest first) into whichever shard it grows the
-  // least. Even shards matter because the 64 MiB cap applies per shard -- it is the largest that
-  // decides viability -- and the previous best-fit packer produced 77.91 MiB beside 48.01 MiB.
-  const shards = Array.from({ length: MAX_SHARDS }, () => ({
+  // Each route (largest first) goes into the shard it grows the least, but only if that shard stays
+  // within `PER_SHARD_BUDGET_MIB`; otherwise a new shard opens. The budget applies to the union
+  // itself, because the union is what approximates the whole `handler.mjs`.
+  const shards = [];
+  const openShard = () => ({
     files: new Map(pinnedFiles),
     bytes: pinnedBytes,
     routes: [...pinnedNames].sort(),
-  }));
+  });
 
   for (const route of [...packable]
     .filter((route) => !pinnedNames.has(route.route))
     .sort((a, b) => b.bytes - a.bytes)) {
     // What this route would actually add to a shard: only the files that shard does not already have.
     // Routes overlap heavily -- that is why a shard's bundle is smaller than the sum of its routes --
-    // so charging a route its full size would spread the routes out for the wrong reason.
+    // so charging a route its full size would open new shards for the wrong reason.
     const growthIn = (shard) => {
       let growth = 0;
       for (const [file, size] of route.files) if (!shard.files.has(file)) growth += size;
       return growth;
     };
 
-    let target = shards[0];
-    let smallest = Infinity;
+    let target = null;
+    let bestGrowth = Infinity;
     for (const shard of shards) {
-      const size = shard.bytes + growthIn(shard);
-      if (size < smallest) {
-        smallest = size;
+      const growth = growthIn(shard);
+      // A shard may only take the route if it stays inside the budget. At the ceiling the routes have
+      // to go somewhere, so the least-growth shard takes them and the overflow is reported instead.
+      if (shards.length < MAX_SHARDS && shard.bytes + growth > contentBudget) continue;
+      if (growth < bestGrowth) {
+        bestGrowth = growth;
         target = shard;
       }
     }
 
+    const shard = target ?? openShard();
     for (const [file, size] of route.files) {
-      if (!target.files.has(file)) {
-        target.files.set(file, size);
-        target.bytes += size;
+      if (!shard.files.has(file)) {
+        shard.files.set(file, size);
+        shard.bytes += size;
       }
     }
-    target.routes.push(route.route);
+    shard.routes.push(route.route);
+    if (!shards.includes(shard)) shards.push(shard);
   }
+  if (shards.length === 0) shards.push(openShard());
 
   shards.sort((a, b) => b.bytes - a.bytes);
   const mib = (n) => (n / 1048576).toFixed(2);
@@ -296,8 +284,9 @@ const main = () => {
     `copied-but-unbundled: ${mib(fixedBytes)} MiB (instrumentation + middleware traces, context only)`
   );
   console.log(`union:            ${mib(unionBytes)} MiB (distinct files across all routes)`);
-  console.log(`cap / shard:      ${budgetMiB} MiB`);
-  console.log(`shard cap:        ${MAX_SHARDS}\n`);
+  console.log(`cap / shard:      ${budgetMiB} MiB (whole handler.mjs)`);
+  console.log(`content / shard:  ${PER_SHARD_BUDGET_MIB} MiB (traced union budget)`);
+  console.log(`shard ceiling:    ${MAX_SHARDS}\n`);
 
   for (const [index, shard] of shards.entries()) {
     const top = [...shard.routes].sort().slice(0, 3).join(", ");
@@ -306,21 +295,25 @@ const main = () => {
     );
   }
 
-  // Since the cap applies per shard, it is the *largest* shard that decides whether the plan is
-  // viable -- one shard over is the whole deploy over.
+  // Since the cap applies per shard, it is the *largest* shard that decides whether the plan is viable
+  // -- one shard over is the whole deploy over.
   const largest = Math.max(...shards.map((shard) => shard.bytes));
-  if (largest > budget) {
+  const shardsOverBudget = shards.filter((shard) => shard.bytes > contentBudget).length;
+  if (shardsOverBudget > 0) {
     console.log(
-      `\n::warning::the largest shard is ${mib(largest)} MiB, over the ${budgetMiB} MiB budget -- it cannot fit under the 64 MiB cap. Fewer routes per shard, a smaller shared runtime, or more shards (max ${MAX_SHARDS}) is needed.`
+      `\n::warning::${shardsOverBudget} of ${shards.length} shards exceed the ${PER_SHARD_BUDGET_MIB} MiB content budget (largest ${mib(largest)} MiB). The heaviest route's own closure may not fit any shard; if so, splitting cannot fix it and the shared runtime has to shrink.`
     );
   } else {
-    console.log(`\nEvery shard fits: the largest is ${mib(largest)} MiB, under the ${budgetMiB} MiB budget.`);
+    console.log(
+      `\nEvery shard fits: the largest is ${mib(largest)} MiB of content, within the ${PER_SHARD_BUDGET_MIB} MiB budget.`
+    );
   }
   console.log("::endgroup::");
 
   const manifest = {
     generatedAt: new Date().toISOString(),
     budgetBytes: budget,
+    contentBudgetBytes: contentBudget,
     maxShards: MAX_SHARDS,
     sharedFloorBytes: baseBytes,
     // Present in every shard and never claimed, so `default` always keeps them (see OG_MARKER).
