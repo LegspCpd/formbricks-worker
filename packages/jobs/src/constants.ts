@@ -61,3 +61,14 @@ export const JOBS_DEFAULT_JOB_SCHEDULER_TEMPLATE_OPTIONS = Object.freeze({
   removeOnComplete: JOBS_DEFAULT_JOB_OPTIONS.removeOnComplete,
   removeOnFail: JOBS_DEFAULT_JOB_OPTIONS.removeOnFail,
 }) satisfies JobSchedulerTemplateOptions;
+
+/**
+ * Names of the one-shot jobs whose real handler lives in `apps/web`. Kept here rather than in
+ * `queue.ts` so the engine-neutral `/cf` surface can export them without dragging in BullMQ; the app
+ * keys its handler-override map off this module instead of re-typing the strings.
+ */
+export const ONE_SHOT_JOB_NAMES = Object.freeze({
+  responsePipeline: JOB_NAMES.responsePipeline,
+  webhookDelivery: JOB_NAMES.webhookDelivery,
+  workflowRun: JOB_NAMES.workflowRun,
+});

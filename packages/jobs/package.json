@@ -13,6 +13,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./cf": {
+      "types": "./dist/cf.d.ts",
+      "import": "./dist/cf.js",
+      "require": "./dist/cf.cjs"
     }
   },
   "scripts": {

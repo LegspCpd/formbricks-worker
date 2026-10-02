@@ -1,0 +1,62 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // The dedicated jobs Worker. Its `name` is rewritten by scripts/setup-cloudflare.ts to match
+  // CLOUDFLARE_WORKER_NAME (with a `-jobs` suffix), so one deployment keeps consistent names.
+  //
+  // `main` is the standalone Vite bundle (see vite.jobs-worker.config.mts), not a `.ts` source: the
+  // job handler graph must ship without the Next.js server runtime, so it is bundled by the same
+  // `vite-tsconfig-paths` pipeline the authzed CLI and env-validator use, then handed to wrangler as a
+  // single ESM file.
+  "name": "formbricks-jobs-worker",
+  "main": "dist/jobs-worker/index.mjs",
+  "compatibility_date": "2026-09-28",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "minify": true,
+  "observability": {
+    "enabled": true
+  },
+  // The queue this Worker both consumes from and produces to: consuming is the job dispatch itself,
+  // and the producer binding is what lets a handler fan out child jobs (a response-pipeline job
+  // enqueues one webhook-delivery job per matching webhook; the reconciler re-dispatches workflow
+  // runs). `max_batch_size`/`max_batch_timeout` are sized so a burst lands in a few large batches, and
+  // `max_retries` is the outer bound on redelivery before a message goes to the dead-letter queue.
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS_QUEUE",
+        "queue": "formbricks-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "formbricks-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "formbricks-jobs-dlq"
+      }
+    ]
+  },
+  // Derived from lib/jobs/recurring-registrations.ts. Cloudflare only accepts literal cron strings
+  // here, so the schedule→cron mapping lives in lib/jobs/cf-schedules.ts and a unit test asserts this
+  // array matches it — a drifting list would silently stop firing a job.
+  //
+  // Note the two degradations Cloudflare forces, both inherent to cron (minute granularity, UTC only):
+  // the 5s authzed projection sweep clamps to once a minute, and the survey-scheduling sweep is
+  // declared at its UTC default rather than its Europe/Berlin wall clock.
+  "triggers": {
+    "crons": [
+      "* * * * *",
+      "*/3 * * * *",
+      "0 */6 * * *",
+      "30 1 * * *",
+      "0 0 * * *",
+      "15 2 * * *",
+      "45 2 * * *"
+    ]
+  },
+  "vars": {
+    "NODE_ENV": "production",
+    "FORMBRICKS_JOBS_ENGINE": "cloudflare"
+  }
+}

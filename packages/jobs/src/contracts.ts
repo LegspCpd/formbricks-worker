@@ -15,6 +15,21 @@ export interface EnqueuedJob {
   queueName: string;
 }
 
+/**
+ * The engine-neutral subset of a queued message the dispatch path reads. BullMQ's `Job` satisfies it
+ * structurally (`id`, `name`, `data`, `queueName`, `opts.attempts`, `attemptsMade`), and so does the
+ * Cloudflare Queues adapter in `cf-consumer.ts` — which is what keeps `processors/registry.ts` free of
+ * the `bullmq` dependency while still serving both runtimes from one dispatch implementation.
+ */
+export interface BackgroundJobLike {
+  attemptsMade?: number;
+  data: unknown;
+  id?: number | string | null;
+  name: string;
+  opts?: { attempts?: number } | null;
+  queueName?: string;
+}
+
 export type JobHandler<TData> = (data: TData, context: JobExecutionContext) => Promise<void>;
 
 export type JobHandlerOverrides = Partial<Record<string, JobHandler<unknown>>>;

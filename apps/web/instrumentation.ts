@@ -26,6 +26,14 @@ export const onRequestError: Instrumentation.onRequestError = (...args) => {
 // the ~10k `@opentelemetry/*` files behind it — out of the bundle entirely.
 const OTEL_ENABLED = process.env.FORMBRICKS_OTEL_ENABLED !== "0";
 
+// Same build-time-constant trick, for the BullMQ bootstrapping branch below. `./instrumentation-jobs`
+// statically pulls in the whole job-handler graph (authzed, stripe, slack, workflow runner, response
+// pipeline), and the OpenNext/Workers adapter copies the instrumentation trace into *every* server
+// function regardless of which routes it claims -- so that graph sets an irreducible floor larger than
+// the 64 MiB Worker limit. Cloudflare Workers cannot run a BullMQ worker anyway (it needs a TCP Redis),
+// so the workers build turns this off and the branch folds away to dead code.
+const INSTRUMENTATION_JOBS_ENABLED = process.env.FORMBRICKS_INSTRUMENTATION_JOBS_ENABLED !== "0";
+
 export const register = async () => {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     if (process.env.NEXT_PHASE !== "phase-production-build") {
@@ -40,7 +48,7 @@ export const register = async () => {
     }
 
     // Skip runtime-only BullMQ bootstrapping during production builds.
-    if (process.env.NEXT_PHASE !== "phase-production-build") {
+    if (INSTRUMENTATION_JOBS_ENABLED && process.env.NEXT_PHASE !== "phase-production-build") {
       try {
         const { registerJobsWorker, registerRecurringJobs } = await import("./instrumentation-jobs");
         void registerRecurringJobs().catch((error: unknown) => {

@@ -1,6 +1,5 @@
-import type { Job } from "bullmq";
 import { logger } from "@formbricks/logger";
-import type { AnyBackgroundJobDefinition, JobHandlerOverrides } from "@/src/contracts";
+import type { AnyBackgroundJobDefinition, BackgroundJobLike, JobHandlerOverrides } from "@/src/contracts";
 import { backgroundJobDefinitions, getBackgroundJobDefinition } from "@/src/definitions";
 
 export const jobProcessors: Record<string, AnyBackgroundJobDefinition> = backgroundJobDefinitions;
@@ -8,7 +7,10 @@ export const jobProcessors: Record<string, AnyBackgroundJobDefinition> = backgro
 export const getJobProcessor = (jobName: string): AnyBackgroundJobDefinition | undefined =>
   getBackgroundJobDefinition(jobName);
 
-export const processJob = async (job: Job, handlerOverrides?: JobHandlerOverrides): Promise<void> => {
+export const processJob = async (
+  job: BackgroundJobLike,
+  handlerOverrides?: JobHandlerOverrides
+): Promise<void> => {
   const definition = getJobProcessor(job.name);
 
   if (!definition) {
@@ -34,13 +36,13 @@ export const processJob = async (job: Job, handlerOverrides?: JobHandlerOverride
   // A *known* job whose payload fails to parse keeps throwing: that is a real bug, and retrying is right.
   const data = definition.schema.parse(job.data);
   const handler = handlerOverrides?.[job.name] ?? definition.handle;
-  const maxAttempts = typeof job.opts.attempts === "number" && job.opts.attempts > 0 ? job.opts.attempts : 1;
+  const maxAttempts = typeof job.opts?.attempts === "number" && job.opts.attempts > 0 ? job.opts.attempts : 1;
 
   await handler(data, {
-    attempt: job.attemptsMade + 1,
+    attempt: (job.attemptsMade ?? 0) + 1,
     jobId: String(job.id),
     jobName: job.name,
     maxAttempts,
-    queueName: job.queueName,
+    queueName: job.queueName ?? "",
   });
 };

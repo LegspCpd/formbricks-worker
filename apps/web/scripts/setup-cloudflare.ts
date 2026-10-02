@@ -53,6 +53,7 @@ interface ResolvedBindings {
   memoryCacheKvId: string;
   r2BucketName: string;
   queueName: string;
+  deadLetterQueueName: string;
   selfReference: string;
   hyperdriveId: string | null;
 }
@@ -125,14 +126,20 @@ const getResourceNames = (): {
   memoryCacheKv: string;
   r2Bucket: string;
   jobsQueue: string;
+  jobsDeadLetterQueue: string;
+  jobsWorkerName: string;
 } => {
   const prefix = process.env.CLOUDFLARE_RESOURCE_PREFIX?.trim() || DEFAULT_RESOURCE_PREFIX;
+  const workerName = getWorkerName();
   return {
     cacheKv: `${prefix}_cache_kv`,
     tagCacheKv: `${prefix}_tag_cache_kv`,
     memoryCacheKv: `${prefix}_memory_cache_kv`,
     r2Bucket: `${prefix}-storage`,
     jobsQueue: `${prefix}-jobs`,
+    jobsDeadLetterQueue: `${prefix}-jobs-dlq`,
+    // The dedicated jobs Worker is named after the main one so a renamed deployment stays consistent.
+    jobsWorkerName: `${workerName}-jobs`,
   };
 };
 
@@ -310,6 +317,10 @@ const resolveBindings = async (
   const queueName =
     reuseBinding(bindings, "queue", "JOBS_QUEUE", "queue_name") ?? (await ensureQueue(names.jobsQueue));
 
+  // The dead-letter queue is a separate queue the consumer forwards to after `max_retries`. It is only
+  // read by the jobs Worker, so it is never a binding on the main Worker; ensure it exists regardless.
+  const deadLetterQueueName = await ensureQueue(names.jobsDeadLetterQueue);
+
   const selfReference = reuseBinding(bindings, "service", "WORKER_SELF_REFERENCE", "service") ?? workerName;
 
   // Hyperdrive is optional. Only add it when the Worker already uses it or one was handed to us.
@@ -318,7 +329,16 @@ const resolveBindings = async (
     reuseBinding(bindings, "hyperdrive", "HYPERDRIVE", "id") ||
     null;
 
-  return { cacheKvId, tagCacheKvId, memoryCacheKvId, r2BucketName, queueName, selfReference, hyperdriveId };
+  return {
+    cacheKvId,
+    tagCacheKvId,
+    memoryCacheKvId,
+    r2BucketName,
+    queueName,
+    deadLetterQueueName,
+    selfReference,
+    hyperdriveId,
+  };
 };
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -391,6 +411,33 @@ const updateWranglerConfig = (workerName: string, resolved: ResolvedBindings): v
   console.log(`  Updated ${wranglerPath}`);
 };
 
+// The jobs Worker's config carries the queue names and its own Worker name as literals (Cloudflare only
+// accepts literal values there), so they are rewritten from the resolved resources. Only the `queue`
+// and the dead-letter queue are touched: the `binding` names are fixed by the code.
+const updateJobsWranglerConfig = (
+  names: ReturnType<typeof getResourceNames>,
+  resolved: ResolvedBindings
+): void => {
+  const wranglerPath = resolve(__dirname, "../wrangler.jobs.jsonc");
+  let content = readFileSync(wranglerPath, "utf-8");
+
+  content = setWorkerName(content, names.jobsWorkerName);
+
+  const repointQueue = (key: "queue" | "dead_letter_queue", value: string): void => {
+    const pattern = new RegExp(`("${key}"\\s*:\\s*)"[^"]*"`, "g");
+    if (!pattern.test(content)) {
+      throw new Error(`Could not find "${key}" in wrangler.jobs.jsonc`);
+    }
+    content = content.replace(pattern, `$1"${value}"`);
+  };
+
+  repointQueue("queue", resolved.queueName);
+  repointQueue("dead_letter_queue", resolved.deadLetterQueueName);
+
+  writeFileSync(wranglerPath, content);
+  console.log(`  Updated ${wranglerPath}`);
+};
+
 const main = async (): Promise<void> => {
   console.log("=== Formbricks Cloudflare Setup ===\n");
 
@@ -398,6 +445,7 @@ const main = async (): Promise<void> => {
   const names = getResourceNames();
 
   console.log(`Worker:           ${workerName}`);
+  console.log(`Jobs Worker:      ${names.jobsWorkerName}`);
   console.log(
     `Resource prefix:  ${process.env.CLOUDFLARE_RESOURCE_PREFIX?.trim() || DEFAULT_RESOURCE_PREFIX}`
   );
@@ -426,6 +474,7 @@ const main = async (): Promise<void> => {
     const resolved = await resolveBindings(bindings, names, workerName);
 
     updateWranglerConfig(workerName, resolved);
+    updateJobsWranglerConfig(names, resolved);
 
     console.log("\n=== Setup complete! ===");
   } catch (error) {

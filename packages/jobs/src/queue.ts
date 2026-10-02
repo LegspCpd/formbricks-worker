@@ -388,14 +388,10 @@ export const recurringJobs = Object.freeze(
 );
 
 /**
- * Names of the one-shot jobs whose real handler lives in `apps/web`. Exported so the app keys its
- * override map off this module instead of re-typing the strings; the JOB_NAMES registry stays internal.
+ * Names of the one-shot jobs whose real handler lives in `apps/web`. Re-exported from `constants.ts`
+ * (where it is declared engine-neutrally) so existing `@formbricks/jobs` importers keep working.
  */
-export const ONE_SHOT_JOB_NAMES = Object.freeze({
-  responsePipeline: JOB_NAMES.responsePipeline,
-  webhookDelivery: JOB_NAMES.webhookDelivery,
-  workflowRun: JOB_NAMES.workflowRun,
-});
+export { ONE_SHOT_JOB_NAMES } from "@/src/constants";
 
 export const getBackgroundJobProducer = (): BackgroundJobProducer => ({
   enqueueResponsePipeline: async (data) => toEnqueuedJob(await enqueueResponsePipelineJob(data)),

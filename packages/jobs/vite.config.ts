@@ -10,10 +10,23 @@ export default defineConfig({
     },
   },
   build: {
+    // Not minified on purpose. Vitest inlines workspace packages into its SSR transform, which
+    // rewrites every identifier that matches an imported binding name — and it does not skip label
+    // positions. Minification renames labels to single letters, so a label can land on the local name
+    // of an import (`import { z as e }` plus a minified `e: for (...)`), and the rewrite emits
+    // `__vite_ssr_import_1__.z: for (...)`, which fails to parse. That surfaces as an unrelated
+    // `SyntaxError: Unexpected token ':'` in any consumer test that imports this package. Consumers
+    // minify their own bundles, so nothing is lost by leaving this one readable.
+    minify: false,
     lib: {
-      entry: resolve(__dirname, "src/index.ts"),
-      name: "formbricksJobs",
-      fileName: "index",
+      // Two entry points: the BullMQ-backed default (`.`) and the BullMQ-free Cloudflare surface
+      // (`./cf`). They share chunks, so `cf` does not re-bundle the schemas it re-exports.
+      entry: {
+        cf: resolve(__dirname, "src/cf.ts"),
+        index: resolve(__dirname, "src/index.ts"),
+      },
+      // ESM keeps `.js`, CJS gets `.cjs` — matching the paths in the package's `exports` map.
+      fileName: (format, entryName) => (format === "cjs" ? `${entryName}.cjs` : `${entryName}.js`),
       formats: ["es", "cjs"],
     },
     rollupOptions: {

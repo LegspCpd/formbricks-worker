@@ -585,6 +585,50 @@ jobs:
           ' "${meta}"
           echo "::endgroup::"
 
+      # Deployed *before* the app Worker on purpose: this is the queue consumer and the Cron Triggers
+      # host. Failing here stops the run instead of shipping an app that accepts responses and enqueues
+      # them onto a queue nobody drains (no webhook deliveries, no workflow runs). The reverse — a live
+      # consumer with no app deployed — only leaves an idle consumer.
+      #
+      # `main` is the standalone Vite bundle from the build step (`dist/jobs-worker/index.mjs`), not an
+      # OpenNext output: the job-handler graph plus the Next.js server runtime do not fit in one Worker,
+      # so the handlers ship on their own (see vite.jobs-worker.config.mts). Queue names, the
+      # dead-letter queue and the `-jobs` Worker name were already resolved into `wrangler.jobs.jsonc`
+      # by `scripts/setup-cloudflare.ts` during that same build.
+      - name: Deploy the Jobs Worker
+        run: |
+          set -euo pipefail
+
+          log="${RUNNER_TEMP}/deploy-cf-jobs.log"
+          if ! pnpm --filter @formbricks/web run deploy:cf:jobs >"${log}" 2>&1; then
+            echo "::group::deploy:cf:jobs full output (last 200 lines)"
+            tail -n 200 "${log}"
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          tail -n 20 "${log}"
+
+      # Same configuration as the app Worker: the job handlers read the database, the encryption key
+      # and the webhook/integration credentials at run time, so this Worker needs the identical set.
+      - name: Publish environment variables to the Jobs Worker
+        run: |
+          set -euo pipefail
+
+          batches_file="${GITHUB_WORKSPACE}/.wrangler-secret-batches"
+          if [[ ! -s "${batches_file}" ]]; then
+            echo "::notice::No environment variables to publish."
+            exit 0
+          fi
+
+          batches="$(cat "${batches_file}")"
+          for index in $(seq 1 "${batches}"); do
+            echo "Publishing environment variables to the Jobs Worker (batch ${index}/${batches})"
+            pnpm --filter @formbricks/web exec wrangler secret bulk \
+              "${GITHUB_WORKSPACE}/.wrangler-secrets-${index}.json" \
+              --config wrangler.jobs.jsonc
+          done
+
       # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
       # project and shells out to exactly this command anyway, through one extra `npx` process it
       # announces twice. It also populates the remote R2 incremental cache and injects the deployment

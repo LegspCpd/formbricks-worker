@@ -1,5 +1,9 @@
 /* v8 ignore start */
-export { UnrecoverableError } from "bullmq";
+// Owned by this package rather than re-exported from BullMQ: BullMQ detects the sentinel by name
+// (`err.name === "UnrecoverableError"`) as well as by `instanceof`, so handlers can throw it even on
+// runtimes that never load BullMQ (see `errors.ts`). The Cloudflare surface (`@formbricks/jobs/cf`)
+// exports the same class, so a message consumer and a handler agree on the sentinel.
+export { UnrecoverableError, isUnrecoverableError } from "./errors";
 export type {
   BackgroundJobProducer,
   EnqueuedJob,
@@ -53,7 +57,19 @@ export type {
   TWorkflowRunJobData,
   TWorkflowRunReconcileJobData,
 } from "./types";
-
-// Cloudflare-compatible job producer
-export { cfJobProducer } from "./cf-producer";
+export type { BackgroundJobLike } from "./contracts";
+// Cloudflare Queues producer surface, also exported from the BullMQ entry so shared modules (e.g. the
+// runtime binding glue) can import it from one specifier. It carries no BullMQ dependency, so pulling
+// it in here adds nothing to the BullMQ graph; under the Workers build this whole entry is aliased to
+// `@formbricks/jobs/cf` anyway (see `FORMBRICKS_JOBS_ENGINE` in next.config.mjs).
+export {
+  createCloudflareJobProducer,
+  getCloudflareQueueBinding,
+  newCloudflareJobId,
+  sendToCloudflareQueue,
+  setCloudflareQueueBinding,
+} from "./cf-producer";
+export type { CloudflareQueueBinding } from "./cf-producer";
+export { consumeQueueBatch } from "./cf-consumer";
+export type { CloudflareQueueBatch, CloudflareQueueMessage } from "./cf-consumer";
 /* v8 ignore stop */

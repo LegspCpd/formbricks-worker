@@ -79,6 +79,15 @@ const OTEL_LOG_TRANSPORT_INCLUDES =
         "../../node_modules/otlp-logger/**/*",
       ];
 
+// The background-jobs engine. Self-hosted runs BullMQ against a TCP Redis; Cloudflare Workers cannot
+// open that connection, so the Workers build selects the BullMQ-free `@formbricks/jobs/cf` surface and
+// drives jobs through Cloudflare Queues instead. Aliasing the package specifier — rather than editing
+// every import site — is what keeps the two engines from forking the handler code: the same handlers,
+// schemas and dispatch registry ship, just wired to a different transport. The BullMQ client graph is
+// what would otherwise be copied into *every* server function and blow the 64 MiB Worker limit.
+const JOBS_ENGINE_CLOUDFLARE = process.env.FORMBRICKS_JOBS_ENGINE === "cloudflare";
+const jobsResolveAlias = JOBS_ENGINE_CLOUDFLARE ? { "@formbricks/jobs": "@formbricks/jobs/cf" } : {};
+
 /** @type {import('next').NextConfig} */
 
 const nextConfig = {
@@ -125,7 +134,11 @@ const nextConfig = {
     // and its transport targets with their dependencies.
     "/*": ["../../node_modules/pino/**/*", ...OTEL_LOG_TRANSPORT_INCLUDES],
   },
-  turbopack: {},
+  turbopack: {
+    resolveAlias: {
+      ...jobsResolveAlias,
+    },
+  },
   experimental: {
     proxyClientMaxBodySize: "16mb",
     turbopackFileSystemCacheForBuild: true,
@@ -547,6 +560,13 @@ const nextConfig = {
     // can neither run the Node OTel SDK (the Prometheus exporter binds a TCP port) nor afford to compile it.
     // Self-hosted builds keep the default.
     FORMBRICKS_OTEL_ENABLED: process.env.FORMBRICKS_OTEL_ENABLED ?? "1",
+    // Same inlining trick for the BullMQ bootstrapping branch in instrumentation.ts. It pulls in the
+    // entire job-handler graph (authzed, stripe, slack, workflow runner, response pipeline), which the
+    // OpenNext/Workers adapter copies into *every* server function through the always-included
+    // instrumentation trace. Cloudflare Workers cannot run a BullMQ worker anyway (it needs a TCP
+    // Redis), so the workers target turns this off and the branch (and its ~12 MiB of chunks) fold
+    // away to dead code. Self-hosted builds keep the default.
+    FORMBRICKS_INSTRUMENTATION_JOBS_ENABLED: process.env.FORMBRICKS_INSTRUMENTATION_JOBS_ENABLED ?? "1",
   },
 };
 
