@@ -61,6 +61,11 @@ const PROCESS_ENV_EXEMPT_FILES = [
   "next.config.mjs",
   "instrumentation.ts",
   "instrumentation-*.ts",
+  // The Cloudflare Worker entries. They are bootstrap for a Worker that runs outside the Next.js
+  // runtime — `cloudflare/jobs-worker.ts` is what copies the Worker's bindings onto `process.env`
+  // before the job-handler graph is imported, since Cloudflare evaluates a Worker's module graph
+  // during upload validation, where secrets do not exist.
+  "cloudflare/**",
   "sentry.*.config.ts",
   "scripts/**",
   "integration/**",

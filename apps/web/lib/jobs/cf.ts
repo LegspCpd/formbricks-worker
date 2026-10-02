@@ -15,6 +15,10 @@ export interface CloudflareJobsEnv {
   JOBS_QUEUE?: CloudflareQueueBinding;
 }
 
+// Re-exported so the Worker entry can type its `queue()` handler from this facade alone, without a
+// second import path for the same concept.
+export type { CloudflareQueueBatch };
+
 /**
  * Hands the Worker's `JOBS_QUEUE` producer binding to `@formbricks/jobs`. Idempotent and cheap, so it
  * is safe to call on every invocation: a `queue()` consumer does not run inside a Next.js request, so
