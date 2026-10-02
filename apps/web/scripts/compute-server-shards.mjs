@@ -22,18 +22,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The size a shard's traced union is allowed to reach. The union approximates the whole `handler.mjs`
-// -- it already contains the shared runtime, because every route needs it -- so the budget is the
-// 64 MiB cap less a margin for the Edge middleware and the adapter runtime that the union does not
-// model. 60 rather than 64 for that margin.
+// The size a shard's traced union is allowed to reach. Kept well under the 64 MiB cap on purpose: the
+// union over-counts what esbuild emits (it charges every traced file, including the ones tree-shaking
+// removes), and by an amount that varies per shard -- CI measured two shards whose unions were both
+// ~60 MiB ship at 75.81 and 55.12 MiB. A budget near the cap therefore fills each shard to ~60 MiB of
+// union and ships some of them over.
 //
-// The trace model is inaccurate in both directions (CI has seen it call a 75.81 MiB shard 59.87 MiB),
-// so this budget is not what decides the outcome -- CI's measurement is. It only keeps the plan sane.
-const PER_SHARD_BUDGET_MIB = 60;
+// 40 MiB keeps the largest shard's union far enough below the cap that even the worst over-count CI
+// has seen (1.39x) stays under it, and the extra shards it opens carry less content each. That is the
+// direction the measurements point: the two shards the four-shard plan could not fit were the two
+// carrying the most content, and halving a shard's content is what brings it under the cap.
+const PER_SHARD_BUDGET_MIB = 40;
 
 // A guard against a runaway plan, not a target: with a budget the packer opens exactly as many shards
 // as it needs, and this only stops a pathological plan from spanning dozens of Workers.
-const MAX_SHARDS = 8;
+const MAX_SHARDS = 12;
 
 // One Worker also carries the Edge middleware (~1.2 MiB) plus the adapter runtime, so a shard's own
 // server bundle is budgeted below the 64 MiB cap rather than at it.
