@@ -22,12 +22,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The ceiling on how many Workers the app may be split across. Every extra shard repeats the whole
-// irreducible floor (Next's server runtime, the Prisma engine, the pinned og route), so the floor is
-// paid N times over and each shard's own room shrinks as N grows. More shards therefore does not mean
-// more usable space: past a point it means less. Kept at 4 deliberately -- a deployment is harder to
-// operate the more Workers it spans.
-const MAX_SHARDS = 4;
+// The ceiling on how many Workers the app is split across.
+//
+// Measured, not assumed. CI builds every shard and reports its real `handler.mjs`. Two numbers came
+// out of that, and together they decide this constant:
+//
+//   * every shard carries the same irreducible runtime -- 34.67 MiB, measured by building
+//     `FORMBRICKS_SHARD=floor`;
+//   * between them the routes need 123.68 MiB of shard-local content on top of it.
+//
+// Four shards would give each one 64 - 34.67 = 29.33 MiB of content room, so 4 x 29.33 = 117.3 MiB
+// against the 123.68 MiB the routes actually need: 6.4 MiB short, and CI duly measured 75.81 and
+// 78.06 MiB shards. The shortfall is structural, not a packing failure -- no assignment of routes to
+// four shards can get the total below what the routes weigh. Five shards give 146.6 MiB of room,
+// which clears it with margin for the route-trace model being imperfect.
+const MAX_SHARDS = 5;
 
 // One Worker also carries the Edge middleware (~1.2 MiB) plus the adapter runtime, so a shard's own
 // server bundle is budgeted below the 64 MiB cap rather than at it.
