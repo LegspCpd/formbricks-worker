@@ -9,14 +9,21 @@ import {
  * Cloudflare Cron Triggers can only reference literal cron expressions declared in `wrangler*.jsonc`,
  * and they run in UTC. The app's recurring jobs are declared with engine-neutral schedules (an
  * `everyMs` interval or a cron pattern plus a time zone) in `lib/jobs/recurring-registrations.ts`, so
- * this module bridges the two: it derives one cron expression per recurring job and, at fire time,
+ * this module bridges the two: it derives one cron expression per schedule *shape* and, at fire time,
  * maps the `controller.cron` string back to the job(s) to run.
  *
- * Time-zone note: a job declared with a time zone (e.g. survey scheduling at 00:00 Europe/Berlin) is
- * registered at its *UTC* wall-clock equivalent here, because Cloudflare crons are UTC-only. The
- * schedule therefore fires at the right UTC instant for the current offset; a DST shift moves the
- * local wall clock by an hour until the config is regenerated. Scheduling *semantics* (which survey
- * runs when) stay in the app.
+ * Why the daily jobs share one trigger: a Workers account on the Free plan may hold **five** Cron
+ * Triggers in total (`code: 10072`; Workers Paid raises it to 1,000). The four `kind: "cron"`
+ * registrations are all once-a-day sweeps, so declaring them separately would spend four of those five
+ * slots on the same cadence and leave no room for anything else — including a trigger another Worker on
+ * the account might need. They therefore share `CLOUDFLARE_DAILY_CRON`.
+ *
+ * What that costs: each daily sweep runs at the shared UTC hour rather than its declared wall-clock
+ * time, so e.g. usage telemetry moves from 02:15 to 02:00 UTC and survey scheduling from 00:00
+ * Europe/Berlin to 02:00 UTC. Every job still runs exactly once a day, and each is an idempotent,
+ * self-scoped sweep whose own logic decides what is due — the trigger only decides *when it looks*. A
+ * job that ever needs a distinct cadence should be declared with `kind: "every"`, which keeps its own
+ * trigger (subject to the same five-trigger budget).
  */
 
 interface CronJobMapping {
@@ -26,6 +33,9 @@ interface CronJobMapping {
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+
+/** The single trigger every `kind: "cron"` (once-a-day) registration hangs off. See the note above. */
+export const CLOUDFLARE_DAILY_CRON = "0 2 * * *";
 
 /** Converts an `everyMs` interval to the nearest Cloudflare cron (its floor is one minute). */
 const everyMsToCron = (everyMs: number): string => {
@@ -49,7 +59,7 @@ const everyMsToCron = (everyMs: number): string => {
 
 const toCronExpression = (registration: (typeof RECURRING_JOB_REGISTRATIONS)[number]): string =>
   registration.schedule.kind === "cron"
-    ? registration.schedule.cronPattern
+    ? CLOUDFLARE_DAILY_CRON
     : everyMsToCron(registration.schedule.everyMs);
 
 /**

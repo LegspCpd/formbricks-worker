@@ -41,18 +41,19 @@
   // here, so the schedule→cron mapping lives in lib/jobs/cf-schedules.ts and a unit test asserts this
   // array matches it — a drifting list would silently stop firing a job.
   //
+  // Four triggers, not one per job: a Workers account on the Free plan may hold five Cron Triggers in
+  // total (code 10072), so the four once-a-day sweeps share the last one. See the note in
+  // lib/jobs/cf-schedules.ts for what that does and does not change.
+  //
   // Note the two degradations Cloudflare forces, both inherent to cron (minute granularity, UTC only):
-  // the 5s authzed projection sweep clamps to once a minute, and the survey-scheduling sweep is
-  // declared at its UTC default rather than its Europe/Berlin wall clock.
+  // the 5s authzed projection sweep clamps to once a minute, and the daily sweeps are declared at UTC
+  // rather than at their Europe/Berlin wall clock.
   "triggers": {
     "crons": [
       "* * * * *",
       "*/3 * * * *",
       "0 */6 * * *",
-      "30 1 * * *",
-      "0 0 * * *",
-      "15 2 * * *",
-      "45 2 * * *"
+      "0 2 * * *"
     ]
   },
   "vars": {

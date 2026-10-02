@@ -38,4 +38,12 @@ describe("jobs Worker cron triggers stay in sync with the recurring registration
       ).toContain(cron);
     }
   });
+
+  // The limit that a deploy actually failed on: `Trigger configuration for "…" was only partially
+  // updated: This account has reached the Workers Free limit of 5 cron triggers per account …
+  // [code: 10072]`. Free-plan deploys are the target here, so the declared set has to stay inside it —
+  // and stay there on a Paid account too, where the same count is simply cheap.
+  test("the declared triggers fit the Workers Free plan's per-account limit", () => {
+    expect(CLOUDFLARE_CRON_TRIGGERS.length).toBeLessThanOrEqual(5);
+  });
 });
