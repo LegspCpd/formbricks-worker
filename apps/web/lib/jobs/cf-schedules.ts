@@ -1,132 +1,108 @@
-import "server-only";
-import { logger } from "@formbricks/logger";
-import {
-  RECURRING_JOB_REGISTRATIONS,
-  RECURRING_JOB_REGISTRATIONS_BY_KEY,
-} from "@/lib/jobs/recurring-registrations";
+import { type TGlobalScopeJobData, type TRecurringJobKey, recurringJobDescriptors } from "@formbricks/jobs";
+import { RECURRING_JOB_SCHEDULES_BY_KEY } from "@/lib/jobs/recurring-schedules";
 
 /**
- * Cloudflare Cron Triggers can only reference literal cron expressions declared in `wrangler*.jsonc`,
- * and they run in UTC. The app's recurring jobs are declared with engine-neutral schedules (an
- * `everyMs` interval or a cron pattern plus a time zone) in `lib/jobs/recurring-registrations.ts`, so
- * this module bridges the two: it derives one cron expression per schedule *shape* and, at fire time,
- * maps the `controller.cron` string back to the job(s) to run.
+ * The Cloudflare engine's scheduling, derived from the app's recurring-job declarations.
  *
- * Why the daily jobs share one trigger: a Workers account on the Free plan may hold **five** Cron
- * Triggers in total (`code: 10072`; Workers Paid raises it to 1,000). The four `kind: "cron"`
- * registrations are all once-a-day sweeps, so declaring them separately would spend four of those five
- * slots on the same cadence and leave no room for anything else — including a trigger another Worker on
- * the account might need. They therefore share `CLOUDFLARE_DAILY_CRON`.
+ * Cloudflare Cron Triggers are not usable here: an account on the Workers Free plan may hold five in
+ * total (`code: 10072`) and this one is spoken for by other Workers, so a deploy that declares any cron
+ * is rejected. Durable Object alarms have no such budget — a Worker may have unlimited Durable Objects,
+ * each of which can hold one alarm — and the documentation recommends exactly this shape for recurring
+ * work: keep the schedule in storage, have `alarm()` process what is due and then reschedule itself.
+ * `cloudflare/jobs-scheduler.ts` is that Durable Object; this module is the table it reads.
  *
- * What that costs: each daily sweep runs at the shared UTC hour rather than its declared wall-clock
- * time, so e.g. usage telemetry moves from 02:15 to 02:00 UTC and survey scheduling from 00:00
- * Europe/Berlin to 02:00 UTC. Every job still runs exactly once a day, and each is an idempotent,
- * self-scoped sweep whose own logic decides what is due — the trigger only decides *when it looks*. A
- * job that ever needs a distinct cadence should be declared with `kind: "every"`, which keeps its own
- * trigger (subject to the same five-trigger budget).
+ * Nothing here touches the job-handler graph. The Durable Object wakes on every tick and must not load
+ * tens of megabytes of handlers to find out what is due, so the schedules come from
+ * `recurring-schedules.ts` (the single source of truth, shared with the BullMQ registrations) and the
+ * payload comes from the fact that every recurring job is a global-scope sweep. A test holds both of
+ * those to their declarations.
  */
 
-interface CronJobMapping {
-  cron: string;
-  jobNames: string[];
-}
+/**
+ * The floor for an interval schedule. Cloudflare's per-minute granularity is not the reason — an alarm
+ * can fire at any millisecond — the queues budget is: a 5s sweep would enqueue 17,280 messages a day and
+ * spend over a million queue operations a month on its own, which is the whole Workers Free allowance
+ * (and would bill on Paid). At a minute it is 43,200 messages a month. This mirrors the clamp the cron
+ * version of this file applied, for a different reason.
+ */
+export const CLOUDFLARE_MIN_INTERVAL_MS = 60_000;
+
+/**
+ * The UTC hour the once-a-day sweeps share. They used to be four separate declarations at their own
+ * wall-clock times; sharing one alarm keeps the Durable Object's wake-ups to one a day instead of four
+ * and removes any need to match a fire time back to a job. Each is an idempotent sweep whose own logic
+ * decides what is due, so only the instant moves — every job still runs exactly once a day.
+ */
+export const CLOUDFLARE_DAILY_HOUR_UTC = 2;
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
-/** The single trigger every `kind: "cron"` (once-a-day) registration hangs off. See the note above. */
-export const CLOUDFLARE_DAILY_CRON = "0 2 * * *";
+/** A schedule as Cloudflare can express it: a repeating interval, or once a day at a fixed UTC hour. */
+export type CloudflareJobSchedule = { everyMs: number; kind: "interval" } | { kind: "daily" };
 
-/** Converts an `everyMs` interval to the nearest Cloudflare cron (its floor is one minute). */
-const everyMsToCron = (everyMs: number): string => {
-  if (everyMs < MINUTE_MS) {
-    // Cloudflare cannot fire faster than once a minute; document the degradation rather than dropping
-    // the job entirely, so a fast poller still makes progress.
-    return "* * * * *";
-  }
+export interface CloudflareScheduledJob {
+  /** The payload every recurring job's schema accepts — they are all global-scope sweeps. */
+  data: TGlobalScopeJobData;
+  jobName: string;
+  schedule: CloudflareJobSchedule;
+}
 
-  if (everyMs < HOUR_MS && everyMs % MINUTE_MS === 0) {
-    return `*/${(everyMs / MINUTE_MS).toString()} * * * *`;
-  }
+const toCloudflareSchedule = (
+  schedule: (typeof RECURRING_JOB_SCHEDULES_BY_KEY)[TRecurringJobKey]
+): CloudflareJobSchedule =>
+  schedule.kind === "every"
+    ? { everyMs: schedule.everyMs, kind: "interval" }
+    : // Every `cron`-kind registration is a once-a-day sweep, so the pattern and its time zone reduce to
+      // "daily" here. What the pattern and zone still own is the *app's* notion of which survey is due;
+      // the alarm only decides when to look.
+      { kind: "daily" };
 
-  if (everyMs % HOUR_MS === 0) {
-    const hours = everyMs / HOUR_MS;
-    return hours >= 24 ? `0 */${(hours / 24).toString()} * * *` : `0 */${hours.toString()} * * *`;
-  }
+export const CLOUDFLARE_SCHEDULED_JOBS: CloudflareScheduledJob[] = (
+  Object.keys(RECURRING_JOB_SCHEDULES_BY_KEY) as TRecurringJobKey[]
+).map((key) => ({
+  data: { scope: "global" },
+  jobName: recurringJobDescriptors[key].name,
+  schedule: toCloudflareSchedule(RECURRING_JOB_SCHEDULES_BY_KEY[key]),
+}));
 
-  return "* * * * *";
-};
+const intervalFloor = (everyMs: number): number => Math.max(everyMs, CLOUDFLARE_MIN_INTERVAL_MS);
 
-const toCronExpression = (registration: (typeof RECURRING_JOB_REGISTRATIONS)[number]): string =>
-  registration.schedule.kind === "cron"
-    ? CLOUDFLARE_DAILY_CRON
-    : everyMsToCron(registration.schedule.everyMs);
-
-/**
- * The cron → jobs map the Worker's `scheduled()` handler dispatches from. Built once at module load
- * from the same registrations that drive registration, so a new recurring job is covered here without
- * a second declaration.
- */
-export const CLOUDFLARE_CRON_JOBS: CronJobMapping[] = (() => {
-  const byCron = new Map<string, string[]>();
-
-  for (const registration of RECURRING_JOB_REGISTRATIONS) {
-    const cron = toCronExpression(registration);
-    const existing = byCron.get(cron) ?? [];
-    existing.push(registration.job.name);
-    byCron.set(cron, existing);
-  }
-
-  return [...byCron.entries()].map(([cron, jobNames]) => ({ cron, jobNames }));
-})();
-
-/** The literal cron expressions to declare under `triggers.crons` in `wrangler*.jsonc`. */
-export const CLOUDFLARE_CRON_TRIGGERS: string[] = CLOUDFLARE_CRON_JOBS.map((mapping) => mapping.cron);
+/** The UTC instant of `CLOUDFLARE_DAILY_HOUR_UTC` on the UTC day containing `reference`. */
+const dailyInstantOn = (reference: number): number =>
+  Math.floor(reference / DAY_MS) * DAY_MS + CLOUDFLARE_DAILY_HOUR_UTC * HOUR_MS;
 
 /**
- * Runs every recurring job scheduled for the cron that just fired. The handler and payload come from
- * the registration the job name maps to, so the dispatcher carries no per-job logic of its own.
+ * The next time a job should run, given when it last ran.
+ *
+ * Both branches skip missed ticks rather than replaying them: a Worker that was down for a day must not
+ * come back and fire a per-minute sweep 1,440 times. The catch-up therefore jumps straight to the first
+ * boundary after `now`.
  */
-export const handleCloudflareScheduled = async (cron: string): Promise<void> => {
-  const mapping = CLOUDFLARE_CRON_JOBS.find((entry) => entry.cron === cron);
-
-  if (!mapping) {
-    logger.warn({ cron }, "No recurring job is registered for this Cloudflare cron trigger");
-    return;
+export const nextRunAtAfter = (schedule: CloudflareJobSchedule, lastRunAt: number, now: number): number => {
+  if (schedule.kind === "daily") {
+    const next = dailyInstantOn(lastRunAt);
+    return next <= now ? dailyInstantOn(now + DAY_MS) : next;
   }
 
-  const registrationsByName = new Map(
-    RECURRING_JOB_REGISTRATIONS.map((registration) => [registration.job.name, registration])
-  );
+  const step = intervalFloor(schedule.everyMs);
+  const next = lastRunAt + step;
 
-  await Promise.all(
-    mapping.jobNames.map(async (jobName) => {
-      const registration = registrationsByName.get(jobName);
+  if (next > now) {
+    return next;
+  }
 
-      if (!registration) {
-        logger.warn({ jobName }, "Cloudflare cron references an unknown recurring job");
-        return;
-      }
-
-      try {
-        await registration.handler(
-          { scope: "global" },
-          {
-            attempt: 1,
-            jobId: `cron:${cron}:${jobName}:${Date.now().toString()}`,
-            jobName,
-            maxAttempts: 1,
-            queueName: "cloudflare-cron",
-          }
-        );
-      } catch (error) {
-        // One job failing must not stop its cron-mates: Cloudflare does not retry cron invocations, so
-        // the job's own idempotency (a global sweep) is what covers the missed tick.
-        logger.error({ err: error, cron, jobName }, "Cloudflare scheduled job failed");
-      }
-    })
-  );
+  // The smallest `lastRunAt + k * step` that is strictly after `now`. `Math.floor(...) + 1` rather than
+  // `Math.ceil(...)`: a `next` that landed exactly on `now` would give a zero multiple and hand back
+  // `now`, which the Durable Object would treat as immediately due and re-fire — a hot loop.
+  return next + (Math.floor((now - next) / step) + 1) * step;
 };
 
-// Re-exported so the Worker entry can key its debug logging off the same source of truth.
-export { RECURRING_JOB_REGISTRATIONS_BY_KEY };
+/**
+ * When a job first runs after it is scheduled. Seeding at `lastRunAt = now` puts an interval one step
+ * out — so enabling the scheduler does not fire every sweep at once — and a daily job at the next
+ * `CLOUDFLARE_DAILY_HOUR_UTC`, which is the earliest instant that is not already in the past.
+ */
+export const initialRunAt = (schedule: CloudflareJobSchedule, now: number): number =>
+  nextRunAtAfter(schedule, now, now);

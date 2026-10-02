@@ -13,27 +13,14 @@ import {
 } from "@formbricks/jobs";
 import { processAuthzedProjectionDeliveryJob } from "@/lib/authzed/outbox-processor";
 import { processAuthzedScheduledReconciliationJob } from "@/lib/authzed/scheduled-reconciliation";
-import { USAGE_TELEMETRY_DAILY_CRON_PATTERN, USAGE_TELEMETRY_TIME_ZONE } from "@/lib/telemetry/constants";
+import { RECURRING_JOB_SCHEDULES_BY_KEY } from "@/lib/jobs/recurring-schedules";
 import { processUsageTelemetryJob } from "@/lib/telemetry/process-usage-telemetry-job";
-import {
-  WORKFLOWS_USAGE_SNAPSHOT_DAILY_CRON_PATTERN,
-  WORKFLOWS_USAGE_SNAPSHOT_TIME_ZONE,
-} from "@/modules/ee/workflows/lib/analytics/constants";
 import { processWorkflowsUsageSnapshotJob } from "@/modules/ee/workflows/lib/analytics/process-workflows-usage-snapshot-job";
 import { processWorkflowRunJob } from "@/modules/ee/workflows/lib/runner/process-workflow-run-job";
 import { processWorkflowRunReconcileJob } from "@/modules/ee/workflows/lib/runner/process-workflow-run-reconcile-job";
-import { WORKFLOW_RUN_RECONCILE_INTERVAL_MS } from "@/modules/ee/workflows/lib/runner/reconcile-constants";
 import { processResponsePipelineJob } from "@/modules/response-pipeline/lib/process-response-pipeline-job";
 import { processWebhookDeliveryJob } from "@/modules/response-pipeline/lib/process-webhook-delivery-job";
-import {
-  SURVEY_ARCHIVE_PURGE_DAILY_CRON_PATTERN,
-  SURVEY_ARCHIVE_PURGE_TIME_ZONE,
-} from "@/modules/survey/archive/lib/constants";
 import { processSurveyArchivePurgeJob } from "@/modules/survey/archive/lib/process-survey-archive-purge-job";
-import {
-  SURVEY_SCHEDULING_DAILY_CRON_PATTERN,
-  SURVEY_SCHEDULING_TIME_ZONE,
-} from "@/modules/survey/scheduling/lib/constants";
 import { processSurveySchedulingJob } from "@/modules/survey/scheduling/lib/process-survey-scheduling-job";
 
 /**
@@ -54,95 +41,42 @@ interface RecurringJobRegistration {
 }
 
 /**
- * The app's half of each recurring job: when it runs (env-derived timing) and what runs. The job name,
- * schedule identity and payload live with the declaration in `@formbricks/jobs`, so neither the name nor
- * the identity is ever spelled out here — which is what keeps the schedule and its handler in step.
+ * What runs for each recurring job. Keyed by `TRecurringJobKey` deliberately: declaring a new job in
+ * `recurringJobDescriptors` without adding it here is a build error rather than a job that quietly never
+ * runs — its handler would never be registered.
  *
- * Keyed by `TRecurringJobKey` deliberately: declaring a new job in `recurringJobDescriptors` without
- * adding it here is then a build error rather than a job that quietly never runs — its schedule would
- * never be upserted and its handler never registered.
- *
- * The key only forces an entry to *exist*; pairing a key with another job's handle still type-checks,
- * and would be worse than a swap (both entries upsert the same scheduler, so one job's schedule is never
- * registered at all). A test pins the pairing instead.
+ * The job name, schedule identity and payload live with the declaration in `@formbricks/jobs`, and the
+ * timing lives in `recurring-schedules.ts`, so none of them is spelled out here — which is what keeps a
+ * schedule and its handler in step.
  */
-export const RECURRING_JOB_REGISTRATIONS_BY_KEY: Record<TRecurringJobKey, RecurringJobRegistration> = {
-  authzedProjectionDelivery: {
-    handler: processAuthzedProjectionDeliveryJob,
-    job: recurringJobs.authzedProjectionDelivery,
-    schedule: {
-      everyMs: 5_000,
-      kind: "every",
-    },
-  },
-  authzedReconciliationAudit: {
-    handler: processAuthzedScheduledReconciliationJob,
-    job: recurringJobs.authzedReconciliationAudit,
-    schedule: {
-      everyMs: 6 * 60 * 60 * 1_000,
-      kind: "every",
-    },
-  },
-  surveyArchivePurge: {
-    handler: processSurveyArchivePurgeJob,
-    job: recurringJobs.surveyArchivePurge,
-    schedule: {
-      cronPattern: SURVEY_ARCHIVE_PURGE_DAILY_CRON_PATTERN,
-      kind: "cron",
-      timeZone: SURVEY_ARCHIVE_PURGE_TIME_ZONE,
-    },
-  },
-  surveyScheduling: {
-    handler: processSurveySchedulingJob,
-    job: recurringJobs.surveyScheduling,
-    schedule: {
-      cronPattern: SURVEY_SCHEDULING_DAILY_CRON_PATTERN,
-      kind: "cron",
-      timeZone: SURVEY_SCHEDULING_TIME_ZONE,
-    },
-  },
-  usageTelemetry: {
-    handler: processUsageTelemetryJob,
-    job: recurringJobs.usageTelemetry,
-    schedule: {
-      cronPattern: USAGE_TELEMETRY_DAILY_CRON_PATTERN,
-      // The daily pattern keeps a long-running instance reporting. What covers an instance that is
-      // *not* up at 02:15 UTC — the case the GTM need calls out, an instance identified and then
-      // barely run (ENG-2107) — is that a missed tick is not skipped: the upsert re-adds the overdue
-      // iteration with its original timestamp, so the delay clamps to 0 and it runs at the next boot.
-      //
-      // `immediately` fires **once per scheduler**, not once per boot. BullMQ's repeat strategy does
-      // return "now" when it is set, but `addJobScheduler-11.lua` discards that: when the upsert
-      // removed a pending job for this scheduler it sets `nextMillis = prevMillis` ("the job has been
-      // removed and we want to replace it, so lets use the same millis"), which is every boot after
-      // the first. So its real effect is the first-ever registration — which is exactly where it is
-      // wanted, since this scheduler is new: every instance upgrading past this change registers it
-      // for the first time and reports on that boot rather than waiting for the first 02:15 slot.
-      // It is also cheap: `sendTelemetryEvents` is gated on a shared 24h timestamp in Redis, so that
-      // run is a single Redis read whenever an update already went out.
-      immediately: true,
-      kind: "cron",
-      timeZone: USAGE_TELEMETRY_TIME_ZONE,
-    },
-  },
-  workflowRunReconcile: {
-    handler: processWorkflowRunReconcileJob,
-    job: recurringJobs.workflowRunReconcile,
-    schedule: {
-      everyMs: WORKFLOW_RUN_RECONCILE_INTERVAL_MS,
-      kind: "every",
-    },
-  },
-  workflowsUsageSnapshot: {
-    handler: processWorkflowsUsageSnapshotJob,
-    job: recurringJobs.workflowsUsageSnapshot,
-    schedule: {
-      cronPattern: WORKFLOWS_USAGE_SNAPSHOT_DAILY_CRON_PATTERN,
-      kind: "cron",
-      timeZone: WORKFLOWS_USAGE_SNAPSHOT_TIME_ZONE,
-    },
-  },
+const RECURRING_JOB_HANDLERS_BY_KEY: Record<TRecurringJobKey, JobHandler<TGlobalScopeJobData>> = {
+  authzedProjectionDelivery: processAuthzedProjectionDeliveryJob,
+  authzedReconciliationAudit: processAuthzedScheduledReconciliationJob,
+  surveyArchivePurge: processSurveyArchivePurgeJob,
+  surveyScheduling: processSurveySchedulingJob,
+  usageTelemetry: processUsageTelemetryJob,
+  workflowRunReconcile: processWorkflowRunReconcileJob,
+  workflowsUsageSnapshot: processWorkflowsUsageSnapshotJob,
 };
+
+/**
+ * Pairs each handler with its schedule and job handle, all three read from the same key. That pairing
+ * used to be written out per entry, where a key could be given another job's handle and still
+ * type-check — worse than a swap, since both entries then upsert the same scheduler and one job's
+ * schedule is never registered at all. Deriving by key removes the failure mode instead of testing for
+ * it.
+ */
+export const RECURRING_JOB_REGISTRATIONS_BY_KEY: Record<TRecurringJobKey, RecurringJobRegistration> =
+  Object.fromEntries(
+    (Object.keys(RECURRING_JOB_SCHEDULES_BY_KEY) as TRecurringJobKey[]).map((key) => [
+      key,
+      {
+        handler: RECURRING_JOB_HANDLERS_BY_KEY[key],
+        job: recurringJobs[key],
+        schedule: RECURRING_JOB_SCHEDULES_BY_KEY[key],
+      },
+    ])
+  ) as Record<TRecurringJobKey, RecurringJobRegistration>;
 
 export const RECURRING_JOB_REGISTRATIONS: readonly RecurringJobRegistration[] = Object.values(
   RECURRING_JOB_REGISTRATIONS_BY_KEY

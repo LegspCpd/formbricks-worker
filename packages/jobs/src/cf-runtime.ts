@@ -8,9 +8,9 @@ import type { TRecurringBackgroundJobSchedule } from "@/src/schedules";
  * drop-in for `@formbricks/jobs` when the app aliases the package for a Worker build.
  *
  * On Cloudflare the recurring schedule is *not* registered with a queue (there is no Redis-backed
- * scheduler); it is driven by Cloudflare Cron Triggers declared in `wrangler.jsonc` and dispatched
- * from the Worker's `scheduled()` handler. These handles therefore satisfy the app's registration
- * code path without doing any queue work — the schedule lives in Cloudflare config, not in a queue.
+ * scheduler); a Durable Object holds it and wakes itself with its own alarms, then enqueues the job that
+ * came due. These handles therefore satisfy the app's registration code path without doing any queue
+ * work — the schedule lives in that object's storage, not in a queue.
  */
 
 export interface RecurringJobHandle {
@@ -30,13 +30,13 @@ const toCloudflareRecurringJobHandle = (key: TRecurringJobKey): RecurringJobHand
     scope: descriptor.scope,
     remove: () => Promise.resolve(false),
     upsert: (schedule) => {
-      // Deliberately a no-op, not a silent failure: on the Cloudflare engine the schedule is declared
-      // in `wrangler.jsonc` `triggers.crons` and dispatched by the Worker's `scheduled()` handler, so
-      // registering it here would be the wrong place. Logged at debug so a misconfiguration (calling
-      // this on Cloudflare at all) is visible without being noisy on every boot.
+      // Deliberately a no-op, not a silent failure: on the Cloudflare engine the schedule is held by the
+      // jobs Worker's Durable Object and woken by its alarms, so registering it here would be the wrong
+      // place. Logged at debug so a misconfiguration (calling this on Cloudflare at all) is visible
+      // without being noisy on every boot.
       logger.debug(
         { jobName: descriptor.name, scheduleId: descriptor.scheduleId, schedule },
-        "Cloudflare recurring schedule is declared in wrangler.jsonc; upsert is a no-op"
+        "Cloudflare recurring schedule is held by the jobs Worker's Durable Object; upsert is a no-op"
       );
 
       return Promise.resolve({ name: descriptor.name, scheduleId: descriptor.scheduleId });

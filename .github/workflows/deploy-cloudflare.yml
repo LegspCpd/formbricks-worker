@@ -629,6 +629,34 @@ jobs:
               --config wrangler.jobs.jsonc
           done
 
+      # Starts the recurring-job schedule, and has to run after the secrets above: the Worker holds the
+      # schedule in a Durable Object that wakes itself, but nothing sets the first alarm. `ensure()` is
+      # idempotent and also runs on every queue batch, so the first job that flows through would start it
+      # too — this only removes the wait for that, which matters for the daily sweeps (survey scheduling,
+      # archive purges) on an instance whose first traffic may be a while away.
+      #
+      # Non-fatal: if the poke fails, the schedule still starts with the first job, and a successful
+      # deploy must not be reported as failed because of it.
+      - name: Start the Jobs Worker's schedule
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+
+          log="${RUNNER_TEMP}/deploy-cf-jobs.log"
+          url="$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' "${log}" 2>/dev/null | tail -n 1 || true)"
+
+          if [[ -z "${url}" ]]; then
+            echo "::warning::No workers.dev URL in the jobs Worker's deploy output; the schedule will start with the first job that flows through."
+            exit 0
+          fi
+
+          echo "Requesting ${url} to start the schedule"
+          if curl --silent --show-error --fail --max-time 60 "${url}" >/dev/null; then
+            echo "Schedule started."
+          else
+            echo "::warning::${url} did not answer; the schedule will start with the first job that flows through."
+          fi
+
       # `opennextjs-cloudflare deploy` rather than `wrangler deploy`: wrangler detects an OpenNext
       # project and shells out to exactly this command anyway, through one extra `npx` process it
       # announces twice. It also populates the remote R2 incremental cache and injects the deployment

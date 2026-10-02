@@ -27,8 +27,12 @@ export { processTestLogJob } from "./processors/test-log";
 export { processWebhookDeliveryJob } from "./processors/webhook-delivery";
 export { processWorkflowRunJob } from "./processors/workflow-run";
 export { startJobsRuntime } from "./runtime";
+// The job *declarations* (name, schedule identity, payload schema) are engine-neutral, so they are
+// exported from both entries: the Cloudflare surface uses them to drive its own scheduler, and a
+// consumer of this one should not have to reach for a subpath to read them.
+export { recurringJobDefinitions, recurringJobDescriptors } from "./recurring";
 export type { JobsQueueHandle, RecurringJobHandle } from "./queue";
-export type { TRecurringJobKey } from "./recurring";
+export type { RecurringJobDescriptor, TRecurringJobKey } from "./recurring";
 export type { JobsRuntimeHandle, JobsRuntimeOptions } from "./runtime";
 export type { TRecurringBackgroundJobSchedule } from "./schedules";
 export {

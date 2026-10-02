@@ -37,24 +37,27 @@
       }
     ]
   },
-  // Derived from lib/jobs/recurring-registrations.ts. Cloudflare only accepts literal cron strings
-  // here, so the schedule→cron mapping lives in lib/jobs/cf-schedules.ts and a unit test asserts this
-  // array matches it — a drifting list would silently stop firing a job.
+  // No `triggers.crons` here, and that is the point: a Workers Free account may hold five Cron Triggers
+  // in total, per *account*, and this account's five are held by other Workers — declaring any cron made
+  // every deploy fail with `code: 10072`. The recurring jobs are driven by the Durable Object below
+  // instead, whose alarms have no such budget. See lib/jobs/cf-schedules.ts for the cadences.
   //
-  // Four triggers, not one per job: a Workers account on the Free plan may hold five Cron Triggers in
-  // total (code 10072), so the four once-a-day sweeps share the last one. See the note in
-  // lib/jobs/cf-schedules.ts for what that does and does not change.
-  //
-  // Note the two degradations Cloudflare forces, both inherent to cron (minute granularity, UTC only):
-  // the 5s authzed projection sweep clamps to once a minute, and the daily sweeps are declared at UTC
-  // rather than at their Europe/Berlin wall clock.
-  "triggers": {
-    "crons": [
-      "* * * * *",
-      "*/3 * * * *",
-      "0 */6 * * *",
-      "0 2 * * *"
+  // `exports` is the declarative way to declare a Durable Object class (it replaces the legacy
+  // `migrations` array, and the two are mutually exclusive). New namespaces created this way always use
+  // the SQLite storage backend, which is the only one available on the Workers Free plan.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "JOBS_SCHEDULER",
+        "class_name": "JobsScheduler"
+      }
     ]
+  },
+  "exports": {
+    "JobsScheduler": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
   },
   "vars": {
     "NODE_ENV": "production",
