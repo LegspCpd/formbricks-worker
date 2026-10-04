@@ -76,7 +76,7 @@ export async function streamV3SurveyGeneration({
   }
 
   // Chained to req.signal (Next aborts that on client disconnect) but abortable by cancel() too,
-  // which can fire first and would otherwise leave the provider running to its 45s timeout.
+  // which can fire first and would otherwise leave the provider running to its full timeout.
   const generationAbort = new AbortController();
   const abortGeneration = () => generationAbort.abort();
   // An abort that already happened is never replayed to a listener added afterwards, so a client

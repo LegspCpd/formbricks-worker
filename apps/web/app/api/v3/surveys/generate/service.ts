@@ -32,7 +32,7 @@ export type TV3SurveyGenerateResult = {
   validation: TV3SurveyGenerateValidation;
 };
 
-const V3_SURVEY_GENERATION_TIMEOUT_MS = 45_000;
+const V3_SURVEY_GENERATION_TIMEOUT_MS = 90_000;
 
 // Gemini 2.5 Flash spends a large share of the output budget on reasoning tokens before emitting
 // the survey JSON; 8192 leaves headroom for both so long prompts don't stop with finishReason

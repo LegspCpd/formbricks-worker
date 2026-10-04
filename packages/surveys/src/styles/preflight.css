@@ -10,7 +10,8 @@
   border-color: theme("borderColor.DEFAULT", currentColor);
   /* 2 */
 
-  font-family: Inter, Helvetica, Arial, sans-serif;
+  font-family: Inter, Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", sans-serif;
   font-size: 1em;
 }
 

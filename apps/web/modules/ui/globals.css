@@ -11,6 +11,15 @@
 @source inline("{,sm:}max-w-{xs,sm,md,lg,xl,2xl,3xl,4xl,5xl,6xl,7xl,full}");
 
 @theme {
+  /* Typography. Inter carries the Latin glyphs (loaded via next/font and exposed as --font-inter),
+     then an explicit CJK stack follows so Chinese resolves to a matching sans face (PingFang /
+     Microsoft YaHei / Noto Sans SC) instead of the OS default, which on Windows can be the serif
+     SimSun and clashes with the Latin text. Emoji fonts stay last. */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", sans-serif, "Apple Color Emoji",
+    "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+
   /* Brand */
   --color-brand: #00e6ca;
   --color-brand-light: #00e6ca;

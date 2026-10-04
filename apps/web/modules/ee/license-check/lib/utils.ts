@@ -125,6 +125,12 @@ export const getIsTwoFactorAuthEnabled = async (): Promise<boolean> => {
 };
 
 export const getIsSsoEnabled = async (): Promise<boolean> => {
+  // Self-hosted deployments bring their own identity provider and run the SSO flow themselves, so SSO
+  // is not license-gated here (mirrors the AI Smart Tools release). Cloud still requires the license
+  // feature flag.
+  if (!IS_FORMBRICKS_CLOUD) {
+    return true;
+  }
   return getSpecificFeatureFlag("sso");
 };
 
@@ -133,6 +139,16 @@ export const getIsQuotasEnabled = async (organizationId: string): Promise<boolea
 };
 
 export const getIsAISmartToolsEnabled = async (organizationId: string): Promise<boolean> => {
+  // Self-hosted deployments bring their own model — the operator picks the provider and pays it
+  // directly — so AI Smart Tools are not license-gated here. Enabling the feature is still gated by
+  // the per-organization toggle (`organization.isAISmartToolsEnabled`) and by the instance-level
+  // provider configuration, both enforced downstream in `lib/ai/service.ts`; a license key is
+  // likewise honoured if one is present. Formbricks Cloud is unchanged: it still requires the paid
+  // `aiSmartTools` entitlement plus an active license.
+  if (!IS_FORMBRICKS_CLOUD) {
+    return true;
+  }
+
   return getCustomPlanFeaturePermission(organizationId, "aiSmartTools");
 };
 

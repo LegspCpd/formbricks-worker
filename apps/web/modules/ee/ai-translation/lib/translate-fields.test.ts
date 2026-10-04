@@ -90,7 +90,7 @@ describe("translateFields", () => {
     expect(mockGenerateOrganizationAIObject.mock.calls[0][0]).toMatchObject({
       temperature: 0,
       maxOutputTokens: 1024,
-      timeout: 45000,
+      timeout: 90000,
     });
   });
 

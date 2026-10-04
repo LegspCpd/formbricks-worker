@@ -48,6 +48,7 @@ export const getSignedUrlForUpload = async (
       signedUrl: string;
       presignedFields: Record<string, string>;
       fileUrl: string;
+      uploadMethod?: "PUT" | "POST";
     },
     StorageError
   >
@@ -80,6 +81,7 @@ export const getSignedUrlForUpload = async (
     return ok({
       signedUrl: signedUrlResult.data.signedUrl,
       presignedFields: signedUrlResult.data.presignedFields,
+      uploadMethod: signedUrlResult.data.uploadMethod,
       fileUrl: `/storage/${workspaceId}/${accessType}/${[
         ...encodedFilePathSegments,
         encodeURIComponent(updatedFileName),

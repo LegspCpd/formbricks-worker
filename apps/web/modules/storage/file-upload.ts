@@ -104,25 +104,19 @@ export const handleFileUpload = async (
     const json = await response.json();
     const { data } = json;
 
-    const { signedUrl, fileUrl, presignedFields } = data as {
+    const { signedUrl, fileUrl, presignedFields, uploadMethod } = data as {
       signedUrl: string;
       presignedFields: Record<string, string>;
       fileUrl: string;
+      uploadMethod?: "PUT" | "POST";
     };
 
-    const fileBase64 = (await toBase64(file)) as string;
-    const formDataForS3 = new FormData();
-
-    Object.entries(presignedFields).forEach(([key, value]) => {
-      formDataForS3.append(key, value);
-    });
-
+    let fileBlob: Blob;
     try {
+      const fileBase64 = (await toBase64(file)) as string;
       const binaryString = atob(fileBase64.split(",")[1]);
       const uint8Array = Uint8Array.from([...binaryString].map((char) => char.charCodeAt(0)));
-      const blob = new Blob([uint8Array], { type: file.type });
-
-      formDataForS3.append("file", blob);
+      fileBlob = new Blob([uint8Array], { type: file.type });
     } catch (err) {
       console.error("Error in uploading file: ", err);
       return {
@@ -134,10 +128,27 @@ export const handleFileUpload = async (
     let uploadResponse: Response;
 
     try {
-      uploadResponse = await fetch(signedUrl, {
-        method: "POST",
-        body: formDataForS3,
-      });
+      if (uploadMethod === "PUT") {
+        // Cloudflare R2 (and any S3 API without POST Object support) accepts a presigned PUT: the raw
+        // file is the request body and the signed Content-Type must match.
+        uploadResponse = await fetch(signedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type },
+          body: fileBlob,
+        });
+      } else {
+        const formDataForS3 = new FormData();
+
+        Object.entries(presignedFields).forEach(([key, value]) => {
+          formDataForS3.append(key, value);
+        });
+        formDataForS3.append("file", fileBlob);
+
+        uploadResponse = await fetch(signedUrl, {
+          method: "POST",
+          body: formDataForS3,
+        });
+      }
     } catch (err) {
       console.error("Error in uploading file: ", err);
       return {

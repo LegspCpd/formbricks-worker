@@ -166,28 +166,22 @@ export class ApiClient {
 
     const { data } = json;
 
-    const { signedUrl, fileUrl, presignedFields } = data as {
+    const { signedUrl, fileUrl, presignedFields, uploadMethod } = data as {
       signedUrl: string;
       presignedFields: Record<string, string>;
       fileUrl: string;
+      uploadMethod?: "PUT" | "POST";
     };
 
-    if (!signedUrl || !presignedFields || !fileUrl) {
+    if (!signedUrl || !fileUrl) {
       throw new Error("Invalid response");
     }
 
-    const formData = new FormData();
-
-    Object.entries(presignedFields).forEach(([key, value]) => {
-      formData.append(key, value);
-    });
-
+    let blob: Blob;
     try {
       const binaryString = atob(file.base64.split(",")[1]);
       const uint8Array = Uint8Array.from([...binaryString].map((char) => char.charCodeAt(0)));
-      const blob = new Blob([uint8Array], { type: file.type });
-
-      formData.append("file", blob);
+      blob = new Blob([uint8Array], { type: file.type });
     } catch (err) {
       console.error(err);
       throw new Error("Error uploading file");
@@ -196,10 +190,25 @@ export class ApiClient {
     let uploadResponse: Response;
 
     try {
-      uploadResponse = await fetch(signedUrl, {
-        method: "POST",
-        body: formData,
-      });
+      if (uploadMethod === "PUT") {
+        uploadResponse = await fetch(signedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type },
+          body: blob,
+        });
+      } else {
+        const formData = new FormData();
+
+        Object.entries(presignedFields).forEach(([key, value]) => {
+          formData.append(key, value);
+        });
+        formData.append("file", blob);
+
+        uploadResponse = await fetch(signedUrl, {
+          method: "POST",
+          body: formData,
+        });
+      }
     } catch (err) {
       console.error("Error uploading file", err);
       const error = new Error("File upload service is unavailable");

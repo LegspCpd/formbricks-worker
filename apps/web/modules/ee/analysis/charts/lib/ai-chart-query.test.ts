@@ -70,7 +70,7 @@ describe("generateAIChartQuery", () => {
         // Counts reasoning tokens too: at 1024 a thinking model spent the whole budget before
         // writing a field. Dropping this back below a few thousand reintroduces that failure.
         maxOutputTokens: 8192,
-        timeout: 30000,
+        timeout: 90000,
       })
     );
   });

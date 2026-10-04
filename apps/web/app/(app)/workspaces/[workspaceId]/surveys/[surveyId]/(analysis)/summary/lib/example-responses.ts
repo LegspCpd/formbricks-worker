@@ -20,7 +20,7 @@ export const EXAMPLE_AI_GENERATED_TAG_NAME = "AI-generated example response";
 // abandonment. The remaining ~80% are finished.
 const DROP_OFF_RATE = 0.2;
 const RESPONSE_TIME_SPREAD_DAYS = 10;
-const OPEN_TEXT_AI_TIMEOUT_MS = 45_000;
+const OPEN_TEXT_AI_TIMEOUT_MS = 90_000;
 const OPEN_TEXT_AI_MAX_OUTPUT_TOKENS = 4096;
 const OPEN_TEXT_AI_MAX_REQUESTED_ANSWERS_PER_CHUNK = 20;
 

@@ -2,10 +2,10 @@ import "server-only";
 import { performance } from "node:perf_hooks";
 import { getAuthorizationSurface } from "./context";
 import type { TAuthorizationAction, TAuthorizationActor, TAuthorizationResourceForAction } from "./contract";
+import { dbEvaluator } from "./db-evaluator";
 import type { AuthorizationEvaluator } from "./evaluator";
 import { recordAuthorizationDecision } from "./metrics";
 import { normalizeAuthorizationOperationalError } from "./operational-error";
-import { spicedbEvaluator } from "./spicedb-evaluator";
 
 export const authorizationCoordinator: AuthorizationEvaluator = {
   async can<TAction extends TAuthorizationAction>(
@@ -22,7 +22,7 @@ export const authorizationCoordinator: AuthorizationEvaluator = {
     } as const;
 
     try {
-      const allowed = await spicedbEvaluator.can(actor, action, resource);
+      const allowed = await dbEvaluator.can(actor, action, resource);
       recordAuthorizationDecision({
         ...metric,
         durationMs: performance.now() - startedAt,

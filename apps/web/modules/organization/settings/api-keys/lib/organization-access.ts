@@ -7,7 +7,7 @@ import { can } from "@/lib/authorization";
  * Whether `userId` clears the organization's user-management floor.
  *
  * `organization.manage_access` is `USER_MANAGEMENT_MINIMUM_ROLE` expressed in the central
- * authorization vocabulary: `lib/authorization/spicedb-evaluator.ts` maps the floor onto the schema
+ * authorization vocabulary: `lib/authorization/db-evaluator.ts` maps the floor onto the policy
  * (`owner` → write, `manager` → manage_access, `disabled` → deny), and
  * `lib/authorization/manage-access.integration.test.ts` pins it to `getUserManagementAccess` against
  * real rows. Asking it through one helper keeps the settings page and the mint action on the same

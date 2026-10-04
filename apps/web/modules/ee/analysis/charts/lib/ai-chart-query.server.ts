@@ -19,7 +19,7 @@ import { prepareQueryForChartType } from "./big-number";
 
 const CUBE_NAME = "FeedbackRecords";
 const DEFAULT_MEASURE = `${CUBE_NAME}.count`;
-const AI_CHART_GENERATION_TIMEOUT_MS = 30_000;
+const AI_CHART_GENERATION_TIMEOUT_MS = 90_000;
 /**
  * Output budget for one generation.
  *

@@ -4,17 +4,14 @@ import {
   type DeleteObjectsCommandOutput,
   GetObjectCommand,
   HeadObjectCommand,
+  PutObjectCommand,
   paginateListObjectsV2,
 } from "@aws-sdk/client-s3";
-import {
-  type PresignedPost,
-  type PresignedPostOptions,
-  createPresignedPost,
-} from "@aws-sdk/s3-presigned-post";
+import { type PresignedPostOptions, createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { logger } from "@formbricks/logger";
 import { createS3Client } from "./client";
-import { S3_BUCKET_NAME } from "./constants";
+import { S3_BUCKET_NAME, S3_UPLOAD_METHOD } from "./constants";
 import { type Result, type StorageError, StorageErrorCode, err, ok } from "./types/error";
 
 /**
@@ -34,7 +31,8 @@ export const getSignedUploadUrl = async (
   Result<
     {
       signedUrl: string;
-      presignedFields: PresignedPost["fields"];
+      presignedFields: Record<string, string>;
+      uploadMethod?: "PUT" | "POST";
     },
     StorageError
   >
@@ -49,10 +47,6 @@ export const getSignedUploadUrl = async (
       });
     }
 
-    const postConditions: PresignedPostOptions["Conditions"] = maxSize
-      ? [["content-length-range", 0, maxSize]]
-      : undefined;
-
     if (!S3_BUCKET_NAME) {
       logger.error("Failed to get signed upload URL: S3 bucket name is not set");
       return err({
@@ -60,10 +54,37 @@ export const getSignedUploadUrl = async (
       });
     }
 
+    const key = `${filePath}/${fileName}`;
+
+    // Cloudflare R2's S3 API does not implement POST Object (multipart form uploads), so the upload
+    // has to be a presigned PUT against the raw object body. The client switches on `uploadMethod`:
+    // PUT sends the file as the request body with a matching Content-Type; POST sends a multipart form.
+    if (S3_UPLOAD_METHOD === "PUT") {
+      const url = await getSignedUrl(
+        s3Client,
+        new PutObjectCommand({
+          Bucket: S3_BUCKET_NAME,
+          Key: key,
+          ContentType: contentType,
+        }),
+        { expiresIn: 2 * 60 }
+      );
+
+      return ok({
+        signedUrl: url,
+        presignedFields: { "Content-Type": contentType },
+        uploadMethod: "PUT",
+      });
+    }
+
+    const postConditions: PresignedPostOptions["Conditions"] = maxSize
+      ? [["content-length-range", 0, maxSize]]
+      : undefined;
+
     const { fields, url } = await createPresignedPost(s3Client, {
       Expires: 2 * 60, // 2 minutes
       Bucket: S3_BUCKET_NAME,
-      Key: `${filePath}/${fileName}`,
+      Key: key,
       Fields: {
         "Content-Type": contentType,
         success_action_status: "201",
@@ -74,6 +95,7 @@ export const getSignedUploadUrl = async (
     return ok({
       signedUrl: url,
       presignedFields: fields,
+      uploadMethod: "POST",
     });
   } catch (error) {
     logger.error({ error }, "Failed to get signed upload URL");

@@ -177,6 +177,7 @@ export const ZUploadFileResponse = z.object({
       })
       .nullable(),
     presignedFields: z.record(z.string(), z.string()).optional(),
+    uploadMethod: z.enum(["PUT", "POST"]).optional(),
     updatedFileName: z.string(),
   }),
 });

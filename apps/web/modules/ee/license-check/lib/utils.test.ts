@@ -263,7 +263,22 @@ describe("License Utils", () => {
       expect(result).toBe(true);
     });
 
-    test("returns false for self-hosted AI smart tools when not enabled", async () => {
+    test("returns true for self-hosted AI smart tools without a license (operator brings their own model)", async () => {
+      vi.mocked(constants).IS_FORMBRICKS_CLOUD = false;
+      vi.mocked(getEnterpriseLicense).mockResolvedValue({
+        ...defaultLicense,
+        active: false,
+        features: null,
+        status: "no-license",
+      });
+
+      const result = await getIsAISmartToolsEnabled("org_1");
+
+      expect(result).toBe(true);
+      expect(getEnterpriseLicense).not.toHaveBeenCalled();
+    });
+
+    test("returns true for self-hosted AI smart tools even when the license omits the feature", async () => {
       vi.mocked(constants).IS_FORMBRICKS_CLOUD = false;
       vi.mocked(getEnterpriseLicense).mockResolvedValue({
         ...defaultLicense,
@@ -271,7 +286,7 @@ describe("License Utils", () => {
       });
 
       const result = await getIsAISmartToolsEnabled("org_1");
-      expect(result).toBe(false);
+      expect(result).toBe(true);
     });
 
     test("uses cloud feedback record directories entitlement", async () => {
@@ -473,7 +488,8 @@ describe("License Utils", () => {
       expect(multiOrg).toBe(false);
       expect(contacts).toBe(false);
       expect(twoFactor).toBe(false);
-      expect(sso).toBe(false);
+      // SSO is released on self-hosted regardless of license features.
+      expect(sso).toBe(true);
     });
   });
 

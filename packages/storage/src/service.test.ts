@@ -62,6 +62,7 @@ describe("service.ts", () => {
 
   const mockConstants = {
     S3_BUCKET_NAME: "test-bucket",
+    S3_UPLOAD_METHOD: "POST",
   };
 
   const mockMaxSize = 1024 * 1024 * 10; // 10MB
@@ -100,6 +101,7 @@ describe("service.ts", () => {
         expect(result.data).toEqual({
           signedUrl: mockResponse.url,
           presignedFields: mockResponse.fields,
+          uploadMethod: "POST",
         });
       }
     });
@@ -195,6 +197,7 @@ describe("service.ts", () => {
         expect(result.data).toEqual({
           signedUrl: mockResponse.url,
           presignedFields: mockResponse.fields,
+          uploadMethod: "POST",
         });
       }
     });

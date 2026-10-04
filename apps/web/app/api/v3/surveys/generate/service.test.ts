@@ -161,7 +161,7 @@ describe("generateV3SurveyCreatePayloadFromPrompt", () => {
         schemaName: "FormbricksSurveyDraft",
         temperature: 0.2,
         maxOutputTokens: 8192,
-        timeout: 45_000,
+        timeout: 90_000,
       })
     );
     const generationOptions = vi.mocked(generateOrganizationAIObject).mock.calls[0][0];

@@ -1,5 +1,28 @@
 import "server-only";
-import { status } from "@grpc/grpc-js";
+
+/**
+ * gRPC status codes, inlined as numeric literals.
+ *
+ * `@grpc/grpc-js` is a TCP/HTTP2 client that cannot run inside a Cloudflare Worker, so the real
+ * gRPC client is no longer reachable at runtime. The codes themselves are stable wire constants
+ * (https://grpc.io/docs/guides/status-codes/), so the mapping keeps its exact behaviour without the
+ * dependency — and without dragging the transport into the Worker bundle.
+ */
+const GRPC_STATUS = {
+  ABORTED: 10,
+  ALREADY_EXISTS: 6,
+  CANCELLED: 1,
+  DEADLINE_EXCEEDED: 4,
+  FAILED_PRECONDITION: 9,
+  INVALID_ARGUMENT: 3,
+  NOT_FOUND: 5,
+  OUT_OF_RANGE: 11,
+  PERMISSION_DENIED: 7,
+  RESOURCE_EXHAUSTED: 8,
+  UNAUTHENTICATED: 16,
+  UNIMPLEMENTED: 12,
+  UNAVAILABLE: 14,
+} as const;
 
 export const AUTHZED_ERROR_CODES = {
   ABORTED: "authzed_aborted",
@@ -66,30 +89,30 @@ const getErrorDescriptor = (
   grpcStatus: number | undefined
 ): Readonly<{ code: TAuthzedErrorCode; retryable: boolean }> => {
   switch (grpcStatus) {
-    case status.DEADLINE_EXCEEDED:
+    case GRPC_STATUS.DEADLINE_EXCEEDED:
       return { code: AUTHZED_ERROR_CODES.TIMEOUT, retryable: true };
-    case status.UNAVAILABLE:
+    case GRPC_STATUS.UNAVAILABLE:
       return { code: AUTHZED_ERROR_CODES.UNAVAILABLE, retryable: true };
-    case status.RESOURCE_EXHAUSTED:
+    case GRPC_STATUS.RESOURCE_EXHAUSTED:
       return { code: AUTHZED_ERROR_CODES.OVERLOADED, retryable: true };
-    case status.ABORTED:
+    case GRPC_STATUS.ABORTED:
       return { code: AUTHZED_ERROR_CODES.ABORTED, retryable: true };
-    case status.UNAUTHENTICATED:
+    case GRPC_STATUS.UNAUTHENTICATED:
       return { code: AUTHZED_ERROR_CODES.UNAUTHENTICATED, retryable: false };
-    case status.PERMISSION_DENIED:
+    case GRPC_STATUS.PERMISSION_DENIED:
       return { code: AUTHZED_ERROR_CODES.PERMISSION_DENIED, retryable: false };
-    case status.INVALID_ARGUMENT:
-    case status.OUT_OF_RANGE:
+    case GRPC_STATUS.INVALID_ARGUMENT:
+    case GRPC_STATUS.OUT_OF_RANGE:
       return { code: AUTHZED_ERROR_CODES.INVALID_REQUEST, retryable: false };
-    case status.FAILED_PRECONDITION:
+    case GRPC_STATUS.FAILED_PRECONDITION:
       return { code: AUTHZED_ERROR_CODES.FAILED_PRECONDITION, retryable: false };
-    case status.NOT_FOUND:
+    case GRPC_STATUS.NOT_FOUND:
       return { code: AUTHZED_ERROR_CODES.NOT_FOUND, retryable: false };
-    case status.ALREADY_EXISTS:
+    case GRPC_STATUS.ALREADY_EXISTS:
       return { code: AUTHZED_ERROR_CODES.CONFLICT, retryable: false };
-    case status.CANCELLED:
+    case GRPC_STATUS.CANCELLED:
       return { code: AUTHZED_ERROR_CODES.CANCELLED, retryable: false };
-    case status.UNIMPLEMENTED:
+    case GRPC_STATUS.UNIMPLEMENTED:
       return { code: AUTHZED_ERROR_CODES.UNSUPPORTED, retryable: false };
     default:
       return { code: AUTHZED_ERROR_CODES.INTERNAL, retryable: false };

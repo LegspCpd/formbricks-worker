@@ -26,6 +26,7 @@ vi.mock("@/lib/env", async () => {
 // can't be overridden through the mock anyway — and override only the env-driven flags/credentials.
 interface MockConstants {
   ENTERPRISE_LICENSE_KEY?: string;
+  IS_FORMBRICKS_CLOUD: boolean;
   GITHUB_OAUTH_ENABLED: boolean;
   GITHUB_ID?: string;
   GITHUB_SECRET?: string;
@@ -49,6 +50,9 @@ interface MockConstants {
 // test so non-overridden values (e.g. the hardcoded SAML_TENANT/SAML_PRODUCT) keep their real values.
 const BASE: MockConstants = {
   ENTERPRISE_LICENSE_KEY: undefined,
+  // Default to the Cloud posture (license required) so the pre-existing "enterprise license gate"
+  // tests keep their meaning; the self-hosted release is asserted explicitly below.
+  IS_FORMBRICKS_CLOUD: true,
   GITHUB_OAUTH_ENABLED: false,
   GITHUB_ID: undefined,
   GITHUB_SECRET: undefined,
@@ -100,8 +104,9 @@ afterEach(() => {
 
 describe("better-auth SSO providers", () => {
   describe("enterprise license gate", () => {
-    test("registers no providers without an enterprise license", async () => {
+    test("registers no providers on Cloud without an enterprise license", async () => {
       const m = await loadProviders({
+        IS_FORMBRICKS_CLOUD: true,
         ENTERPRISE_LICENSE_KEY: undefined,
         GITHUB_OAUTH_ENABLED: true,
         GOOGLE_OAUTH_ENABLED: true,
@@ -111,6 +116,17 @@ describe("better-auth SSO providers", () => {
       });
       expect(m.ssoSocialProviders).toEqual({});
       expect(m.ssoGenericOAuthConfig).toEqual([]);
+    });
+
+    test("registers providers on self-hosted without an enterprise license", async () => {
+      const m = await loadProviders({
+        IS_FORMBRICKS_CLOUD: false,
+        ENTERPRISE_LICENSE_KEY: undefined,
+        AZURE_OAUTH_ENABLED: true,
+        AZUREAD_CLIENT_ID: "az-id",
+        AZUREAD_CLIENT_SECRET: "az-secret",
+      });
+      expect(m.ssoGenericOAuthConfig.find((c) => c.providerId === "azuread")).toBeDefined();
     });
 
     test("registers no providers when licensed but every provider is disabled", async () => {
