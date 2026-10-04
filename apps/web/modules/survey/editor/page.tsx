@@ -9,6 +9,7 @@ import {
   UNSPLASH_ACCESS_KEY,
 } from "@/lib/constants";
 import { getPublicDomain } from "@/lib/getPublicUrl";
+import { getWorkspaceMembers } from "@/lib/workspace/service";
 import { getTranslate } from "@/lingodotdev/server";
 import { getContactAttributeKeys } from "@/modules/ee/contacts/lib/contact-attribute-keys";
 import { getSegments } from "@/modules/ee/contacts/segments/lib/segments";
@@ -19,7 +20,6 @@ import {
   getIsWorkflowsEnabled,
 } from "@/modules/ee/license-check/lib/utils";
 import { getQuotas } from "@/modules/ee/quotas/lib/quotas";
-import { getTeamMemberDetails } from "@/modules/survey/editor/lib/team";
 import { getUserEmail } from "@/modules/survey/editor/lib/user";
 import { getWorkspaceLanguages } from "@/modules/survey/editor/lib/workspace";
 import { getSurveyFollowUpsPermission } from "@/modules/survey/follow-ups/lib/utils";
@@ -112,7 +112,11 @@ export const SurveyEditorPage = async (props: {
   const quotas = isQuotasAllowed && survey ? await getQuotas(survey.id) : [];
   const [workspaceLanguages, teamMemberDetails] = await Promise.all([
     getWorkspaceLanguages(workspaceWithTeamIds.id),
-    getTeamMemberDetails(workspaceWithTeamIds.teamIds),
+    // The follow-up recipient picker offers the members the runtime will actually accept. It reads
+    // "who can access this workspace" — the same source the workflow `send_email` picker uses — rather
+    // than the teams linked to the workspace: a workspace with no linked team used to offer nobody but
+    // the current user, so a follow-up could not be addressed to a colleague at all.
+    getWorkspaceMembers(workspaceWithTeamIds.id),
   ]);
 
   if (
