@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { type Plugin, defineConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
+import { workerdWasmPlugin } from "../../packages/vite-plugins/workerd-wasm";
 
 /**
  * A literal substitution the emitted chunks need because they run on workerd rather than Node. Applied
@@ -43,7 +44,7 @@ const workerdLiterals: Plugin = {
  * them at runtime. `wrangler` then bundles and minifies this single file for deploy.
  */
 export default defineConfig({
-  plugins: [workerdLiterals, tsconfigPaths()],
+  plugins: [workerdWasmPlugin(), workerdLiterals, tsconfigPaths()],
   resolve: {
     alias: [
       // Mirror the Workers build's engine alias (next.config.mjs `turbopack.resolveAlias`): the job

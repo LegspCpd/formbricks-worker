@@ -5,7 +5,13 @@
   "compatibility_date": "2026-09-28",
   "compatibility_flags": [
     "nodejs_compat",
-    "global_fetch_strictly_public"
+    "global_fetch_strictly_public",
+    // The Prisma client is a module-scope singleton wrapping a `pg.Pool`, so a connection opened
+    // while serving one request is reused by a later one. workerd cancels promise continuations
+    // created in a *different* request context (default since compat date 2024-10-14), so pg's
+    // `handleReadyForQuery` — the continuation that resolves the query — is dropped and the query
+    // hangs. Disabling that cancellation is the fix the runtime points at in the warning it emits.
+    "no_handle_cross_request_promise_resolution",
   ],
   // OpenNext 的中间件打包器刻意不压缩（它需要在产物上做字符串替换），所以
   // `.open-next/middleware/handler.mjs` 里会带着 node_modules 的未压缩源码，动辄上百万行。
@@ -15,45 +21,45 @@
   // keep_names 默认为 true，压缩后类名/函数名仍会保留。
   "minify": true,
   "observability": {
-    "enabled": true
+    "enabled": true,
   },
   "kv_namespaces": [
     {
       "binding": "CACHE_KV",
-      "id": "formbricks_cache_kv"
+      "id": "46af7afc0e3e4ae2b2ab56fbb32d14c2",
     },
     {
       "binding": "TAG_CACHE_KV",
-      "id": "formbricks_tag_cache_kv"
+      "id": "29ce951c3d8f463cb7b3436dc37287fd",
     },
     {
       "binding": "MEMORY_CACHE_KV",
-      "id": "formbricks_memory_cache_kv"
-    }
+      "id": "56a3b7a0ddfb464296b0bbfd17353d01",
+    },
   ],
   "r2_buckets": [
     {
       "binding": "STORAGE_R2",
-      "bucket_name": "formbricks-storage"
+      "bucket_name": "formbricks-storage",
     },
     {
       "binding": "NEXT_INC_CACHE_R2_BUCKET",
-      "bucket_name": "formbricks-storage"
-    }
+      "bucket_name": "formbricks-storage",
+    },
   ],
   "services": [
     {
       "binding": "WORKER_SELF_REFERENCE",
-      "service": "formbricks-worker"
-    }
+      "service": "formbricks-worker",
+    },
   ],
   "queues": {
     "producers": [
       {
         "binding": "JOBS_QUEUE",
-        "queue": "formbricks-jobs"
-      }
-    ]
+        "queue": "formbricks-jobs",
+      },
+    ],
   },
   // 可选配置：
   // - 如果使用 Neon + Hyperdrive，取消下面的注释并填入你的 Hyperdrive id
@@ -67,9 +73,9 @@
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
   },
   "vars": {
-    "NODE_ENV": "production"
-  }
+    "NODE_ENV": "production",
+  },
 }

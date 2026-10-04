@@ -68,7 +68,18 @@ const jobsWorker = {
     applyWorkerEnv(env);
     // Before dispatching, so a schedule that stopped for any reason restarts with the first job that
     // flows through — which is also how the schedule comes back after the alarm budget is exhausted.
-    await ensureSchedule(env);
+    //
+    // Guarded on purpose: starting the schedule is best-effort and self-heals on the next invocation,
+    // but a throw here happens *before* any message is dispatched, so Cloudflare redelivers the whole
+    // batch unprocessed. A transient Durable Object hiccup — routine for a moment right after a deploy
+    // — would then fail every batch until each job exhausts its retries and lands in the dead-letter
+    // queue, which is exactly how unrelated jobs stop being delivered. The `fetch` handler already
+    // treats this call as non-fatal for the same reason; the consumer must too.
+    try {
+      await ensureSchedule(env);
+    } catch (error) {
+      logger.error({ err: error }, "Could not start the recurring schedule before consuming the batch");
+    }
 
     const { handleCloudflareQueueBatch } = await import("@/lib/jobs/cf");
     await handleCloudflareQueueBatch(batch, env as CloudflareJobsEnv);

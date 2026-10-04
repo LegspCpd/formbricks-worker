@@ -1,13 +1,14 @@
 name: Deploy to Cloudflare Workers
 
-# Builds the OpenNext Worker on a GitHub-hosted runner and pushes it straight into the *existing*
-# `formbricks-worker` Worker with `opennextjs-cloudflare deploy`, so Cloudflare Workers Builds never
-# has to compile the app again (its 2 vCPU / 20-minute builder was taking ~22 minutes for this repo).
+# Builds and deploys the *Jobs* Worker (`formbricks-worker-jobs`) on a GitHub-hosted runner. The app
+# itself runs on Vercel: the `formbricks-worker` reverse proxy in front of it is configured in the
+# Cloudflare dashboard, not here, and this file manages no part of it. Only the queue consumer /
+# recurring-job host is deployed from this repository.
 #
-# The Worker is addressed purely by the `name` in `apps/web/wrangler.jsonc`; nothing here creates a
-# new project or re-binds anything. `scripts/setup-cloudflare.ts` looks the KV namespaces, the R2
-# bucket and the queue up by title and reuses them when they already exist, then rewrites the
-# placeholder ids in `wrangler.jsonc` with the real ones before the deploy.
+# The Worker is addressed purely by the `name` in `apps/web/wrangler.jobs.jsonc`; nothing here creates
+# a new project or re-binds anything. `scripts/setup-cloudflare.ts` (run by the build step below) looks
+# the queue up by title and reuses it when it already exists, then rewrites the placeholder names in
+# `wrangler.jobs.jsonc` with the real ones before the deploy.
 #
 # Set these repository secrets (Settings -> Secrets and variables -> Actions -> New repository
 # secret). Create only the ones you need -- an unset secret is simply left out, it never becomes an
@@ -351,35 +352,16 @@ jobs:
       # Dev-only tooling that other workflows recreate from scratch is deliberately not part of a
       # deploy: `scripts/setup-dev-env.sh` would overwrite the secrets above with throwaway values.
 
-      - name: Build the OpenNext Worker
+      # One command produces everything this workflow needs: the workspace dependencies, the resolved
+      # Cloudflare resource config (`setup-cloudflare.ts`) and the Jobs Worker bundle
+      # (`dist/jobs-worker/index.mjs`). The app itself is deployed to Vercel, so the OpenNext output
+      # this also builds is not deployed here.
+      - name: Build the Jobs Worker bundle
         run: pnpm --filter @formbricks/web run build:cf:full
 
-      # The app does not fit in one Worker (the OpenNext server bundle is ~125 MiB against the 64 MiB
-      # cap), so it is deployed as several shard Workers plus a router. This step derives that topology
-      # from the build above and writes everything the deploys below consume:
-      #   - `apps/web/server-shards.json`  the plan (which routes share a Worker), read by the per-shard
-      #                                    builds through `open-next.config.ts`
-      #   - `apps/web/wrangler.shard-<n>.jsonc`  one Wrangler config per shard
-      #   - `apps/web/wrangler.router.jsonc`     the router that fronts them
-      #   - `apps/web/cloudflare/shard-plan.ts`  the router's generated route table
-      # `compute-server-shards.mjs` reads Next's own route traces from `apps/web/.next`, which the
-      # build above produced.
-      #
-      # Hard-fails on purpose, unlike the diagnostics below: without the plan there is nothing to
-      # deploy, and a run that cannot derive it should stop rather than ship an empty topology.
-      - name: Plan the shards and generate their Wrangler configs
-        run: |
-          set -euo pipefail
-          node apps/web/scripts/compute-server-shards.mjs
-          node apps/web/scripts/generate-shard-configs.mjs
-          echo "::group::Shard plan"
-          node apps/web/scripts/server-shard-config.mjs list
-          echo "::endgroup::"
-
-      # Deployed *before* the app Worker on purpose: this is the queue consumer and the Cron Triggers
-      # host. Failing here stops the run instead of shipping an app that accepts responses and enqueues
-      # them onto a queue nobody drains (no webhook deliveries, no workflow runs). The reverse — a live
-      # consumer with no app deployed — only leaves an idle consumer.
+      # The Jobs Worker is deployed before anything else, and a failure here stops the run: it is the
+      # queue consumer, so without it the app accepts responses and enqueues them onto a queue nobody
+      # drains (no webhook deliveries, no workflow runs).
       #
       # `main` is the standalone Vite bundle from the build step (`dist/jobs-worker/index.mjs`), not an
       # OpenNext output: the job-handler graph plus the Next.js server runtime do not fit in one Worker,
@@ -464,121 +446,5 @@ jobs:
           echo "::warning::${url} answered ${status:-no status} after 5 attempts; the schedule will start with the first job that flows through."
           cat "${body}" 2>/dev/null || true
 
-      # The app ships as N shard Workers plus a router: one OpenNext bundle is ~125 MiB against
-      # Cloudflare's 64 MiB uncompressed cap, so no single Worker can hold the whole app. The plan and
-      # one Wrangler config per Worker were written by the "Plan the shards" step above.
-      #
-      # Each shard is rebuilt from the same `next build` output with `FORMBRICKS_SHARD=<name>` (no
-      # second Next compile), so its `default` function carries only its own routes -- see
-      # `open-next.config.ts`. `opennextjs-cloudflare deploy --config` is used rather than a bare
-      # `wrangler deploy`: it populates the remote R2 incremental cache and injects the deployment
-      # mapping, exactly as the previous single-Worker deploy did, while taking this shard's config.
-      #
-      # Deployed before the router on purpose: the router's service bindings point at these Workers,
-      # and a binding to a Worker that does not exist yet is the one ordering that fails.
-      #
-      # `handler.mjs` is printed for each shard because it is the file Cloudflare measures against the
-      # cap; a shard over 64 MiB is rejected at upload (code 10027), and checking here names the
-      # offending shard instead of leaving a bare deploy error.
-      - name: Build and deploy the shard Workers
-        run: |
-          set -euo pipefail
-
-          shard_names="$(node apps/web/scripts/server-shard-config.mjs list | cut -f1)"
-          if [[ -z "${shard_names}" ]]; then
-            echo "::error::server-shards.json has no shards; the plan step did not run."
-            exit 1
-          fi
-
-          for shard in ${shard_names}; do
-            echo "::group::${shard}: build"
-            ( cd apps/web && FORMBRICKS_SHARD="${shard}" pnpm run build:cf:shard )
-            echo "::endgroup::"
-
-            handler="apps/web/.open-next/server-functions/default/apps/web/handler.mjs"
-            if [[ -f "${handler}" ]]; then
-              bytes="$(stat --printf='%s' "${handler}")"
-              awk -v b="${bytes}" \
-                'BEGIN { printf "  handler.mjs: %.2f MiB\n", b / 1048576; if (b > 64 * 1024 * 1024) exit 1 }' \
-                || { echo "::error::${shard} exceeds the 64 MiB cap."; exit 1; }
-            fi
-
-            echo "::group::${shard}: deploy"
-            ( cd apps/web && pnpm exec opennextjs-cloudflare deploy --config "wrangler.${shard}.jsonc" )
-            echo "::endgroup::"
-          done
-
-      # The router is not an OpenNext build: it matches the route table and forwards over service
-      # bindings, and it is the Worker that owns the static assets and keeps the public name. A bare
-      # `wrangler deploy` is used (not `opennextjs-cloudflare deploy`, which reads an OpenNext bundle
-      # this project does not have for the router); `OPEN_NEXT_DEPLOY=true` stops wrangler from
-      # delegating back to the adapter.
-      #
-      # It owns `.open-next/assets`, which the last shard build above refreshed, so the asset layer
-      # serves `/_next/static/...` and the `public/` files before the router's `fetch` ever runs.
-      - name: Deploy the shard router
-        run: |
-          set -euo pipefail
-          log="${RUNNER_TEMP}/deploy-cf-router.log"
-          ( cd apps/web && OPEN_NEXT_DEPLOY=true pnpm exec wrangler deploy --config wrangler.router.jsonc ) \
-            | tee "${log}"
-
-      # `wrangler deploy` does not carry secrets, so push the same configuration onto every shard's
-      # own environment. This is what OpenNext's adapter reads at request time -- build-time inlining
-      # only covers NEXT_RUNTIME / NODE_ENV / TURBOPACK. The router needs none of these: it only
-      # matches paths and forwards, so it is deliberately left out.
-      - name: Publish environment variables to the shard Workers
-        run: |
-          set -euo pipefail
-
-          batches_file="${GITHUB_WORKSPACE}/.wrangler-secret-batches"
-          if [[ ! -s "${batches_file}" ]]; then
-            echo "::notice::No environment variables to publish."
-            exit 0
-          fi
-
-          shard_names="$(node apps/web/scripts/server-shard-config.mjs list | cut -f1)"
-          batches="$(cat "${batches_file}")"
-          for shard in ${shard_names}; do
-            for index in $(seq 1 "${batches}"); do
-              echo "Publishing environment variables to ${shard} (batch ${index}/${batches})"
-              pnpm --filter @formbricks/web exec wrangler secret bulk \
-                "${GITHUB_WORKSPACE}/.wrangler-secrets-${index}.json" \
-                --config "wrangler.${shard}.jsonc"
-            done
-          done
-
-      # A successful deploy only proves the uploads were accepted -- it says nothing about whether the
-      # router actually reaches a shard. `/health` is a page route in the plan, so asking the public
-      # URL for it exercises the whole path: the router matches it, forwards over the shard's service
-      # binding, and the shard's Next server answers. A missing or mistyped service binding would show
-      # up here as the router's 502 instead. The 404 check is the fallback shard rendering Next's own
-      # not-found boundary.
-      #
-      # Non-fatal on purpose: a smoke check must not turn a good deploy red, and `curl` reaching
-      # `*.workers.dev` is not something this deploy depends on. It reports, and the run stays green.
-      - name: Smoke-test the deployed router
-        continue-on-error: true
-        run: |
-          set -uo pipefail
-
-          url="$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' "${RUNNER_TEMP}/deploy-cf-router.log" 2>/dev/null | tail -n 1 || true)"
-          if [[ -z "${url}" ]]; then
-            echo "::warning::No workers.dev URL in the router's deploy output; skipping the smoke test."
-            exit 0
-          fi
-          echo "Smoke-testing ${url}"
-
-          check() {
-            local path="$1" expect="$2"
-            local code
-            code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 60 "${url}${path}" || true)"
-            if [[ "${code}" == "${expect}" ]]; then
-              echo "  ${path} -> ${code} (ok)"
-            else
-              echo "::warning::${path} returned ${code:-no status}, expected ${expect}"
-            fi
-          }
-
-          check "/health" 200
-          check "/this-route-does-not-exist-smoke-test" 404
+      # Nothing else is deployed: the jobs Worker has no public route to smoke-test, and the app is
+      # served by Vercel behind the dashboard-managed reverse proxy.

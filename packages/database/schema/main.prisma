@@ -9,6 +9,7 @@ datasource db {
 generator client {
   provider        = "prisma-client"
   output          = "../generated/prisma"
+  runtime         = "cloudflare"
   previewFeatures = ["postgresqlExtensions"]
 }
 

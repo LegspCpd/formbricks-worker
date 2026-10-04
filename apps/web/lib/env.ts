@@ -606,6 +606,7 @@ const parsedEnv = createEnv({
     UNSPLASH_ACCESS_KEY: z.string().optional(),
 
     NODE_ENV: z.enum(["development", "production", "test"]).optional(),
+    FORMBRICKS_JOBS_ENGINE: z.enum(["cloudflare", "http"]).optional(),
     PROMETHEUS_EXPORTER_PORT: z.string().optional(),
     PROMETHEUS_ENABLED: z.enum(["1", "0"]).optional(),
     USER_MANAGEMENT_MINIMUM_ROLE: z.enum(["owner", "manager", "disabled"]).optional(),
@@ -766,6 +767,7 @@ const parsedEnv = createEnv({
     WEBAPP_URL: process.env.WEBAPP_URL,
     UNSPLASH_ACCESS_KEY: process.env.UNSPLASH_ACCESS_KEY,
     NODE_ENV: process.env.NODE_ENV,
+    FORMBRICKS_JOBS_ENGINE: process.env.FORMBRICKS_JOBS_ENGINE,
     PROMETHEUS_ENABLED: process.env.PROMETHEUS_ENABLED,
     PROMETHEUS_EXPORTER_PORT: process.env.PROMETHEUS_EXPORTER_PORT,
     USER_MANAGEMENT_MINIMUM_ROLE: process.env.USER_MANAGEMENT_MINIMUM_ROLE,

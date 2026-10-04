@@ -5,6 +5,7 @@ import { Plugin } from "vite";
 import dts from "vite-plugin-dts";
 import { ViteUserConfig, defineConfig } from "vitest/config";
 import { rewriteNodeNextDtsSpecifiers } from "../vite-plugins/node-next-dts";
+import { workerdWasmPlugin } from "../vite-plugins/workerd-wasm";
 
 const copySqlMigrationsPlugin: Plugin = {
   name: "copy-sql-migrations",
@@ -74,6 +75,7 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
           // External dependencies that should not be bundled
           "@prisma/adapter-pg",
           "@prisma/client/runtime/client",
+          "@prisma/client/runtime/wasm-compiler-edge",
           "@prisma/client/runtime/index-browser",
           "pg",
           "zod",
@@ -86,6 +88,10 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
       ssr: true, // Server-side rendering mode for Node.js
     },
     plugins: [
+      // The `runtime = "cloudflare"` Prisma client imports its query compiler as
+      // `import("./query_compiler_fast_bg.wasm?module")`. Mark that specifier external and copy the
+      // `.wasm` next to the emitted chunk so Node/Next/wrangler resolve it the way they each expect.
+      workerdWasmPlugin(),
       ...(process.env.FORMBRICKS_SKIP_DTS !== "1"
         ? [
             dts({

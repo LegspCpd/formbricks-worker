@@ -141,7 +141,39 @@ const loggerConfig: LoggerOptions = {
   }),
 };
 
-const pinoLogger: Logger = Pino(loggerConfig);
+const isWorkerdRuntime = (): boolean => {
+  const runtime = globalThis as { WebSocketPair?: unknown; navigator?: { userAgent?: string } };
+
+  // `navigator.userAgent` is `"Cloudflare-Workers"` on workerd, and `WebSocketPair` exists only there.
+  // Either signal is enough; a false positive elsewhere merely writes to stdout directly, which is still
+  // correct, whereas a false negative here leaves the crash below in place.
+  return (
+    runtime.navigator?.userAgent === "Cloudflare-Workers" || typeof runtime.WebSocketPair !== "undefined"
+  );
+};
+
+// pino's default destination is a sonic-boom stream that writes through `fs.write(fd, string, "utf8", cb)`.
+// workerd's `nodejs_compat` rejects that overload — the encoding lands in the `offset` slot and throws
+// `TypeError: The "offset" argument must be of type number` on every log call. That throw happens inside
+// the failure path it was meant to report on, masking the real error and aborting the invocation, so an
+// explicit `DestinationStream` routes writes to the runtime's `process.stdout` instead. Writing is
+// wrapped so a logging failure can never itself take down the job. Pino rejects a stream alongside
+// `transport`, so this only applies when no transport is configured (the production default).
+const workerdDestination: Pino.DestinationStream = {
+  write: (msg: string): void => {
+    try {
+      getNodeProcess().stdout.write(msg);
+    } catch {
+      // Logging must never be the reason a request or job fails.
+    }
+  },
+};
+
+const useWorkerdDestination = transport === undefined && isWorkerdRuntime();
+
+const pinoLogger: Logger = useWorkerdDestination
+  ? Pino(loggerConfig, workerdDestination)
+  : Pino(loggerConfig);
 
 const reportTransportError = (error: unknown): void => {
   const message = error instanceof Error ? (error.stack ?? error.message) : String(error);

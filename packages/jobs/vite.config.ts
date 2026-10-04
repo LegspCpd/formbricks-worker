@@ -19,10 +19,12 @@ export default defineConfig({
     // minify their own bundles, so nothing is lost by leaving this one readable.
     minify: false,
     lib: {
-      // Two entry points: the BullMQ-backed default (`.`) and the BullMQ-free Cloudflare surface
-      // (`./cf`). They share chunks, so `cf` does not re-bundle the schemas it re-exports.
+      // Three entry points: the BullMQ-backed default (`.`) and the BullMQ-free Cloudflare surfaces
+      // (`./cf` for a Worker, `./http` for a non-Worker process enqueueing onto the same queue). They
+      // share chunks, so `cf`/`http` do not re-bundle the schemas they re-export.
       entry: {
         cf: resolve(__dirname, "src/cf.ts"),
+        http: resolve(__dirname, "src/http.ts"),
         index: resolve(__dirname, "src/index.ts"),
       },
       // ESM keeps `.js`, CJS gets `.cjs` — matching the paths in the package's `exports` map.

@@ -217,6 +217,42 @@ describe("Logger", () => {
     expect(logger).toBeDefined();
   });
 
+  /**
+   * workerd's `nodejs_compat` rejects pino's default sonic-boom destination (`fs.write(fd, string,
+   * "utf8", cb)`), throwing `TypeError: The "offset" argument must be of type number`. The production
+   * config has no transport, so a workerd-safe `DestinationStream` must be handed to pino instead —
+   * otherwise every log call crashes the invocation it was meant to report on.
+   */
+  test("workerd runtime uses an explicit stdout destination instead of the default sonic-boom stream", async () => {
+    process.env.NODE_ENV = "production";
+    const webSocketPair = (globalThis as { WebSocketPair?: unknown }).WebSocketPair;
+    (globalThis as { WebSocketPair?: unknown }).WebSocketPair = function WebSocketPair() {};
+
+    try {
+      const { logger } = await import("./logger");
+      const stream = vi.mocked(Pino).mock.calls.at(-1)?.[1];
+
+      expect(typeof stream?.write).toBe("function");
+      expect(logger).toBeDefined();
+    } finally {
+      if (webSocketPair === undefined) {
+        Reflect.deleteProperty(globalThis, "WebSocketPair");
+      } else {
+        (globalThis as { WebSocketPair?: unknown }).WebSocketPair = webSocketPair;
+      }
+    }
+  });
+
+  test("non-workerd runtime keeps Pino's default destination", async () => {
+    process.env.NODE_ENV = "production";
+
+    const { logger } = await import("./logger");
+    const stream = vi.mocked(Pino).mock.calls.at(-1)?.[1];
+
+    expect(stream).toBeUndefined();
+    expect(logger).toBeDefined();
+  });
+
   test("getLogLevel defaults to 'info' in development mode", async () => {
     process.env.NODE_ENV = "development";
     process.env.LOG_LEVEL = undefined;

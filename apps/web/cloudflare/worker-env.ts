@@ -6,6 +6,20 @@
 export type WorkerEnv = Record<string, unknown>;
 
 /**
+ * A Hyperdrive binding, narrowed to the one member read here. The runtime exposes `connectionString`
+ * (a libpq URL pointing at Cloudflare's local pooler) alongside `host`/`port`/`user`/`password`; the
+ * whole object is a string-keyed record on `env`, so only the part this file uses is typed.
+ */
+type HyperdriveBinding = { connectionString?: string };
+
+const asHyperdriveBinding = (value: unknown): HyperdriveBinding | undefined =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as HyperdriveBinding).connectionString === "string"
+    ? (value as HyperdriveBinding)
+    : undefined;
+
+/**
  * Copies this Worker's string bindings onto `process.env`.
  *
  * This is the pattern the Workers documentation gives for code that reads its configuration through
@@ -22,6 +36,11 @@ export type WorkerEnv = Record<string, unknown>;
  * `??=` rather than plain assignment: compatibility dates on or after 2025-04-01 already populate
  * `process.env` (`nodejs_compat_populate_process_env`), and the runtime's value must win. Only strings
  * are copied, so object bindings such as `JOBS_QUEUE` stay out of the environment.
+ *
+ * The Hyperdrive binding is applied last and with plain assignment, because a direct-TCP
+ * `DATABASE_URL` secret (applied by the loop above) must not win when a Hyperdrive pooler is bound:
+ * the pooled endpoint is what survives the cross-region cold-connect that otherwise fails a job with
+ * `timeout exceeded when trying to connect`.
  */
 export const applyWorkerEnv = (env: WorkerEnv | undefined): void => {
   if (!env) {
@@ -32,5 +51,10 @@ export const applyWorkerEnv = (env: WorkerEnv | undefined): void => {
     if (typeof value === "string") {
       process.env[key] ??= value;
     }
+  }
+
+  const hyperdrive = asHyperdriveBinding(env.HYPERDRIVE);
+  if (hyperdrive?.connectionString) {
+    process.env.DATABASE_URL = hyperdrive.connectionString;
   }
 };

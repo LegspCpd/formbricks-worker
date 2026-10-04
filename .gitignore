@@ -19,8 +19,6 @@
 **/.open-next/
 **/.wrangler/
 **/worker-configuration.d.ts
-# pre-flight shard plan (written by scripts/compute-server-shards.mjs)
-server-shards.json
 
 # node
 **/dist/

@@ -18,6 +18,11 @@
       "types": "./dist/cf.d.ts",
       "import": "./dist/cf.js",
       "require": "./dist/cf.cjs"
+    },
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "import": "./dist/http.js",
+      "require": "./dist/http.cjs"
     }
   },
   "scripts": {

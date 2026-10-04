@@ -85,8 +85,17 @@ const OTEL_LOG_TRANSPORT_INCLUDES =
 // every import site — is what keeps the two engines from forking the handler code: the same handlers,
 // schemas and dispatch registry ship, just wired to a different transport. The BullMQ client graph is
 // what would otherwise be copied into *every* server function and blow the 64 MiB Worker limit.
-const JOBS_ENGINE_CLOUDFLARE = process.env.FORMBRICKS_JOBS_ENGINE === "cloudflare";
-const jobsResolveAlias = JOBS_ENGINE_CLOUDFLARE ? { "@formbricks/jobs": "@formbricks/jobs/cf" } : {};
+//
+// `http` is the same Cloudflare Queues transport for a web tier that is NOT a Worker (Vercel here): it
+// publishes onto the same queue through Cloudflare's HTTP push API, so the jobs Worker still consumes
+// and runs every handler. See `@formbricks/jobs/http`.
+const JOBS_ENGINE = process.env.FORMBRICKS_JOBS_ENGINE;
+const jobsResolveAlias =
+  JOBS_ENGINE === "cloudflare"
+    ? { "@formbricks/jobs": "@formbricks/jobs/cf" }
+    : JOBS_ENGINE === "http"
+      ? { "@formbricks/jobs": "@formbricks/jobs/http" }
+      : {};
 
 /** @type {import('next').NextConfig} */
 
@@ -152,6 +161,9 @@ const nextConfig = {
     // Turbopack one this repo builds with.
     serverSourceMaps: false,
     turbopackSourceMaps: false,
+    staleTimes: {
+      dynamic: 30,
+    },
   },
   // Type errors never change the emitted build output, and the `tsc` pass is one of the most
   // expensive phases of a cold build. Cloudflare Workers Builds caps every build at 20 minutes on a

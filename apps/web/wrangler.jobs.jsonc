@@ -7,19 +7,46 @@
   // job handler graph must ship without the Next.js server runtime, so it is bundled by the same
   // `vite-tsconfig-paths` pipeline the authzed CLI and env-validator use, then handed to wrangler as a
   // single ESM file.
-  "name": "formbricks-jobs-worker",
+  "name": "formbricks-worker-jobs",
   "main": "dist/jobs-worker/index.mjs",
   "compatibility_date": "2026-09-28",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // `no_handle_cross_request_promise_resolution` is load-bearing here, not cosmetic. The app's Prisma
+  // client is a module-scope singleton wrapping a `pg.Pool`, so its TCP connections outlive the queue
+  // invocation that opened them and are reused by a later one. The socket's `data` listener — and thus
+  // pg's `handleReadyForQuery`, which resolves the query promise — was registered in the *first*
+  // invocation's request context, so workerd (since compat date 2024-10-14) cancels that continuation:
+  // the awaited query never settles, the job eventually exceeds the consumer's wall-time budget, the
+  // whole batch is redelivered and the dead-letter queue grows. Disabling the cross-request
+  // cancellation is the fix the runtime itself recommends in the warning this produced.
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public",
+    "no_handle_cross_request_promise_resolution"
+  ],
   "minify": true,
   "observability": {
     "enabled": true
   },
+  // A direct TCP connection from the Worker to Neon's inter-region endpoint has to complete a cold
+  // handshake on every new client, which intermittently exceeds the pool's connect timeout and fails
+  // the job with `timeout exceeded when trying to connect`. Hyperdrive keeps a warm, pooled connection
+  // on Cloudflare's side so the Worker dials a local endpoint instead. `worker-env.ts` copies the
+  // binding's `connectionString` onto `DATABASE_URL`, taking precedence over the secret so every job
+  // handler lands on Hyperdrive without changing how the app reads its config.
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "fee3147d8c9b4fac81caa48866ce6d6e"
+    }
+  ],
   // The queue this Worker both consumes from and produces to: consuming is the job dispatch itself,
   // and the producer binding is what lets a handler fan out child jobs (a response-pipeline job
   // enqueues one webhook-delivery job per matching webhook; the reconciler re-dispatches workflow
-  // runs). `max_batch_size`/`max_batch_timeout` are sized so a burst lands in a few large batches, and
-  // `max_retries` is the outer bound on redelivery before a message goes to the dead-letter queue.
+  // runs). `max_batch_size` is deliberately small: the consumer handles a batch's messages serially,
+  // and a response-pipeline job is expensive (several DB round-trips plus email rendering), so a
+  // large batch blows the Worker's wall-time budget and the whole batch is redelivered forever,
+  // stalling the queue. Three jobs per invocation keeps a batch inside that budget. `max_retries` is
+  // the outer bound on redelivery before a message goes to the dead-letter queue.
   "queues": {
     "producers": [
       {
@@ -30,7 +57,7 @@
     "consumers": [
       {
         "queue": "formbricks-jobs",
-        "max_batch_size": 10,
+        "max_batch_size": 3,
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "formbricks-jobs-dlq"
