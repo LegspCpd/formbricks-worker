@@ -14,6 +14,7 @@ import {
   getSurveyLanguageTag,
   isRTL,
   isRTLLanguage,
+  makeRequest,
   mirrorPlacementForDir,
   resolveSelectedLanguageCode,
 } from "./utils";
@@ -30,6 +31,35 @@ describe("getMimeType", () => {
     test(`should return "${expectedMimeType}" for extension "${extension}"`, () => {
       expect(getMimeType(extension as TAllowedFileExtension)).toBe(expectedMimeType);
     });
+  });
+});
+
+describe("makeRequest", () => {
+  test("aborts a stalled request instead of hanging forever", async () => {
+    vi.useFakeTimers();
+    const realFetch = globalThis.fetch;
+    // A connection that accepts the request but never answers — the shape of a captive network or a
+    // dropped socket. Without the abort the promise would never settle.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          })
+      )
+    );
+
+    try {
+      const resultPromise = makeRequest("https://app.example.com", "/api/test", "POST", { a: 1 });
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await resultPromise;
+
+      expect(result.ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      vi.stubGlobal("fetch", realFetch);
+    }
   });
 });
 

@@ -175,6 +175,19 @@ export const isRejected = <T>(val: PromiseSettledResult<T>): val is PromiseRejec
   return val.status === "rejected";
 };
 
+/**
+ * Bounds every runtime API call so a stalled connection cannot wedge the survey.
+ *
+ * `ResponseQueue` holds a module-level in-flight lock keyed by surveyId: one `fetch` that never
+ * settles keeps the lock set, so every later submit is silently dropped and the ending card stays on
+ * "sending responses" until the tab is reloaded. Aborting turns a stall — a captive network, a
+ * dropped connection, a Cloudflare challenge that never completes — into the ordinary retryable
+ * failure the queue already handles, which is what releases the lock. Generous relative to the
+ * slowest server path (a response write plus its awaited queue publish, a few seconds) so it only
+ * trips on a genuine stall.
+ */
+const API_REQUEST_TIMEOUT_MILLIS = 15_000;
+
 export const makeRequest = async <T>(
   appUrl: string,
   endpoint: string,
@@ -184,13 +197,17 @@ export const makeRequest = async <T>(
   const url = new URL(appUrl + endpoint);
   const body = data ? JSON.stringify(data) : undefined;
 
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MILLIS);
+
   const res = await wrapThrowsAsync(fetch)(url.toString(), {
     method,
     headers: {
       "Content-Type": "application/json",
     },
     body,
-  });
+    signal: controller.signal,
+  }).finally(() => clearTimeout(timeoutHandle));
 
   // TODO: Only return api error response relevant keys
   if (!res.ok) return err(res.error as unknown as ApiErrorResponse);
