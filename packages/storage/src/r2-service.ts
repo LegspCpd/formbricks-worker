@@ -142,7 +142,12 @@ export const getSignedUploadUrl = async (
   contentType: string,
   filePath: string,
   _maxSize: number = 1024 * 1024 * 10
-): Promise<Result<{ signedUrl: string; presignedFields: PresignedPost["fields"] }, StorageError>> => {
+): Promise<
+  Result<
+    { signedUrl: string; presignedFields: PresignedPost["fields"]; uploadMethod?: "PUT" | "POST" },
+    StorageError
+  >
+> => {
   try {
     const bucket = getR2Bucket();
     if (!bucket) {
@@ -166,6 +171,9 @@ export const getSignedUploadUrl = async (
         key,
         "Content-Type": contentType,
       },
+      // The R2 flow uploads through the `/storage/upload/...` proxy with the raw body, so the client
+      // must send a PUT rather than a multipart POST.
+      uploadMethod: "PUT",
     });
   } catch (error) {
     logger.error({ error, fileName, filePath }, "Failed to get R2 signed upload URL");

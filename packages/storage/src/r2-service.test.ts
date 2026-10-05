@@ -94,9 +94,12 @@ describe("r2-service", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
 
-      const { signedUrl, presignedFields } = result.data;
+      const { signedUrl, presignedFields, uploadMethod } = result.data;
       const key = "ws/private/surveys/s1/report.pdf";
 
+      // The client switches on this to decide PUT-raw-body vs multipart POST; R2's proxy route only
+      // accepts a PUT, so a POST here would fail the upload.
+      expect(uploadMethod).toBe("PUT");
       expect(presignedFields).toEqual({ key, "Content-Type": "application/pdf" });
 
       const url = new URL(signedUrl, "https://app.example.com");
