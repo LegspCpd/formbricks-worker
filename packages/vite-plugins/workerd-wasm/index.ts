@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { type Plugin, type ResolvedConfig } from "vite";
 
@@ -19,6 +19,13 @@ import { type Plugin, type ResolvedConfig } from "vite";
  * This plugin closes that gap: it marks every `.wasm`/`.wasm?module` import external so the
  * specifier is emitted verbatim, then copies the referenced `.wasm` file next to each emitted chunk
  * so the relative specifier still resolves once the bundle is written to disk.
+ *
+ * The emscripten glue ships as a sibling `.js` of the same name (`query_compiler_fast_bg.js`) and is
+ * copied along with it. `@prisma/client` hands the runtime the literal `importName:
+ * "./query_compiler_fast_bg.js"` and the runtime imports it *relative to the wasm*, so a bundle that
+ * carries the `.wasm` but not its glue resolves the module and then dies with `ERR_MODULE_NOT_FOUND`
+ * on the first query. wrangler supplies the compiled module itself and never looks for the glue, which
+ * is why Workers tolerate its absence while a plain Node process (the migration runner) does not.
  */
 export function workerdWasmPlugin(): Plugin {
   const WASM_SPECIFIER = /\.wasm(?:\?module)?$/;
@@ -66,15 +73,19 @@ export function workerdWasmPlugin(): Plugin {
         }
       }
 
-      for (const [, basename] of assets) {
-        for (const destinationDir of destinationDirs) {
-          const absoluteDestinationDir = path.resolve(config.root, destinationDir);
-          mkdirSync(absoluteDestinationDir, { recursive: true });
-          for (const absolutePath of assets.keys()) {
-            if (path.basename(absolutePath) !== basename) {
-              continue;
-            }
-            copyFileSync(absolutePath, path.join(absoluteDestinationDir, basename));
+      for (const destinationDir of destinationDirs) {
+        const absoluteDestinationDir = path.resolve(config.root, destinationDir);
+        mkdirSync(absoluteDestinationDir, { recursive: true });
+
+        for (const [absolutePath, basename] of assets) {
+          copyFileSync(absolutePath, path.join(absoluteDestinationDir, basename));
+
+          // The emscripten glue, copied next to the wasm it pairs with (see the plugin doc). Its
+          // emitted name is always the wasm's with a `.js` extension, because that is the literal
+          // `importName` Prisma's runtime resolves against the wasm's own location.
+          const glueSource = absolutePath.replace(/\.wasm$/, ".js");
+          if (existsSync(glueSource)) {
+            copyFileSync(glueSource, path.join(absoluteDestinationDir, basename.replace(/\.wasm$/, ".js")));
           }
         }
       }
