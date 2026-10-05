@@ -30,6 +30,7 @@ const setTestEnv = (overrides: Record<string, string | undefined> = {}) => {
     BETTER_AUTH_URL: undefined,
     NEXTAUTH_SECRET: undefined,
     NEXTAUTH_URL: undefined,
+    TRUSTED_ORIGINS: undefined,
     ...overrides,
   };
 };
@@ -110,6 +111,33 @@ describe("auth secret and URL resolution", () => {
     const { AUTH_TRUSTED_ORIGINS } = await loadConstants();
 
     expect(AUTH_TRUSTED_ORIGINS).toStrictEqual([]);
+  });
+
+  test("trusts the extra hostnames in TRUSTED_ORIGINS, de-duplicated and scheme-coerced", async () => {
+    // A deployment reachable on more than one hostname — a second domain, a customer domain, a CDN in
+    // front of the origin — has to list each one, or Better Auth rejects sign-in on it with
+    // "Invalid origin". A bare hostname is coerced like the single-URL variables, and a hostname that
+    // already appears as an auth URL must not be trusted twice.
+    setTestEnv({
+      BETTER_AUTH_URL: "https://auth.example.com",
+      TRUSTED_ORIGINS: "https://cdn.example.com, https://auth.example.com,app.customer.com",
+    });
+
+    const { AUTH_TRUSTED_ORIGINS } = await loadConstants();
+
+    expect(AUTH_TRUSTED_ORIGINS).toStrictEqual([
+      "https://auth.example.com",
+      "https://cdn.example.com",
+      "https://app.customer.com",
+    ]);
+  });
+
+  test("a blank TRUSTED_ORIGINS adds no origins", async () => {
+    setTestEnv({ BETTER_AUTH_URL: "https://auth.example.com", TRUSTED_ORIGINS: "  ,  " });
+
+    const { AUTH_TRUSTED_ORIGINS } = await loadConstants();
+
+    expect(AUTH_TRUSTED_ORIGINS).toStrictEqual(["https://auth.example.com"]);
   });
 
   describe("an empty or blank value counts as unset", () => {

@@ -230,6 +230,23 @@ const coerceToAbsoluteUrl = (value: unknown): unknown => {
 };
 const ZOptionalAbsoluteUrl = z.preprocess(coerceToAbsoluteUrl, z.url().optional());
 /**
+ * A comma-separated list of extra absolute URLs. Blank entries are dropped, and each entry goes
+ * through the same scheme coercion as the single-URL variables, so `a.example.com,b.example.com` is
+ * as valid as the fully-qualified form. An all-blank value normalizes to unset, not to `[]`.
+ */
+const ZOptionalUrlList = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const entries = value
+    .split(",")
+    .map((entry) => coerceToAbsoluteUrl(entry))
+    .filter((entry): entry is string => typeof entry === "string");
+
+  return entries.length > 0 ? entries : undefined;
+}, z.array(z.url()).optional());
+/**
  * Blank normalizes to unset, but a non-blank value is kept VERBATIM — no `.trim()`, which in zod is a
  * transform and would rewrite the parsed value. For a secret that is fatal: an instance whose value
  * carries a trailing newline (what `kubectl create secret --from-file` stores, and what the chart
@@ -524,6 +541,11 @@ const parsedEnv = createEnv({
     // instead (`warnOnAuthSecretRisks`).
     BETTER_AUTH_SECRET: ZOptionalVerbatimSecret,
     BETTER_AUTH_URL: ZOptionalAbsoluteUrl,
+    // Extra browser origins this deployment is served from, beyond BETTER_AUTH_URL/NEXTAUTH_URL — a
+    // second hostname, a customer domain, or a CDN that pulls from the origin. Better Auth fails its
+    // origin check with "Invalid origin" for any hostname it does not recognise, so every hostname a
+    // browser can reach the app on has to appear here or be an auth URL itself.
+    TRUSTED_ORIGINS: ZOptionalUrlList,
     MCP_OAUTH_JWKS_URL: ZMcpOauthJwksUrl.optional(),
     MAIL_FROM_NAME: z.string().optional(),
     NOTION_OAUTH_CLIENT_ID: z.string().optional(),
@@ -638,6 +660,7 @@ const parsedEnv = createEnv({
     AZUREAD_TENANT_ID: process.env.AZUREAD_TENANT_ID,
     BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
     BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
+    TRUSTED_ORIGINS: process.env.TRUSTED_ORIGINS,
     MCP_OAUTH_JWKS_URL: process.env.MCP_OAUTH_JWKS_URL,
     BREVO_API_KEY: process.env.BREVO_API_KEY,
     BREVO_LIST_ID: process.env.BREVO_LIST_ID,

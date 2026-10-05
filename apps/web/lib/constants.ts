@@ -160,17 +160,24 @@ export const AUTH_URL = firstConfigured(env.BETTER_AUTH_URL, env.NEXTAUTH_URL);
 
 /**
  * Every configured auth origin, not just the winning one: an instance mid-rename has both set, and both
- * have to stay trusted or Better Auth's CSRF/origin check rejects requests arriving on the other.
+ * have to stay trusted or Better Auth's CSRF/origin check rejects requests arriving on the other. On top
+ * of those two, `TRUSTED_ORIGINS` lists any additional hostname the deployment answers on — a customer
+ * domain, or a CDN that pulls from this origin — because Better Auth rejects every unlisted `Origin` with
+ * "Invalid origin".
  *
- * De-duplicated because the managed paths set both names to the same value — the chart writes both keys
- * from one `$webappUrl`, and the one-click installer seds both to the same domain — so the common case is
- * one origin listed twice.
+ * De-duplicated because the managed paths set both auth names to the same value — the chart writes both
+ * keys from one `$webappUrl`, and the one-click installer seds both to the same domain — so the common
+ * case is one origin listed twice, and an operator may well repeat a hostname in `TRUSTED_ORIGINS`.
  *
  * The explicit type predicate is load-bearing — `.filter(Boolean)` does not narrow
  * `(string | undefined)[]` to the `string[]` that `trustedOrigins` requires.
  */
 export const AUTH_TRUSTED_ORIGINS = [
-  ...new Set([env.BETTER_AUTH_URL, env.NEXTAUTH_URL].filter((url): url is string => Boolean(url?.trim()))),
+  ...new Set(
+    [env.BETTER_AUTH_URL, env.NEXTAUTH_URL, ...(env.TRUSTED_ORIGINS ?? [])].filter((url): url is string =>
+      Boolean(url?.trim())
+    )
+  ),
 ];
 
 export const ITEMS_PER_PAGE = 30;
