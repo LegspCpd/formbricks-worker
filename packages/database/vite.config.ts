@@ -55,6 +55,11 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
           "scripts/apply-migrations": resolve(__dirname, "src/scripts/apply-migrations.ts"),
           "scripts/create-saml-database": resolve(__dirname, "src/scripts/create-saml-database.ts"),
           "scripts/migration-runner": resolve(__dirname, "src/scripts/migration-runner.ts"),
+          "scripts/wasm-module-loader": resolve(__dirname, "src/scripts/wasm-module-loader.ts"),
+          "scripts/register-wasm-module-loader": resolve(
+            __dirname,
+            "src/scripts/register-wasm-module-loader.ts"
+          ),
           "scripts/wait-for-database": resolve(__dirname, "src/scripts/wait-for-database.ts"),
           "scripts/backfill-attribute-values": resolve(__dirname, "src/scripts/backfill-attribute-values.ts"),
           ...migrationEntries,

@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
 
@@ -68,6 +69,13 @@ const runDatabaseMigrations = (): void => {
 
   const repoRootDir = resolve(__dirname, "../../..");
   const migrationRunnerPath = resolve(repoRootDir, "packages/database/dist/scripts/apply-migrations.js");
+  // Prisma's `runtime = "cloudflare"` client loads its query compiler through the bundler-only
+  // `?module` convention, which plain Node cannot satisfy; this hook supplies the missing shape. See
+  // the module for the full story.
+  const wasmModuleLoaderPath = resolve(
+    repoRootDir,
+    "packages/database/dist/scripts/register-wasm-module-loader.js"
+  );
 
   try {
     // `pnpm build:cf:full` already built `@formbricks/database` (it is part of the `@formbricks/web^...`
@@ -75,7 +83,7 @@ const runDatabaseMigrations = (): void => {
     // burned a second full generate/build/tsc pass; on Cloudflare Workers Builds — 2 vCPU, 8 GB, 20 minutes
     // for the whole job — that is time the build cannot spare. Only build when the artifact is genuinely
     // missing, which keeps this script usable standalone.
-    if (!existsSync(migrationRunnerPath)) {
+    if (!existsSync(migrationRunnerPath) || !existsSync(wasmModuleLoaderPath)) {
       console.log("  Building @formbricks/database...");
       execSync("pnpm build --filter=@formbricks/database", {
         cwd: repoRootDir,
@@ -88,12 +96,19 @@ const runDatabaseMigrations = (): void => {
       throw new Error(`Migration runner not found at ${migrationRunnerPath}`);
     }
 
+    if (!existsSync(wasmModuleLoaderPath)) {
+      throw new Error(`Wasm module loader not found at ${wasmModuleLoaderPath}`);
+    }
+
     console.log("  Applying migrations with the Formbricks migration runner...");
-    execSync(`node ${JSON.stringify(migrationRunnerPath)}`, {
-      cwd: repoRootDir,
-      stdio: "inherit",
-      env: { ...process.env, DATABASE_URL: databaseUrl },
-    });
+    execSync(
+      `node --import ${JSON.stringify(pathToFileURL(wasmModuleLoaderPath).href)} ${JSON.stringify(migrationRunnerPath)}`,
+      {
+        cwd: repoRootDir,
+        stdio: "inherit",
+        env: { ...process.env, DATABASE_URL: databaseUrl },
+      }
+    );
 
     console.log("  Database migrations applied successfully");
   } catch (error) {
